@@ -12,7 +12,7 @@ A Work-In-Progress driver for Anycubic Color Engine Pro for SOVOL SV08 or any Kl
 
 ## Pinout
 
-![Molex](/.github/img/molex.png)
+![Pins](/img/connector.jpg)
 
 
-Connect them to a regular USB, no dark magic is required.
+Connect them to a regular USB.
