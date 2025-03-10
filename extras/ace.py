@@ -107,6 +107,9 @@ class DuckAce:
             'ACE_FILAMENT_INFO', self.cmd_ACE_FILAMENT_INFO,
             desc=self.cmd_ACE_FILAMENT_INFO_help)
         self.gcode.register_command(
+            'ACE_STATUS', self.cmd_ACE_STATUS,
+            desc=self.cmd_ACE_STATUS_help)
+        self.gcode.register_command(
             'ACE_DEBUG', self.cmd_ACE_DEBUG,
             desc=self.cmd_ACE_DEBUG_help)
 
@@ -533,10 +536,26 @@ class DuckAce:
             def callback(self, response):
                 self.gcode.respond_info(str(response))
                 logging.info('ACE: FILAMENT SLOT STATUS: ' + str(response))
+                self.gcode.respond_info('ACE:'+ str(response))
 
 
             self.send_request(request = {"method": "get_filament_info", "index": index}, callback = callback)
-            #self.send_request(request = {"method": "get_status"}, callback = callback)
+        except Exception as e:
+            self.gcode.respond_info('Error: ' + str(e))
+
+    cmd_ACE_STATUS_help = 'ACE_STATUS'
+    def cmd_ACE_STATUS(self, gcmd):
+        try:
+            def callback(self, response):
+                resp = response['result']['status']
+                logging.info('ACE: STATUS: ' + str(resp))
+                self.gcode.respond_info(str(resp))
+                if str(resp) == "busy":
+                    self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_status VALUE=1')
+                else:
+                    self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_status VALUE=0')
+
+            self.send_request(request = {"method": "get_status"}, callback = callback)
         except Exception as e:
             self.gcode.respond_info('Error: ' + str(e))
 
