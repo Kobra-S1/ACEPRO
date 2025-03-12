@@ -267,6 +267,7 @@ class DuckAce:
 
     def _handle_ready(self):
         logging.info('ACE: Connecting to ' + self.serial_name)
+        self.toolhead = self.printer.lookup_object('toolhead')
 
         # We can catch timing where ACE reboots itself when no data is available from host. We're avoiding it with this hack
         self._connected = False
@@ -287,7 +288,6 @@ class DuckAce:
             raise ValueError('ACE: Failed to connect to ' + self.serial_name)
 
         logging.info('ACE: Connected to ' + self.serial_name)
-        #logging.info(serial.VERSION)
 
         self._queue = queue.Queue()
         self._main_queue = queue.Queue()
@@ -304,7 +304,6 @@ class DuckAce:
 
         def info_callback(self, response):
             res = response['result']
-            logging.info('ACE: Data recieved: ' + str(res))
             self.gcode.respond_info('Connected ' + res['model'] + ' ' + res['firmware'])
 
         self.send_request(request = {"method": "get_info"}, callback = info_callback)
@@ -325,17 +324,28 @@ class DuckAce:
     def send_request(self, request, callback):
         self._queue.put([request, callback])
 
+    def wait_ace_ready(self):
+        while self._info['status'] != 'ready':
+            self.gcode.respond_info('Waiting ACE become ready')
+            self.dwell(delay=0.5)
+    
     
     def dwell(self, delay = 1., on_main = False):
-        toolhead = self.printer.lookup_object('toolhead')
         def main_callback():
-            toolhead.dwell(delay)
-        
+            self.toolhead.dwell(delay)
+
         if on_main:
             self._main_queue.put(main_callback)
         else:
             main_callback()
-    
+
+    def _extruder_move(self, length, speed):
+        pos = self.toolhead.get_position()
+        pos[3] += length
+        self.toolhead.move(pos, speed)
+        return pos[3]
+
+
 
     cmd_ACE_START_DRYING_help = 'Starts ACE Pro dryer'
     def cmd_ACE_START_DRYING(self, gcmd):
@@ -367,6 +377,17 @@ class DuckAce:
         self.send_request(request = {"method":"drying_stop"}, callback = callback)
 
 
+    def _enable_feed_assist(self, index):
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                raise ValueError("ACE Error: " + response['msg'])
+            else:
+                self._feed_assist_index = index
+                self.gcode.respond_info(str(response))
+
+        self.send_request(request = {"method": "start_feed_assist", "params": {"index": index}}, callback = callback)
+        self.dwell(delay = 0.7)
+
     cmd_ACE_ENABLE_FEED_ASSIST_help = 'Enables ACE feed assist'
     def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
         index = gcmd.get_int('INDEX')
@@ -374,16 +395,19 @@ class DuckAce:
         if index < 0 or index >= 4:
             raise gcmd.error('Wrong index')
 
+        self._enable_feed_assist(index)
+
+
+    def _disable_feed_assist(self, index):
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 raise gcmd.error("ACE Error: " + response['msg'])
-            
-            self._feed_assist_index = index
-            self.gcode.respond_info('Enabled ACE feed assist')
-        
-        self.send_request(request = {"method": "start_feed_assist", "params": {"index": index}}, callback = callback)
-        self.dwell(delay = 0.3)
 
+            self._feed_assist_index = -1
+            self.gcode.respond_info('Disabled ACE feed assist')
+
+        self.send_request(request = {"method": "stop_feed_assist", "params": {"index": index}}, callback = callback)
+        self.dwell(0.3)
 
     cmd_ACE_DISABLE_FEED_ASSIST_help = 'Disables ACE feed assist'
     def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
@@ -395,49 +419,17 @@ class DuckAce:
         if index < 0 or index >= 4:
             raise gcmd.error('Wrong index')
 
-        def callback(self, response):
-            if 'code' in response and response['code'] != 0:
-                raise gcmd.error("ACE Error: " + response['msg'])
-            
-            self._feed_assist_index = -1
-            self.gcode.respond_info('Disabled ACE feed assist')
-        
-        self.send_request(request = {"method": "stop_feed_assist", "params": {"index": index}}, callback = callback)
-        self.dwell(0.3)
+        self._disable_feed_assist(index)
 
 
-    def _park_to_toolhead(self, index):
+
+    def _feed(self, index, length, speed):
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 raise ValueError("ACE Error: " + response['msg'])
-            
-            self._assist_hit_count = 0
-            self._last_assist_count = 0
-            self._park_in_progress = True
-            self._park_index = index
-        
-        self.send_request(request = {"method": "start_feed_assist", "params": {"index": index}}, callback = callback)
-        self.dwell(delay = 0.3)
 
-
-    cmd_ACE_PARK_TO_TOOLHEAD_help = 'Parks filament from ACE to the toolhead'
-    def cmd_ACE_PARK_TO_TOOLHEAD(self, gcmd):
-        index = gcmd.get_int('INDEX')
-
-        if self._park_in_progress:
-            raise gcmd.error('Already parking to the toolhead')
-
-        if index < 0 or index >= 4:
-            raise gcmd.error('Wrong index')
-        
-        status = self._info['slots'][index]['status']
-        if status != 'ready':
-            #logging.info('ACE: ' + str(status))
-            self.gcode.run_script_from_command('_ACE_ON_EMPTY_ERROR INDEX=' + str(index))
-            return
-
-        self._park_to_toolhead(index)
-
+        self.send_request(request = {"method": "feed_filament", "params": {"index": index, "length": length, "speed": speed}}, callback = callback)
+        self.dwell(delay = (length / speed) + 0.1)
 
     cmd_ACE_FEED_help = 'Feeds filament from ACE'
     def cmd_ACE_FEED(self, gcmd):
@@ -452,13 +444,19 @@ class DuckAce:
         if speed <= 0:
             raise gcmd.error('Wrong speed')
 
+        self._feed(index, length, speed)
+        self.wait_ace_ready()
+
+
+    def _retract(self, index, length, speed):
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
-                raise gcmd.error("ACE Error: " + response['msg'])
-        
-        self.send_request(request = {"method": "feed_filament", "params": {"index": index, "length": length, "speed": speed}}, callback = callback)
-        self.dwell(delay = (length / speed) + 0.1)
+                raise ValueError("ACE Error: " + response['msg'])
 
+        self.send_request(
+            request={"method": "unwind_filament", "params": {"index": index, "length": length, "speed": speed}},
+            callback=callback)
+        self.dwell(delay=(length / speed) + 0.1)
 
     cmd_ACE_RETRACT_help = 'Retracts filament back to ACE'
     def cmd_ACE_RETRACT(self, gcmd):
@@ -473,13 +471,35 @@ class DuckAce:
         if speed <= 0:
             raise gcmd.error('Wrong speed')
 
-        def callback(self, response):
-            if 'code' in response and response['code'] != 0:
-                raise gcmd.error("ACE Error: " + response['msg'])
-        
-        self.send_request(request = {"method": "unwind_filament", "params": {"index": index, "length": length, "speed": speed}}, callback = callback)
-        self.dwell(delay = (length / speed) + 0.1)
+        self._retract(index, length, speed)
+        self.wait_ace_ready()
 
+    def _park_to_toolhead(self, tool):
+        #toolhead = self.printer.lookup_object('toolhead')
+        #pos = toolhead.get_position()
+
+        self._enable_feed_assist(tool)
+        
+        
+
+
+    cmd_ACE_PARK_TO_TOOLHEAD_help = 'Parks filament from ACE to the toolhead'
+    def cmd_ACE_PARK_TO_TOOLHEAD(self, gcmd):
+        index = gcmd.get_int('INDEX')
+
+        if self._park_in_progress:
+            raise gcmd.error('Already parking to the toolhead')
+
+        if index < 0 or index >= 4:
+            raise gcmd.error('Wrong index')
+        
+        status = self._info['slots'][index]['status']
+        if status != 'ready':
+            self.gcode.run_script_from_command('_ACE_ON_EMPTY_ERROR INDEX=' + str(index))
+            return
+
+        self._park_to_toolhead(index)
+        self.wait_ace_ready()
 
     cmd_ACE_CHANGE_TOOL_help = 'Changes tool'
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
@@ -505,6 +525,7 @@ class DuckAce:
         self.variables['ace_current_index'] = tool
         # Force save to disk
         self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(tool))
+        self.wait_ace_ready()
 
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
@@ -512,18 +533,24 @@ class DuckAce:
         
         logging.info('ACE: Toolchange ' + str(was) + ' => ' + str(tool))
         if was != -1:
-            self.send_request(request = {"method": "unwind_filament", "params": {"index": was, "length": self.toolchange_retract_length, "speed": self.retract_speed}}, callback = callback)
-            self.dwell(delay = (self.toolchange_retract_length / self.retract_speed) + 0.1)
+            self.gcode.run_script_from_command('CUT')
+            #KELNNENE TUDNI? HOGY A HOL A FEJ!
+            self._disable_feed_assist(was)
+            self.wait_ace_ready()
 
-            while self._info['status'] != 'ready':
-                self.dwell(delay = 1.0)
+            self._extruder_move(-70, 5)
+            self._retract(was, self.toolchange_retract_length, self.retract_speed)
+
+            self.wait_ace_ready()
             
             self.dwell(delay = 0.25)
 
             if tool != -1:
-                self.gcode.run_script_from_command('ACE_PARK_TO_TOOLHEAD INDEX=' + str(tool))
-            else:
-                self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(was) + ' TO=' + str(tool))
+                self._feed(tool, self.toolchange_retract_length-5, self.retract_speed)
+                self.wait_ace_ready()
+
+                self._park_to_toolhead(tool)
+                self._extruder_move(70, 5)
         else:
             self._park_to_toolhead(tool)
 
