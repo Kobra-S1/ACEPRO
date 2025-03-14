@@ -394,7 +394,7 @@ class DuckAce:
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
         self.toolhead.wait_moves()
-        new_pos[0] = 15
+        new_pos[0] = 13
         new_pos[1] = 0
         new_pos[2] = None
         speed = 30
@@ -409,7 +409,7 @@ class DuckAce:
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
         self.toolhead.wait_moves()
-        new_pos[0] = 15
+        new_pos[0] = 13
         new_pos[1] = 0
         new_pos[2] = None
         speed = 30
