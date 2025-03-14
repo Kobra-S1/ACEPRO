@@ -348,14 +348,14 @@ class DuckAce:
         self.wait_ace_ready()
         pos = self.toolhead.get_position()
         pos[3] += length
+        self.gcode.respond_info('ACE: Start Move Extruder')
         self.toolhead.move(pos, speed)
         self.toolhead.wait_moves()
-        self.gcode.respond_info('ACE: Move Extruder')
-        current_pos = self.toolhead.get_position()
-        new_pos = list(current_pos)
-        new_pos[3] = 0.0
-        # Set the new position with reset E
-        self.toolhead.set_position(new_pos)
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command("G92 E0")
+        gcode.run_script_from_command("M400")
+        self.gcode.respond_info('ACE: Finish Move Extruder')
+
 
     def _extruder_park(self, x=None, y=None, z=None, speed=None):
         # Get current position
@@ -629,10 +629,14 @@ class DuckAce:
                 self._park_to_toolhead(tool)
                 self.dwell(delay = 3)
                 self._extruder_move(170, 5)
+                self.gcode.respond_info('ACE: Finish extrude')
+
         else:
             self._park_to_toolhead(tool)
             self.dwell(delay = 3)
-            self._extruder_move(200, 5)
+            self._extruder_move(170, 5)
+            self.gcode.respond_info('ACE: Finish extrude')
+
 
 
 
@@ -668,7 +672,7 @@ class DuckAce:
 
 
     cmd_ACE_INIT_help = 'ACE_INIT (Return ACE to unloaded position)'
-    def cmd_ACE_INIT(self):
+    def cmd_ACE_INIT(self, gcmd):
         self._extruder_park(x=25, y=360, z=None, speed=400)
         extruder = self.printer.lookup_object('extruder')
         heater = extruder.get_heater()
@@ -696,6 +700,8 @@ class DuckAce:
             self._disable_feed_assist(ace_current_index)
             self.wait_ace_ready()
             self._extruder_move(-120, 5)
+            self.gcode.respond_info('ACE: Finish extrude')
+
             self._retract(ace_current_index, self.toolchange_retract_length, self.retract_speed)
             self.wait_ace_ready()
             save_vars.cmd_SAVE_VARIABLE(self.printer.lookup_object('gcode'), 'VARIABLE=ace_current_index VALUE=-1')
