@@ -351,12 +351,11 @@ class DuckAce:
         self.toolhead.move(pos, speed)
         self.toolhead.wait_moves()
         self.gcode.respond_info('ACE: Move Extruder')
+        current_pos = self.toolhead.get_position()
         new_pos = list(current_pos)
         new_pos[3] = 0.0
         # Set the new position with reset E
-        current_pos = self.toolhead.get_position()
         self.toolhead.set_position(new_pos)
-        #return pos[3]
 
     def _extruder_park(self, x=None, y=None, z=None, speed=None):
         # Get current position
