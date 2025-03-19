@@ -12,10 +12,16 @@ class DuckAce:
         self.variables = self.printer.lookup_object('save_variables').allVariables
         
         self.serial_name = config.get('serial', '/dev/ttyACM2')
+        self.cut_position_x1 = config.get('cut_position_x1', 25)
+        self.cut_position_y1 = config.get('cut_position_y1', 0)
+        self.cut_position_x2 = config.get('cut_position_x2', 12)
+        self.cut_position_y2 = config.get('cut_position_y2', 0)
+        self.purge_extrude = config.get('purge_extrude',170 )
+        self.unload_extrude = config.get('unload_extrude', 100 )
         self.baud = config.getint('baud', 115200)
         self.feed_speed = config.getint('feed_speed', 50)
         self.retract_speed = config.getint('retract_speed', 50)
-        self.toolchange_retract_length = config.getint('toolchange_retract_length', 100)
+        self.toolchange_retract_length = config.getint('toolchange_retract_length', 200)
         self.park_hit_count = config.getint('park_hit_count', 5)
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
         self.disable_assist_after_toolchange = config.getboolean('disable_assist_after_toolchange', True)
@@ -293,6 +299,7 @@ class DuckAce:
             raise ValueError('ACE: Failed to connect to ' + self.serial_name)
 
         logging.info('ACE: Connected to ' + self.serial_name)
+        
 
         self._queue = queue.Queue()
         self._main_queue = queue.Queue()
@@ -356,6 +363,20 @@ class DuckAce:
         gcode.run_script_from_command("M400")
         self.gcode.respond_info('ACE: Finish Move Extruder')
 
+    def _extruder_unload(self, length, speed):
+        self.wait_ace_ready()
+        pos = self.toolhead.get_position()
+        pos[3] -= length
+        self.gcode.respond_info('ACE: Start Unload Extruder')
+        self.toolhead.move(pos, speed)
+        self.toolhead.wait_moves()
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command("G92 E0")
+        gcode.run_script_from_command("M400")
+        self.gcode.respond_info('ACE: Finish Unload Extruder')
+
+
+
 
     def _extruder_park(self, x=None, y=None, z=None, speed=None):
         # Get current position
@@ -380,46 +401,44 @@ class DuckAce:
         self.toolhead.wait_moves()
 
 
-    def _extruder_cut(self):
+    def _extruder_cut(self, x1=None, y1=None, x2=None, y2=None):
         # Get current position
         current_pos = self.toolhead.get_position()
-        
-        # Create new position by updating only the values that were provided
         new_pos = list(current_pos)
-        new_pos[0] = 25
-        new_pos[1] = 0
+        new_pos[0] = x1
+        new_pos[1] = y1
         new_pos[2] = None
-        speed = 400
+        speed = 100
         self.gcode.respond_info('ACE: Move CUT')
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
         self.toolhead.wait_moves()
-        new_pos[0] = 13
-        new_pos[1] = 0
+        new_pos[0] = x2
+        new_pos[1] = y2
         new_pos[2] = None
-        speed = 30
+        speed = 100
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
         self.toolhead.wait_moves()
-        new_pos[0] = 25
-        new_pos[1] = 0
+        new_pos[0] = x1
+        new_pos[1] = y1
         new_pos[2] = None
-        speed = 300
+        speed = 100
         self.gcode.respond_info('ACE: Move CUT')
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
         self.toolhead.wait_moves()
-        new_pos[0] = 13
-        new_pos[1] = 0
+        new_pos[0] = x2
+        new_pos[1] = y2
         new_pos[2] = None
-        speed = 30
+        speed = 100
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
         self.toolhead.wait_moves()
-        new_pos[0] = 35
-        new_pos[1] = 0
+        new_pos[0] = x1
+        new_pos[1] = y1
         new_pos[2] = None
-        speed = 300
+        speed = 100
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
         self.toolhead.wait_moves()
@@ -557,7 +576,7 @@ class DuckAce:
     def _park_to_toolhead(self, tool):
         self._enable_feed_assist(tool)
         self.wait_ace_ready()
-        self.dwell(delay=3)
+        self.dwell(delay=2)
         self.wait_ace_ready()
 
     cmd_ACE_PARK_TO_TOOLHEAD_help = 'Parks filament from ACE to the toolhead'
@@ -611,11 +630,11 @@ class DuckAce:
         logging.info('ACE: Toolchange ' + str(was) + ' => ' + str(tool))
         if was != -1:
             self._extruder_park(x=25, y=360, z=None, speed=400)
-            self._extruder_cut()
+            self._extruder_cut(x1=self.cut_position_x1, y1=self.cut_position_y1, x2=self.cut_position_x2, y2=self.cut_position_y2)
             self._extruder_park(x=25, y=360, z=None, speed=400)
             self._disable_feed_assist(was)
             self.wait_ace_ready()
-            self._extruder_move(-120, 5)
+            self._extruder_unload(int(self.unload_extrude), 5)
             self._retract(was, self.toolchange_retract_length, self.retract_speed)
 
             self.wait_ace_ready()
@@ -627,14 +646,14 @@ class DuckAce:
                 self.wait_ace_ready()
 
                 self._park_to_toolhead(tool)
-                self.dwell(delay = 3)
-                self._extruder_move(170, 5)
+                self.dwell(delay = 2)
+                self._extruder_move(int(self.purge_extrude), 5)
                 self.gcode.respond_info('ACE: Finish extrude')
 
         else:
             self._park_to_toolhead(tool)
-            self.dwell(delay = 3)
-            self._extruder_move(170, 5)
+            self.dwell(delay = 2)
+            self._extruder_move(int(self.purge_extrude), 5)
             self.gcode.respond_info('ACE: Finish extrude')
 
 
@@ -699,7 +718,7 @@ class DuckAce:
             ace_current_index = saved_vars['variables']['ace_current_index']
             self._disable_feed_assist(ace_current_index)
             self.wait_ace_ready()
-            self._extruder_move(-120, 5)
+            self._extruder_unload(self.unload_extrude, 5)
             self.gcode.respond_info('ACE: Finish extrude')
 
             self._retract(ace_current_index, self.toolchange_retract_length, self.retract_speed)
