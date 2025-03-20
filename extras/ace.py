@@ -12,12 +12,13 @@ class DuckAce:
         self.variables = self.printer.lookup_object('save_variables').allVariables
         
         self.serial_name = config.get('serial', '/dev/ttyACM2')
-        self.cut_position_x1 = config.get('cut_position_x1', 25)
+        self.cut_position_x1 = config.get('cut_position_x1', 19)
         self.cut_position_y1 = config.get('cut_position_y1', 0)
-        self.cut_position_x2 = config.get('cut_position_x2', 12)
+        self.cut_position_x2 = config.get('cut_position_x2', 9)
         self.cut_position_y2 = config.get('cut_position_y2', 0)
-        self.purge_extrude = config.get('purge_extrude',170 )
-        self.unload_extrude = config.get('unload_extrude', 100 )
+        self.cut_speed = config.get('cut_speed', 60)
+        self.purge_extrude = config.get('purge_extrude',100 )
+        self.unload_extrude = config.get('unload_extrude', -100 )
         self.baud = config.getint('baud', 115200)
         self.feed_speed = config.getint('feed_speed', 50)
         self.retract_speed = config.getint('retract_speed', 50)
@@ -110,9 +111,6 @@ class DuckAce:
             'ACE_CHANGE_TOOL', self.cmd_ACE_CHANGE_TOOL,
             desc=self.cmd_ACE_CHANGE_TOOL_help)
         self.gcode.register_command(
-            'ACE_INIT', self.cmd_ACE_INIT,
-            desc=self.cmd_ACE_INIT_help)
-        self.gcode.register_command(
             'ACE_FILAMENT_INFO', self.cmd_ACE_FILAMENT_INFO,
             desc=self.cmd_ACE_FILAMENT_INFO_help)
         self.gcode.register_command(
@@ -138,7 +136,7 @@ class DuckAce:
         if not 'id' in request:
             request['id'] = self._request_id
             self._request_id += 1
-            if self._request_id >= 300000:
+            if self._request_id >= 16382:
                 self._request_id = 0
 
         payload = json.dumps(request)
@@ -358,25 +356,8 @@ class DuckAce:
         self.gcode.respond_info('ACE: Start Move Extruder')
         self.toolhead.move(pos, speed)
         self.toolhead.wait_moves()
-        gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command("G92 E0")
-        gcode.run_script_from_command("M400")
         self.gcode.respond_info('ACE: Finish Move Extruder')
-
-    def _extruder_unload(self, length, speed):
-        self.wait_ace_ready()
-        pos = self.toolhead.get_position()
-        pos[3] -= length
-        self.gcode.respond_info('ACE: Start Unload Extruder')
-        self.toolhead.move(pos, speed)
-        self.toolhead.wait_moves()
-        gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command("G92 E0")
-        gcode.run_script_from_command("M400")
-        self.gcode.respond_info('ACE: Finish Unload Extruder')
-
-
-
+        return pos[3]
 
     def _extruder_park(self, x=None, y=None, z=None, speed=None):
         # Get current position
@@ -408,7 +389,7 @@ class DuckAce:
         new_pos[0] = x1
         new_pos[1] = y1
         new_pos[2] = None
-        speed = 100
+        speed = int(self.cut_speed)
         self.gcode.respond_info('ACE: Move CUT')
         self.toolhead.manual_move(new_pos, speed)
         # Wait for the move to complete
@@ -630,11 +611,11 @@ class DuckAce:
         logging.info('ACE: Toolchange ' + str(was) + ' => ' + str(tool))
         if was != -1:
             self._extruder_park(x=25, y=360, z=None, speed=400)
-            self._extruder_cut(x1=self.cut_position_x1, y1=self.cut_position_y1, x2=self.cut_position_x2, y2=self.cut_position_y2)
+            self._extruder_cut(x1=int(self.cut_position_x1), y1=int(self.cut_position_y1), x2=int(self.cut_position_x2), y2=int(self.cut_position_y2))
             self._extruder_park(x=25, y=360, z=None, speed=400)
             self._disable_feed_assist(was)
             self.wait_ace_ready()
-            self._extruder_unload(int(self.unload_extrude), 5)
+            self._extruder_move(int(self.unload_extrude), 5)
             self._retract(was, self.toolchange_retract_length, self.retract_speed)
 
             self.wait_ace_ready()
@@ -690,40 +671,6 @@ class DuckAce:
             self.gcode.respond_info('Error: ' + str(e))
 
 
-    cmd_ACE_INIT_help = 'ACE_INIT (Return ACE to unloaded position)'
-    def cmd_ACE_INIT(self, gcmd):
-        self._extruder_park(x=25, y=360, z=None, speed=400)
-        extruder = self.printer.lookup_object('extruder')
-        heater = extruder.get_heater()
-        temp=140
-        # Set the target temperature
-        heater.set_temp(temp)
-        # If you want to wait for temperature (similar to M109)
-        reactor = self.printer.get_reactor()
-        eventtime = reactor.monotonic()
-        while True:
-            if heater.check_busy(eventtime):
-                # Still heating
-                reactor.pause(reactor.monotonic() + 0.1)  # Wait 100ms
-                eventtime = reactor.monotonic()
-            else:
-                # Target temperature reached
-                break
-            self._extruder_cut()
-            self._extruder_park(x=25, y=360, z=None, speed=400)
-            configfile = self.printer.lookup_object('configfile')
-            # Access the saved variables
-            saved_vars = configfile.get_status(None)['save_variables']
-            # Now you can access your specific variable
-            ace_current_index = saved_vars['variables']['ace_current_index']
-            self._disable_feed_assist(ace_current_index)
-            self.wait_ace_ready()
-            self._extruder_unload(self.unload_extrude, 5)
-            self.gcode.respond_info('ACE: Finish extrude')
-
-            self._retract(ace_current_index, self.toolchange_retract_length, self.retract_speed)
-            self.wait_ace_ready()
-            save_vars.cmd_SAVE_VARIABLE(self.printer.lookup_object('gcode'), 'VARIABLE=ace_current_index VALUE=-1')
 
     cmd_ACE_DEBUG_help = 'ACE Debug'
     def cmd_ACE_DEBUG(self, gcmd):
