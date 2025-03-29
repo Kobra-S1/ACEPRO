@@ -555,10 +555,17 @@ class DuckAce:
         self.wait_ace_ready()
 
     def _park_to_toolhead(self, tool):
+        self._assist_hit_count = 0
+        self._last_assist_count = 0
+        self._park_in_progress = True
+        self._park_index = tool
+        while self._park_in_progress:
+             self.gcode.respond_info('ACE: Loading to toolhead')
+             self.dwell(delay=2)
+        
         self._enable_feed_assist(tool)
         self.wait_ace_ready()
-        self.dwell(delay=2)
-        self.wait_ace_ready()
+        self.gcode.respond_info('ACE: Finished loading')
 
     cmd_ACE_PARK_TO_TOOLHEAD_help = 'Parks filament from ACE to the toolhead'
     def cmd_ACE_PARK_TO_TOOLHEAD(self, gcmd):
@@ -627,13 +634,13 @@ class DuckAce:
                 self.wait_ace_ready()
 
                 self._park_to_toolhead(tool)
-                self.dwell(delay = 2)
+                self.dwell(delay = 0.5)
                 self._extruder_move(int(self.purge_extrude), 5)
                 self.gcode.respond_info('ACE: Finish extrude')
 
         else:
             self._park_to_toolhead(tool)
-            self.dwell(delay = 2)
+            self.dwell(delay = 0.5)
             self._extruder_move(int(self.purge_extrude), 5)
             self.gcode.respond_info('ACE: Finish extrude')
 
