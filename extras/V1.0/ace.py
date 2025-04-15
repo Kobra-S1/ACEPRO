@@ -561,7 +561,7 @@ class DuckAce:
         self._park_index = tool
         while self._park_in_progress:
              self.gcode.respond_info('ACE: Loading to toolhead')
-             self.dwell(delay=1)
+             self.dwell(delay=2)
         
         self._enable_feed_assist(tool)
         self.wait_ace_ready()
@@ -588,6 +588,7 @@ class DuckAce:
     cmd_ACE_CHANGE_TOOL_help = 'Changes tool'
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
         tool = gcmd.get_int('TOOL')
+
         if tool < -1 or tool >= 4:
             raise gcmd.error('Wrong tool')
 
@@ -601,23 +602,26 @@ class DuckAce:
             if status != 'ready':
                 self.gcode.run_script_from_command('_ACE_ON_EMPTY_ERROR INDEX=' + str(tool))
                 return
-        self._park_in_progress = True
+        self._extruder_park(x=25, y=360, z=None, speed=400)
         self.gcode.run_script_from_command('_ACE_PRE_TOOLCHANGE FROM=' + str(was) + ' TO=' + str(tool))
-        #up a bit and move to park position save state
-
+        self._park_is_toolchange = True
         self._park_previous_tool = was
+        self.variables['ace_current_index'] = tool
+        # Force save to disk
+        self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(tool))
+        self.wait_ace_ready()
 
-        #def callback(self, response):
-        #    if 'code' in response and response['code'] != 0:
-        #        raise gcmd.error("ACE Error: " + response['msg'])
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                raise gcmd.error("ACE Error: " + response['msg'])
         
         logging.info('ACE: Toolchange ' + str(was) + ' => ' + str(tool))
         if was != -1:
-            self._disable_feed_assist(was)
-            self.wait_ace_ready()
             self._extruder_park(x=25, y=360, z=None, speed=400)
             self._extruder_cut(x1=int(self.cut_position_x1), y1=int(self.cut_position_y1), x2=int(self.cut_position_x2), y2=int(self.cut_position_y2))
             self._extruder_park(x=25, y=360, z=None, speed=400)
+            self._disable_feed_assist(was)
+            self.wait_ace_ready()
             self._extruder_move(int(self.unload_extrude), 5)
             self._retract(was, self.toolchange_retract_length, self.retract_speed)
 
@@ -625,28 +629,22 @@ class DuckAce:
             
             self.dwell(delay = 0.25)
             if tool != -1:
-                self._park_to_toolhead(tool)
+                self._extruder_park(x=25, y=360, z=None, speed=400)
+                self._feed(tool, self.toolchange_retract_length-5, self.retract_speed)
                 self.wait_ace_ready()
+
+                self._park_to_toolhead(tool)
+                self.dwell(delay = 0.5)
                 self._extruder_move(int(self.purge_extrude), 5)
                 self.gcode.respond_info('ACE: Finish extrude')
 
         else:
-            self._extruder_park(x=25, y=360, z=None, speed=400)
             self._park_to_toolhead(tool)
-            self.wait_ace_ready()
+            self.dwell(delay = 0.5)
             self._extruder_move(int(self.purge_extrude), 5)
             self.gcode.respond_info('ACE: Finish extrude')
 
-        gcode_move = self.printer.lookup_object('gcode_move')
-        gcode_move.reset_last_position()
-        self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(was) + ' TO=' + str(tool))
-        #Get back to print
-        self.variables['ace_current_index'] = tool
-        gcode_move.reset_last_position()
-        # Force save to disk
-        self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(tool))
-        self._park_in_progress = False
-        gcmd.respond_info(f"Tool {tool} load")
+
 
 
     cmd_ACE_FILAMENT_INFO_help = 'ACE_FILAMENT_INFO INDEX='
