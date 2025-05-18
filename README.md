@@ -7,46 +7,26 @@ AND
 https://github.com/utkabobr/DuckACE.git
 
 
-#What is this
+#The driver
 
 A Work-In-Progress driver for Anycubic Color Engine Pro for SOVOL SV08 or any Klipper based 3D Printer
-- What is working:
- * Filament load / unload
- * Filament automatic feed
- * Set cutting position
- * Set load amount of filament
 
-- What is not working (yet)
- * detect filament runout
- * proper error handling
- * continue printing on runout from another spool
- * Klipper screen interface
- * Mainsail interface
- * Install script
-
-<!-- GETTING STARTED -->
-## Getting Started
-
-You will need:
-	Anycubic ACE Pro
-	Sovol SV08 --> no mainline klipper esential
-	Filament spliter (I used this: https://wiki.bambulab.com/en/parts-acc/ptfe_adapter)
-	Filament cutter on the extruder. (I used this: https://www.printables.com/model/1099177-sovol-sv08-head-filament-cutting-mod)
-	Filament purge bucket: (https://www.printables.com/model/1209163-sv08-purge-bucket)
-	A USB cable trimmed end
-
+## Pinout
 
 ![Pins](/img/connector.png)
 
+Connect them to a regular USB.
 
-Connect them to a regular USB port of the printer.
+You will need a filament sensor on toolhead and one at the end of the splitter!!! 
 
+I use BAMBULAB filament splitter.
+
+For hotend use <a href="https://www.printables.com/model/1133951-v4-toolhead-ideal-for-mmu-for-sv08-and-any-voron-g">Nadir extruder</a>
+
+I used <a href="https://www.printables.com/model/1099177-sovol-sv08-head-filament-cutting-mod">Mr Goodman BAMBULAB hotend with cutter</a> mod.
 
 #INSTALL
 
-Do the HW install this not covered here.
-
- 
 ##Clone rep
 clone to the home driectory of the Klipper usually /home/<user>/
 git clone https://github.com/szkrisz/ACEPROSV08.git
@@ -75,5 +55,3 @@ pip3 install pyserial --upgrade
 ##Include ace.cfg in the printer.cfg
 
 [include ace.cfg]
-
-Modify ace.cfg and set corresponding data.
