@@ -24,7 +24,6 @@ class BunnyAce:
         self.feed_speed = config.getint('feed_speed', 50)
         self.retract_speed = config.getint('retract_speed', 50)
         self.toolchange_retract_length = config.getint('toolchange_retract_length', 150)
-        self.toolchange_load_length = config.getint('toolchange_load_length', 630)
         self.toolhead_sensor_to_nozzle_length = config.getint('toolhead_sensor_to_nozzle', 0)
         # self.extruder_to_blade_length = config.getint('extruder_to_blade', None)
 
@@ -335,12 +334,6 @@ class BunnyAce:
                 self.reader_timer = self.reactor.register_timer(self._reader, self.reactor.NOW)
                 self.send_request(request={"method": "get_info"},
                                   callback=lambda self, response: self.gcode.respond_info(str(response)))
-                # --- Added: Check ace_current_index and enable feed assist if needed ---
-                ace_current_index = self.variables.get('ace_current_index', -1)
-                if ace_current_index != -1:
-                    self.gcode.respond_info(f'ACE: Re-enabling feed assist on reconnect for index {ace_current_index}')
-                    self._enable_feed_assist(ace_current_index)
-                # ---------------------------------------------------------------
                 self.reactor.unregister_timer(self.connect_timer)
                 return self.reactor.NEVER
         except serial.serialutil.SerialException:
@@ -483,7 +476,7 @@ class BunnyAce:
 
         self.wait_ace_ready()
 
-        self._feed(tool, self.toolchange_load_length, self.retract_speed)
+        self._feed(tool, self.toolchange_retract_length - 5, self.retract_speed)
         self.variables['ace_filament_pos'] = "bowden"
 
         self.wait_ace_ready()
