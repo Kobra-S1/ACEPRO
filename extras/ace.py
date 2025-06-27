@@ -88,6 +88,20 @@ class BunnyAce:
             ]
         }
 
+        # Add inventory for 4 slots
+        self.inventory = [
+            {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0} for _ in range(4)
+        ]
+        # Register inventory commands
+        self.gcode.register_command(
+            'ACE_SET_SLOT', self.cmd_ACE_SET_SLOT,
+            desc="Set slot inventory: INDEX= COLOR= MATERIAL= TEMP= | Set status to empty with EMPTY=1"
+        )
+        self.gcode.register_command(
+            'ACE_QUERY_SLOTS', self.cmd_ACE_QUERY_SLOTS,
+            desc="Query all slot inventory as JSON"
+        )
+
         self._create_mmu_sensor(config, extruder_sensor_pin, "extruder_sensor")
         self._create_mmu_sensor(config, toolhead_sensor_pin, "toolhead_sensor")
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
@@ -576,11 +590,49 @@ class BunnyAce:
         return None
 
     def cmd_ACE_DEBUG(self, gcmd):
-        self.gcode.respond_info(str(self.find_com_port('ACE')))
+        method = gcmd.get('METHOD')
+        params = gcmd.get('PARAMS', '{}')
+
+        try:
+            def callback(self, response):
+                self.gcode.respond_info(str(response))
+
+            self.send_request(request = {"method": method, "params": json.loads(params)}, callback = callback)
+        except Exception as e:
+            self.gcode.respond_info('Error: ' + str(e))
+        #self.gcode.respond_info(str(self.find_com_port('ACE')))
 
 
     def get_status(self, eventtime=None):
         return self._info
+
+    def cmd_ACE_SET_SLOT(self, gcmd):
+        idx = gcmd.get_int('INDEX')
+        if idx < 0 or idx >= 4:
+            raise gcmd.error('Invalid slot index')
+        if gcmd.get_int('EMPTY', 0):
+            self.inventory[idx] = {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0}
+            gcmd.respond_info(f"Slot {idx} set to empty")
+            return
+        color_str = gcmd.get('COLOR', None)
+        material = gcmd.get('MATERIAL', "")
+        temp = gcmd.get_int('TEMP', 0)
+        if not color_str or not material or temp <= 0:
+            raise gcmd.error('COLOR, MATERIAL, and TEMP must be set unless EMPTY=1')
+        color = [int(x) for x in color_str.split(',')]
+        if len(color) != 3:
+            raise gcmd.error('COLOR must be R,G,B')
+        self.inventory[idx] = {
+            "status": "ready",
+            "color": color,
+            "material": material,
+            "temp": temp
+        }
+        gcmd.respond_info(f"Slot {idx} set: color={color}, material={material}, temp={temp}")
+
+    def cmd_ACE_QUERY_SLOTS(self, gcmd):
+        import json
+        gcmd.respond_info(json.dumps(self.inventory))
 
 
 
