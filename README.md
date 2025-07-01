@@ -58,25 +58,42 @@ pip3 install pyserial --upgrade
 
 
 #############################################
+
+
 Endlesspool feature
+
 Switching sequent from starting slot to the next automatically Use up the loaded filaments during the print.
+
 To enable
 ACE_ENABLE_ENDLESS_SPOOL
+
 To disable:
 ACE_DISABLE_ENDLESS_SPOOL
+
+
 (If disabled the runout sensor will pause the print)
 
 
 The endless spool process now:
+
 Detects runout → Immediate response
+
 Disables feed assist on empty slot
+
 Feeds new filament until extruder sensor triggers
+
 Enables feed assist on new slot
+
 Updates and saves current tool index
+
 Continues printing seamlessly
 
+
 ##############################################
+
+
 Inventory managment:
+
 ACE_SET_SLOT:  Set slot inventory: INDEX= COLOR= MATERIAL= TEMP= | Set status to empty with EMPTY=1
 
 ACE_QUERY_SLOTS: Query all slot inventory as JSON
