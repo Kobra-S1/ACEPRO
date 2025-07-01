@@ -30,6 +30,13 @@ class BunnyAce:
 
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
 
+        # Endless spool configuration - load from persistent variables if available
+        saved_endless_spool_enabled = self.variables.get('ace_endless_spool_enabled', False)
+        
+        self.endless_spool_enabled = config.getboolean('endless_spool', saved_endless_spool_enabled)
+        self.endless_spool_in_progress = False
+        self.endless_spool_runout_detected = False
+
         self._callback_map = {}
         self.park_hit_count = 5
         self._feed_assist_index = -1
@@ -88,10 +95,14 @@ class BunnyAce:
             ]
         }
 
-        # Add inventory for 4 slots
-        self.inventory = [
-            {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0} for _ in range(4)
-        ]
+        # Add inventory for 4 slots - load from persistent variables if available
+        saved_inventory = self.variables.get('ace_inventory', None)
+        if saved_inventory:
+            self.inventory = saved_inventory
+        else:
+            self.inventory = [
+                {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0} for _ in range(4)
+            ]
         # Register inventory commands
         self.gcode.register_command(
             'ACE_SET_SLOT', self.cmd_ACE_SET_SLOT,
@@ -130,6 +141,21 @@ class BunnyAce:
         self.gcode.register_command(
             'ACE_CHANGE_TOOL', self.cmd_ACE_CHANGE_TOOL,
             desc=self.cmd_ACE_CHANGE_TOOL_help)
+        self.gcode.register_command(
+            'ACE_ENABLE_ENDLESS_SPOOL', self.cmd_ACE_ENABLE_ENDLESS_SPOOL,
+            desc=self.cmd_ACE_ENABLE_ENDLESS_SPOOL_help)
+        self.gcode.register_command(
+            'ACE_DISABLE_ENDLESS_SPOOL', self.cmd_ACE_DISABLE_ENDLESS_SPOOL,
+            desc=self.cmd_ACE_DISABLE_ENDLESS_SPOOL_help)
+        self.gcode.register_command(
+            'ACE_ENDLESS_SPOOL_STATUS', self.cmd_ACE_ENDLESS_SPOOL_STATUS,
+            desc=self.cmd_ACE_ENDLESS_SPOOL_STATUS_help)
+        self.gcode.register_command(
+            'ACE_SAVE_INVENTORY', self.cmd_ACE_SAVE_INVENTORY,
+            desc=self.cmd_ACE_SAVE_INVENTORY_help)
+        self.gcode.register_command(
+            'ACE_TEST_RUNOUT_SENSOR', self.cmd_ACE_TEST_RUNOUT_SENSOR,
+            desc=self.cmd_ACE_TEST_RUNOUT_SENSOR_help)
 
 
     def _calc_crc(self, buffer):
@@ -267,6 +293,11 @@ class BunnyAce:
         self._queue = queue.Queue()
         self._main_queue = queue.Queue()
         self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
+        # Start endless spool monitoring timer
+        if hasattr(self, 'endless_spool_enabled'):
+            self.endless_spool_timer = self.reactor.register_timer(self._endless_spool_monitor, self.reactor.NOW)
+            # Hook into gcode move events for broader extruder monitoring
+            self.printer.register_event_handler('toolhead:move', self._on_toolhead_move)
 
 
     def _handle_disconnect(self):
@@ -275,6 +306,9 @@ class BunnyAce:
         self._connected = False
         self.reactor.unregister_timer(self.writer_timer)
         self.reactor.unregister_timer(self.reader_timer)
+        # Stop endless spool monitoring
+        if hasattr(self, 'endless_spool_timer'):
+            self.reactor.unregister_timer(self.endless_spool_timer)
 
         self._queue = None
         self._main_queue = None
@@ -296,7 +330,68 @@ class BunnyAce:
         pos = self.toolhead.get_position()
         pos[3] += length
         self.toolhead.move(pos, speed)
+        
         return pos[3]
+
+    def _endless_spool_monitor(self, eventtime):
+        """Monitor for runout detection during printing"""
+        if not self.endless_spool_enabled or self._park_in_progress or self.endless_spool_in_progress:
+            return eventtime + 0.1
+
+        # Only monitor if we have an active tool and we're not already in runout state
+        current_tool = self.variables.get('ace_current_index', -1)
+        if current_tool == -1:
+            return eventtime + 0.1
+
+        # Check if we're currently printing - be more aggressive about detecting print state
+        try:
+            # Check multiple indicators that we might be printing
+            toolhead = self.printer.lookup_object('toolhead')
+            print_stats = self.printer.lookup_object('print_stats', None)
+            
+            is_printing = False
+            
+            # Method 1: Check if toolhead is moving
+            if hasattr(toolhead, 'get_status'):
+                toolhead_status = toolhead.get_status(eventtime)
+                if 'homed_axes' in toolhead_status and toolhead_status['homed_axes']:
+                    is_printing = True
+            
+            # Method 2: Check print stats if available
+            if print_stats:
+                stats = print_stats.get_status(eventtime)
+                if stats.get('state') in ['printing']:
+                    is_printing = True
+            
+            # Method 3: Check idle timeout state
+            try:
+                printer_idle = self.printer.lookup_object('idle_timeout')
+                idle_state = printer_idle.get_status(eventtime)['state']
+                if idle_state in ['Printing', 'Ready']:  # Ready means potentially printing
+                    is_printing = True
+            except:
+                # If idle_timeout doesn't exist, assume we might be printing
+                is_printing = True
+
+            # Always check for runout if endless spool is enabled and we have an active tool
+            # Don't rely only on print state detection
+            if current_tool >= 0:
+                self._endless_spool_runout_handler()
+            
+            # Adjust monitoring frequency based on state
+            if is_printing:
+                return eventtime + 0.05  # Check every 50ms during printing
+            else:
+                return eventtime + 0.2   # Check every 200ms when idle
+                
+        except Exception as e:
+            logging.info(f'ACE: Endless spool monitor error: {str(e)}')
+            return eventtime + 0.1
+
+    def _on_toolhead_move(self, print_time, newpos, oldpos):
+        """Monitor toolhead moves for extruder movement during printing - removed distance tracking"""
+        # This method is kept for potential future use but distance tracking removed
+        pass
 
     def _create_mmu_sensor(self, config, pin, name):
         section = "filament_switch_sensor %s" % name
@@ -540,6 +635,12 @@ class BunnyAce:
             if status != 'ready':
                 self.gcode.run_script_from_command('_ACE_ON_EMPTY_ERROR INDEX=' + str(tool))
                 return
+        
+        # Temporarily disable endless spool during manual toolchange
+        endless_spool_was_enabled = self.endless_spool_enabled
+        if endless_spool_was_enabled:
+            self.endless_spool_enabled = False
+            self.endless_spool_runout_detected = False
         self._park_in_progress = True
         self.gcode.run_script_from_command('_ACE_PRE_TOOLCHANGE FROM=' + str(was) + ' TO=' + str(tool))
 
@@ -580,7 +681,158 @@ class BunnyAce:
         self.gcode.run_script_from_command(
             f"""SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE='"{self.variables['ace_filament_pos']}"'""")
         self._park_in_progress = False
+        
+        # Re-enable endless spool if it was enabled before
+        if endless_spool_was_enabled:
+            self.endless_spool_enabled = True
+            
         gcmd.respond_info(f"Tool {tool} load")
+
+    def _find_next_available_slot(self, current_slot):
+        """Find the next available slot with filament for endless spool"""
+        for i in range(4):
+            next_slot = (current_slot + 1 + i) % 4
+            if next_slot != current_slot:
+                # Check both inventory and ACE status
+                if (self.inventory[next_slot]["status"] == "ready" and 
+                    self._info['slots'][next_slot]['status'] == 'ready'):
+                    return next_slot
+        return -1  # No available slots
+
+    def _endless_spool_runout_handler(self):
+        """Handle runout detection for endless spool"""
+        if not self.endless_spool_enabled or self.endless_spool_in_progress:
+            return
+
+        current_tool = self.variables.get('ace_current_index', -1)
+        if current_tool == -1:
+            return
+
+        try:
+            sensor_extruder = self.printer.lookup_object("filament_switch_sensor extruder_sensor", None)
+            if sensor_extruder:
+                # Check both runout helper and direct endstop state
+                runout_helper_present = bool(sensor_extruder.runout_helper.filament_present)
+                endstop_triggered = self._check_endstop_state('extruder_sensor')
+                
+                # Log sensor states for debugging (remove after testing)
+                # logging.info(f"ACE Debug: runout_helper={runout_helper_present}, endstop={endstop_triggered}")
+                
+                # Runout detected if filament is not present
+                if not runout_helper_present or not endstop_triggered:
+                    if not self.endless_spool_runout_detected:  # Only trigger once
+                        self.endless_spool_runout_detected = True
+                        self.gcode.respond_info("ACE: Endless spool runout detected, switching immediately")
+                        logging.info(f"ACE: Runout detected - runout_helper={runout_helper_present}, endstop={endstop_triggered}")
+                        # Execute endless spool change immediately
+                        self._execute_endless_spool_change()
+        except Exception as e:
+            logging.info(f'ACE: Runout detection error: {str(e)}')
+
+    def _execute_endless_spool_change(self):
+        """Execute the endless spool toolchange - simplified for extruder sensor only"""
+        if self.endless_spool_in_progress:
+            return
+
+        current_tool = self.variables.get('ace_current_index', -1)
+        next_tool = self._find_next_available_slot(current_tool)
+        
+        if next_tool == -1:
+            self.gcode.respond_info("ACE: No available slots for endless spool, pausing print")
+            self.gcode.run_script_from_command('PAUSE')
+            self.endless_spool_runout_detected = False
+            return
+
+        self.endless_spool_in_progress = True
+        self.endless_spool_runout_detected = False
+        
+        self.gcode.respond_info(f"ACE: Endless spool changing from slot {current_tool} to slot {next_tool}")
+        
+        # Mark current slot as empty in inventory
+        if current_tool >= 0:
+            self.inventory[current_tool] = {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0}
+            # Save updated inventory to persistent variables
+            self.variables['ace_inventory'] = self.inventory
+            self.gcode.run_script_from_command(f'SAVE_VARIABLE VARIABLE=ace_inventory VALUE=\'{json.dumps(self.inventory)}\'')
+        
+        try:
+            # Direct endless spool change - no toolchange macros needed for runout response
+            
+            # Step 1: Disable feed assist on empty slot
+            if current_tool != -1:
+                self._disable_feed_assist(current_tool)
+                self.wait_ace_ready()
+
+            # Step 2: Feed filament from next slot until it reaches extruder sensor
+            sensor_extruder = self.printer.lookup_object("filament_switch_sensor extruder_sensor", None)
+            
+            # Feed filament from new slot until extruder sensor triggers
+            self._feed(next_tool, self.toolchange_load_length, self.retract_speed)
+            self.wait_ace_ready()
+
+            # Wait for filament to reach extruder sensor
+            while not bool(sensor_extruder.runout_helper.filament_present):
+                self.dwell(delay=0.1)
+
+            if not bool(sensor_extruder.runout_helper.filament_present):
+                raise ValueError("Filament stuck during endless spool change")
+
+            # Step 3: Enable feed assist for new slot
+            self._enable_feed_assist(next_tool)
+
+            # Step 4: Update current index and save state
+            self.variables['ace_current_index'] = next_tool
+            self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(next_tool))
+            
+            self.endless_spool_in_progress = False
+            
+            self.gcode.respond_info(f"ACE: Endless spool completed, now using slot {next_tool}")
+            
+        except Exception as e:
+            self.gcode.respond_info(f"ACE: Endless spool change failed: {str(e)}")
+            self.gcode.run_script_from_command('PAUSE')
+            self.endless_spool_in_progress = False
+
+    cmd_ACE_ENABLE_ENDLESS_SPOOL_help = 'Enable endless spool feature'
+
+    cmd_ACE_ENABLE_ENDLESS_SPOOL_help = 'Enable endless spool feature'
+
+    def cmd_ACE_ENABLE_ENDLESS_SPOOL(self, gcmd):
+        self.endless_spool_enabled = True
+        
+        # Save to persistent variables
+        self.variables['ace_endless_spool_enabled'] = True
+        self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_endless_spool_enabled VALUE=True')
+        
+        gcmd.respond_info("ACE: Endless spool enabled (immediate switching on runout, saved to persistent variables)")
+
+    cmd_ACE_DISABLE_ENDLESS_SPOOL_help = 'Disable endless spool feature'
+
+    def cmd_ACE_DISABLE_ENDLESS_SPOOL(self, gcmd):
+        self.endless_spool_enabled = False
+        self.endless_spool_runout_detected = False
+        self.endless_spool_in_progress = False
+        
+        # Save to persistent variables
+        self.variables['ace_endless_spool_enabled'] = False
+        self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_endless_spool_enabled VALUE=False')
+        
+        gcmd.respond_info("ACE: Endless spool disabled (saved to persistent variables)")
+
+    cmd_ACE_ENDLESS_SPOOL_STATUS_help = 'Show endless spool status'
+
+    def cmd_ACE_ENDLESS_SPOOL_STATUS(self, gcmd):
+        status = self.get_status()['endless_spool']
+        saved_enabled = self.variables.get('ace_endless_spool_enabled', False)
+        
+        gcmd.respond_info(f"ACE: Endless spool status:")
+        gcmd.respond_info(f"  - Currently enabled: {status['enabled']}")
+        gcmd.respond_info(f"  - Saved enabled: {saved_enabled}")
+        gcmd.respond_info(f"  - Mode: Immediate switching on runout detection")
+        
+        if status['enabled']:
+            gcmd.respond_info(f"  - Runout detected: {status['runout_detected']}")
+            gcmd.respond_info(f"  - In progress: {status['in_progress']}")
 
     def find_com_port(self, device_name):
         com_ports = serial.tools.list_ports.comports()
@@ -604,7 +856,13 @@ class BunnyAce:
 
 
     def get_status(self, eventtime=None):
-        return self._info
+        status = self._info.copy()
+        status['endless_spool'] = {
+            'enabled': self.endless_spool_enabled,
+            'runout_detected': self.endless_spool_runout_detected,
+            'in_progress': self.endless_spool_in_progress
+        }
+        return status
 
     def cmd_ACE_SET_SLOT(self, gcmd):
         idx = gcmd.get_int('INDEX')
@@ -612,6 +870,9 @@ class BunnyAce:
             raise gcmd.error('Invalid slot index')
         if gcmd.get_int('EMPTY', 0):
             self.inventory[idx] = {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0}
+            # Save to persistent variables
+            self.variables['ace_inventory'] = self.inventory
+            self.gcode.run_script_from_command(f'SAVE_VARIABLE VARIABLE=ace_inventory VALUE=\'{json.dumps(self.inventory)}\'')
             gcmd.respond_info(f"Slot {idx} set to empty")
             return
         color_str = gcmd.get('COLOR', None)
@@ -628,11 +889,62 @@ class BunnyAce:
             "material": material,
             "temp": temp
         }
+        # Save to persistent variables
+        self.variables['ace_inventory'] = self.inventory
+        self.gcode.run_script_from_command(f'SAVE_VARIABLE VARIABLE=ace_inventory VALUE=\'{json.dumps(self.inventory)}\'')
         gcmd.respond_info(f"Slot {idx} set: color={color}, material={material}, temp={temp}")
 
     def cmd_ACE_QUERY_SLOTS(self, gcmd):
         import json
         gcmd.respond_info(json.dumps(self.inventory))
+
+    cmd_ACE_SAVE_INVENTORY_help = 'Manually save current inventory to persistent storage'
+
+    def cmd_ACE_SAVE_INVENTORY(self, gcmd):
+        self.variables['ace_inventory'] = self.inventory
+        self.gcode.run_script_from_command(f'SAVE_VARIABLE VARIABLE=ace_inventory VALUE=\'{json.dumps(self.inventory)}\'')
+        gcmd.respond_info("ACE: Inventory saved to persistent storage")
+
+    cmd_ACE_TEST_RUNOUT_SENSOR_help = 'Test and display runout sensor states'
+
+    def cmd_ACE_TEST_RUNOUT_SENSOR(self, gcmd):
+        try:
+            sensor_extruder = self.printer.lookup_object("filament_switch_sensor extruder_sensor", None)
+            if sensor_extruder:
+                runout_helper_present = bool(sensor_extruder.runout_helper.filament_present)
+                endstop_triggered = self._check_endstop_state('extruder_sensor')
+                
+                gcmd.respond_info(f"ACE: Extruder sensor states:")
+                gcmd.respond_info(f"  - Runout helper filament present: {runout_helper_present}")
+                gcmd.respond_info(f"  - Endstop triggered: {endstop_triggered}")
+                gcmd.respond_info(f"  - Endless spool enabled: {self.endless_spool_enabled}")
+                gcmd.respond_info(f"  - Current tool: {self.variables.get('ace_current_index', -1)}")
+                gcmd.respond_info(f"  - Runout detected: {self.endless_spool_runout_detected}")
+                
+                # Test runout detection logic
+                would_trigger = not runout_helper_present or not endstop_triggered
+                gcmd.respond_info(f"  - Would trigger runout: {would_trigger}")
+            else:
+                gcmd.respond_info("ACE: Extruder sensor not found")
+        except Exception as e:
+            gcmd.respond_info(f"ACE: Error testing sensor: {str(e)}")
+
+    def _on_toolhead_move(self, event):
+        """Event handler for toolhead move, used for monitoring extruder movement"""
+        if not self.endless_spool_enabled or self._park_in_progress or self.endless_spool_in_progress:
+            return
+
+        # Check for runout during any move
+        self._endless_spool_runout_handler()
+        
+        # If runout is detected, track extruder distance
+        if hasattr(event, 'newpos') and hasattr(event, 'oldpos'):
+            newpos = event.newpos
+            oldpos = event.oldpos
+            if len(newpos) > 3 and len(oldpos) > 3:
+                e_move = newpos[3] - oldpos[3]
+                if e_move > 0 and self.endless_spool_runout_detected:
+                    self._endless_spool_check_distance(e_move)
 
 
 
