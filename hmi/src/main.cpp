@@ -23,8 +23,8 @@ public:
         { // Configure parallel bus
             auto cfg = _bus_instance.config();
 
-            cfg.freq_write = 20000000;    // Reduced frequency for stability
-            cfg.freq_read = 8000000;      // Add read frequency
+            cfg.freq_write = 40000000;    // Reduced frequency for stability
+            //cfg.freq_read = 8000000;      // Add read frequency
             cfg.pin_wr = 47; // WR pin
             cfg.pin_rd = -1; // RD pin (not used)
             cfg.pin_rs = 0;  // RS(D/C) pin
@@ -57,11 +57,11 @@ public:
             cfg.offset_rotation = 0;
             cfg.dummy_read_pixel = 8;
             cfg.dummy_read_bits = 1;
-            cfg.readable = true;
+            cfg.readable = false;
             cfg.invert = true;
             cfg.rgb_order = false;
             cfg.dlen_16bit = false;
-            cfg.bus_shared = true;
+            cfg.bus_shared = false;
 
             _panel_instance.config(cfg);
         }
@@ -72,7 +72,7 @@ public:
             cfg.pin_bl = 45;     // Backlight pin
             cfg.invert = false;
             cfg.freq = 44100;     // Lower PWM frequency to reduce noise
-            cfg.pwm_channel = 0; // Use channel 1 instead of 0
+            cfg.pwm_channel = 7; // Use channel 1 instead of 0
 
             _light_instance.config(cfg);
             _panel_instance.setLight(&_light_instance);
@@ -86,11 +86,11 @@ public:
             cfg.y_min = 0;
             cfg.y_max = 479;
             cfg.pin_int = 7;
-            cfg.bus_shared = false;
+            cfg.bus_shared = true;
             cfg.offset_rotation = 0;
 
             // I2C configuration
-            cfg.i2c_port = 0;
+            cfg.i2c_port = 1;
             cfg.i2c_addr = 0x38;
             cfg.pin_sda = 6;
             cfg.pin_scl = 5;
@@ -148,7 +148,7 @@ void my_touch_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 void setup()
 {
     Serial.begin(115200);
-    Serial.println("\n=== SC01 Plus Display Test with LovyanGFX ===");
+    Serial.println("\n=== ACE Pro HMI Starting Up ===");
     
     // Initialize display
     Serial.println("Initializing display...");
@@ -156,40 +156,7 @@ void setup()
     tft.setRotation(3); // Landscape mode (480x320)
     tft.setBrightness(200); // Slightly lower brightness to reduce noise
     
-    // Additional display settings for stability
-    tft.setColorDepth(16); // Ensure 16-bit color
-    
     Serial.printf("Display initialized: %dx%d\n", tft.width(), tft.height());
-    
-    // Test basic colors with smoother transitions
-    Serial.println("Testing basic colors...");
-    tft.fillScreen(0x1800); // Dark red
-    delay(1000);
-    tft.fillScreen(0x0320); // Dark green
-    delay(1000);
-    tft.fillScreen(0x0018); // Dark blue
-    delay(1000);
-    tft.fillScreen(TFT_BLACK);
-    
-    // Test text and shapes with better contrast
-    Serial.println("Testing text and shapes...");
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(20, 20);
-    tft.println("SC01 Plus Test");
-    tft.setCursor(20, 50);
-    tft.printf("Resolution: %dx%d", tft.width(), tft.height());
-    tft.setCursor(20, 80);
-    tft.println("LovyanGFX + ST7796");
-    tft.setCursor(20, 110);
-    tft.println("Optimized Timing");
-    
-    // Draw some shapes with softer colors
-    tft.fillRect(350, 50, 100, 50, 0x8000); // Darker red
-    tft.fillCircle(400, 150, 30, 0x0400);   // Darker green
-    tft.drawLine(20, 200, 460, 200, 0x0010); // Darker blue
-    
-    delay(3000);
     
     // Initialize LVGL
     Serial.println("Initializing LVGL...");
@@ -214,17 +181,11 @@ void setup()
     
     // Start directly with ACE Pro interface
     Serial.println("Initializing ACE Pro interface...");
-    AceProUI::init();
-    AceProUI::show();
+    ui_ace_pro_init();
     
-    // Add some demo material data
-    delay(100); // Small delay to ensure UI is loaded
-    AceProUI::updateMaterialSlot(0, "PLA", "Red", false);
-    AceProUI::updateMaterialSlot(1, "PETG", "Blue", false);
-    AceProUI::updateMaterialSlot(2, "ABS", "Black", false);
-    AceProUI::updateMaterialSlot(3, "TPU", "Green", false);
-    // All 4 slots filled
-    AceProUI::updateStatus("Status: 4 materials loaded, Ready");
+    // Test updating the status
+    delay(1000);
+    ui_ace_pro_update("IP: 192.168.1.100", "ACE: Ready", "Printer: Ready");
     
     Serial.println("Setup complete!");
 }

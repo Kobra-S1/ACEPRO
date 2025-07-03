@@ -1,9 +1,10 @@
 #ifndef ACE_API_H
 #define ACE_API_H
 
-#include <ArduinoJson.h>
+// Temporarily commenting out ArduinoJson dependency until library is installed
+// #include <ArduinoJson.h>
 #include "config.h"
-#include "network_manager.h"
+// #include "network_manager.h"  // Also commenting out until implemented
 
 // Data structures for ACE Pro status and inventory
 struct MaterialSlot {
@@ -27,6 +28,8 @@ struct AceStatus {
   unsigned long lastUpdate;
 };
 
+// Temporarily simplified class definition until dependencies are resolved
+/*
 class AceAPI {
 private:
   NetworkManager* networkManager;
@@ -83,5 +86,6 @@ public:
   String getLastError() const { return currentStatus.lastError; }
   void clearError();
 };
+*/
 
 #endif // ACE_API_H

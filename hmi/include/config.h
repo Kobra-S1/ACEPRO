@@ -25,7 +25,7 @@
 // SC01 ESP32-S3 with 3.5" display settings
 #define SCREEN_WIDTH 480
 #define SCREEN_HEIGHT 320
-#define SCREEN_ROTATION 1  // 0=0°, 1=90°, 2=180°, 3=270°
+#define SCREEN_ROTATION 3  // 0=0°, 1=90°, 2=180°, 3=270°
 
 // ========================
 // Hardware Pin Configuration
