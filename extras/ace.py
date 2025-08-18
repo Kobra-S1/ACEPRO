@@ -156,6 +156,9 @@ class BunnyAce:
         self.gcode.register_command(
             'ACE_TEST_RUNOUT_SENSOR', self.cmd_ACE_TEST_RUNOUT_SENSOR,
             desc=self.cmd_ACE_TEST_RUNOUT_SENSOR_help)
+        self.gcode.register_command(
+            'ACE_GET_CURRENT_INDEX', self.cmd_ACE_GET_CURRENT_INDEX,
+            desc=self.cmd_ACE_GET_CURRENT_INDEX_help)
 
 
     def _calc_crc(self, buffer):
@@ -928,6 +931,12 @@ class BunnyAce:
                 gcmd.respond_info("ACE: Extruder sensor not found")
         except Exception as e:
             gcmd.respond_info(f"ACE: Error testing sensor: {str(e)}")
+
+    cmd_ACE_GET_CURRENT_INDEX_help = 'Get the currently loaded slot index'
+
+    def cmd_ACE_GET_CURRENT_INDEX(self, gcmd):
+        current_index = self.variables.get('ace_current_index', -1)
+        gcmd.respond_info(str(current_index))
 
     def _on_toolhead_move(self, event):
         """Event handler for toolhead move, used for monitoring extruder movement"""
