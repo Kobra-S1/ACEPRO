@@ -26,6 +26,29 @@ class BunnyAce:
         self.toolchange_retract_length = config.getint('toolchange_retract_length', 150)
         self.toolchange_load_length = config.getint('toolchange_load_length', 630)
         self.toolhead_sensor_to_nozzle_length = config.getint('toolhead_sensor_to_nozzle', 0)
+        
+        # How much filament to feed incremental after initial 'toolchange_load_length' feeding.
+        # Incremental feeding happend until hotend filaemnt-runoutsensor triggers after a finished increment
+        self.incremental_feeding_length = config.getint('incremental_feeding_length', 50)
+        
+        self.incremental_feeding_speed = config.getint('incremental_feeding_speed', 30) # Speed for above incremental feeding
+        
+        # While ACE feeds, extruder should grab the filament when it reaches the printhead,
+        # hence it engages at every feeding cycle a little bit to assure that
+        self.extruder_feeding_lenght = config.getint('extruder_feeding_lenght', 1) 
+        self.extruder_feeding_speed = config.getint('extruder_feeding_speed', 5) 
+        
+        # Incremental length which currently loaded filament will be pulled back by ACE until it passes the return-module filament detection switch
+        # Important is to make it so long that one pull more after triggering is retracting the fillament enough to be pulled out of the 4-in-1 splitter
+        # to avoid collision with new feeded filament afterwards
+        self.incremental_retraction_length = config.getint('incremental_retraction_length', 100) 
+        self.incremental_retraction_speed = config.getint('incremental_retraction_speed', 50) 
+        
+        #How much to retract at the toolhead extruder, once at filament change, to pull out the cut filament out of extruder,
+        # so ACE is able to rectract the loaded filament
+        self.extruder_retraction_lenght = config.getint('extruder_retraction_lenght', -50) 
+        self.extruder_retraction_speed = config.getint('extruder_retraction_speed', 10) 
+        
         # self.extruder_to_blade_length = config.getint('extruder_to_blade', None)
 
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
@@ -205,6 +228,8 @@ class BunnyAce:
             return self.reactor.NEVER
 
         if len(raw_bytes):
+            #self.gcode.respond_info(f'ADBG: _read: {raw_bytes}')
+            
             text_buffer = self.read_buffer + raw_bytes
             i = text_buffer.find(b'\xfe')
             if i >= 0:
@@ -252,7 +277,7 @@ class BunnyAce:
         return eventtime + 0.1
 
     def _writer(self, eventtime):
-
+        #self.gcode.respond_info("ADBG: _writer")
         try:
             def callback(self, response):
                 if response is not None:
@@ -305,6 +330,7 @@ class BunnyAce:
 
     def _handle_disconnect(self):
         logging.info('ACE: Closing connection to ' + self.serial_name)
+        self.gcode.respond_info('ADBG:Closing connection to ' + self.serial_name)
         self._serial.close()
         self._connected = False
         self.reactor.unregister_timer(self.writer_timer)
@@ -321,13 +347,16 @@ class BunnyAce:
         self.reactor.pause(currTs + delay)
 
     def send_request(self, request, callback):
+        #self.gcode.respond_info(f"ADBG: send_request request={request}")
         self._info['status'] = 'busy'
         self._queue.put([request, callback])
 
     def wait_ace_ready(self):
+        self.gcode.respond_info(f"ADBG: wait_ace_ready()-> status={self._info['status']}...")
         while self._info['status'] != 'ready':
             currTs = self.reactor.monotonic()
             self.reactor.pause(currTs + .5)
+            self.gcode.respond_info(f"ADBG: wait_ace_ready()-> status={self._info['status']}")
 
     def _extruder_move(self, length, speed):
         pos = self.toolhead.get_position()
@@ -542,6 +571,8 @@ class BunnyAce:
             if 'code' in response and response['code'] != 0:
                 raise ValueError("ACE Error: " + response['msg'])
 
+        self.gcode.respond_info(f"ADBG: _feed(index={index}, length={length}, speed={speed})")
+        
         self.send_request(
             request={"method": "feed_filament", "params": {"index": index, "length": length, "speed": speed}},
             callback=callback)
@@ -567,6 +598,8 @@ class BunnyAce:
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 raise ValueError("ACE Error: " + response['msg'])
+
+        self.gcode.respond_info(f"ADBG: _retract(index={index}, length={length}, speed={speed})")
 
         self.send_request(
             request={"method": "unwind_filament", "params": {"index": index, "length": length, "speed": speed}},
@@ -602,6 +635,8 @@ class BunnyAce:
 
         self._enable_feed_assist(tool)
 
+        self.gcode.respond_info(f"ADBG: _park_to_toolhead() Wait for sensor_extruder.runout_helper.filament_present ")
+
         while not bool(sensor_extruder.runout_helper.filament_present):
             self.dwell(delay=0.1)
 
@@ -610,14 +645,24 @@ class BunnyAce:
         else:
             self.variables['ace_filament_pos'] = "spliter"
 
-        while not self._check_endstop_state('toolhead_sensor'):
-            self._extruder_move(1, 5)
-            self.dwell(delay=0.01)
+        self.gcode.respond_info(f"ADBG: _park_to_toolhead() _check_endstop_state('toolhead_sensor')")
 
+        w_dbg_cnt=0
+        while not self._check_endstop_state('toolhead_sensor'):
+            self.gcode.respond_info(f"ADBG: _park_to_toolhead() _feed({self.incremental_feeding_length},{self.incremental_feeding_speed})")
+            self.gcode.respond_info(f"ADBG: _park_to_toolhead() _extruder_move({self.extruder_feeding_lenght}, {self.extruder_feeding_speed})")
+
+            self._feed(tool,self.incremental_feeding_length,self.incremental_feeding_speed)
+            self._extruder_move(self.extruder_feeding_lenght, self.extruder_feeding_speed)
+            self.dwell(delay=0.01)
+        
+        self.gcode.respond_info(f"ADBG: _park_to_toolhead() self._check_endstop_state('toolhead_sensor') finished")
+        
         self.variables['ace_filament_pos'] = "toolhead"
 
         self._extruder_move(self.toolhead_sensor_to_nozzle_length, 5)
         self.variables['ace_filament_pos'] = "nozzle"
+        self.gcode.respond_info(f"ADBG: _park_to_toolhead: _ace_fpos set to:{self.variables['ace_filament_pos']}")
 
     cmd_ACE_CHANGE_TOOL_help = 'Changes tool'
 
@@ -630,7 +675,13 @@ class BunnyAce:
 
         was = self.variables.get('ace_current_index', -1)
         if was == tool:
+            _ace_fpos = self.variables.get('ace_filament_pos', "spliter")
+            self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: _ace_fpos={_ace_fpos}")            
             gcmd.respond_info('ACE: Not changing tool, current index already ' + str(tool))
+            
+            if self.variables.get('ace_filament_pos', "spliter") == "nozzle" and not bool(sensor_extruder.runout_helper.filament_present):
+                gcmd.respond_info('ACE: Tool' + str(tool)+ 'in nozzle state, but no filament present. Executing_park_to_toolhead_to_feed filament to nozzle')
+                self._park_to_toolhead(tool)
             return
 
         if tool != -1:
@@ -645,40 +696,52 @@ class BunnyAce:
             self.endless_spool_enabled = False
             self.endless_spool_runout_detected = False
         self._park_in_progress = True
+        self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: running _ACE_PRE_TOOLCHANGE MACRO now")
         self.gcode.run_script_from_command('_ACE_PRE_TOOLCHANGE FROM=' + str(was) + ' TO=' + str(tool))
-
+        self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL:"+ 'ACE: Toolchange ' + str(was) + ' => ' + str(tool))
         logging.info('ACE: Toolchange ' + str(was) + ' => ' + str(tool))
         if was != -1:
             self._disable_feed_assist(was)
             self.wait_ace_ready()
+            _ace_fpos = self.variables.get('ace_filament_pos', "spliter")
+            self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: _ace_fpos={_ace_fpos}")
+            
             if self.variables.get('ace_filament_pos', "spliter") == "nozzle":
                 self.gcode.run_script_from_command('CUT_TIP')
                 self.variables['ace_filament_pos'] = "toolhead"
+                self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: _ace_fpos set to:{self.variables['ace_filament_pos']}")
 
             if self.variables.get('ace_filament_pos', "spliter") == "toolhead":
+                self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: _ace_fpos sis toolhead, looping until sensor_extruder.runout_helper.filament_present")
                 while bool(sensor_extruder.runout_helper.filament_present):
-                    self._extruder_move(-50, 10)
-                    self._retract(was, 100, self.retract_speed)
+                    self._extruder_move(self.extruder_retraction_lenght, self.extruder_retraction_speed)
+                    self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: retract {self.incremental_retraction_length} @ {self.incremental_retraction_speed} until filament_present")
+                    self._retract(was, self.incremental_retraction_length, self.incremental_retraction_speed)
                     self.wait_ace_ready()
                 self.variables['ace_filament_pos'] = "bowden"
+                self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: _ace_fpos set to:{self.variables['ace_filament_pos']}")
 
             self.wait_ace_ready()
-
             self._retract(was, self.toolchange_retract_length, self.retract_speed)
             self.wait_ace_ready()
             self.variables['ace_filament_pos'] = "spliter"
-
+            self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: _ace_fpos set to:{self.variables['ace_filament_pos']}")
             if tool != -1:
                 self._park_to_toolhead(tool)
         else:
             self._park_to_toolhead(tool)
 
+        self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: 1st. reset_last_position")
         gcode_move = self.printer.lookup_object('gcode_move')
         gcode_move.reset_last_position()
 
         self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(was) + ' TO=' + str(tool))
         self.variables['ace_current_index'] = tool
+        
+        
+        self.gcode.respond_info(f"ADBG: cmd_ACE_CHANGE_TOOL: 2nd reset_last_position")
         gcode_move.reset_last_position()
+        
         # Force save to disk
         self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(tool))
         self.gcode.run_script_from_command(
@@ -688,7 +751,8 @@ class BunnyAce:
         # Re-enable endless spool if it was enabled before
         if endless_spool_was_enabled:
             self.endless_spool_enabled = True
-            
+        
+        #self.gcode.run_script_from_command("G92 E0")            
         gcmd.respond_info(f"Tool {tool} load")
 
     def _find_next_available_slot(self, current_slot):
