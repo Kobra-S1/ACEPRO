@@ -261,6 +261,9 @@ ACE[1]:{'id': 0, 'code': 0, 'result': {'id': 1, 'slots': 4, 'model': 'Anycubic C
 ACE[0]:{'id': 0, 'code': 0, 'result': {'id': 1, 'slots': 4, 'model': 'Anycubic Color Engine Pro', 'firmware': 'V1.3.863', 'boot_firmware': 'V1.0.1', 'structure_version': '0'}, 'msg': 'success'}
 ```
 
+By default ACE PRO driver is enabled if you include [ace.cfg] in printer.cfg.
+Either comment that out if you dont want to use ACE Pro for printing, or keep it and use the "ACE Pro" switch in mainsail, you find it in the "Miscellaneous" section of mainsail (above the filament runout sensor states). This settings is not persistent, so after restart ACE Pros are automatically active again.
+
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `ACE_CHANGE_TOOL` | Manual tool change | `TOOL=<0-3\|-1>` |
