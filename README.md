@@ -249,6 +249,18 @@ Connect the ACE Pro to a regular USB port and configure the sensor pins accordin
 ### Basic Operations
 Most commands support a INSTANCE=n parameter.
 This allows to select to which ACE-pro Unit the commands shall be send, if none is given instance 0 (first ACEPRO) is assumed.
+The direct to your computer connected ACE PRO get INSTANCE id 0 and gets the tool indicies 0-3 assigned (T0,T1,T2,T3), the next (daisy-chained)
+connected ACE PRO Unit will be the INSTANCE id 1 and gets the tools indicies 4-7 assigned (T4,T5,T6,T7) and so on.
+
+NOTE: ACE PRO units sometimes tend to have (usb) connection issues and can disappear&reappear mid-print, the driver trys to reconnect, but that might or may not work
+properly without PAUSING the print. If print gets PAUSE and a lot of serial connection errors show up in the console output, you may have to power the ACE Units OFF/ON and/or replug the USB connection to the PC to get them in a usable state gain. Wait then until console shows the firmware info for each connected ACE once again before trying to resume the print with "RESUME" command in console/mainsail.
+
+Example trace output to look for, for two connected ACE PROs:
+```
+ACE[1]:{'id': 0, 'code': 0, 'result': {'id': 1, 'slots': 4, 'model': 'Anycubic Color Engine Pro', 'firmware': 'V1.3.863', 'boot_firmware': 'V1.0.1', 'structure_version': '0'}, 'msg': 'success'}
+ACE[0]:{'id': 0, 'code': 0, 'result': {'id': 1, 'slots': 4, 'model': 'Anycubic Color Engine Pro', 'firmware': 'V1.3.863', 'boot_firmware': 'V1.0.1', 'structure_version': '0'}, 'msg': 'success'}
+```
+
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `ACE_CHANGE_TOOL` | Manual tool change | `TOOL=<0-3\|-1>` |
