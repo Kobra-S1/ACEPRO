@@ -185,9 +185,32 @@ pip3 install pyserial --upgrade
 ```
 
 ### 4. Update Printer Configuration
-Add to your `printer.cfg`:
+Add to your `printer.cfg` the [ace.cfg].
+IMPORTANT: Move the existing filament_switch_sensor entries ABOVE the ace.cfg include, as they are needed by the ace driver, otherwise you get a error message which reminds you in case you forget. ;)
+Example:
+
 ```ini
+### Filament runout sensor must be defined before ace.cfg +++++++++++++++
+[filament_switch_sensor filament_runout_nozzle]
+pause_on_runout: True
+runout_gcode:
+  TO_THROW_POSITION
+insert_gcode:
+  WIPE_ENTER
+  WIPE_NOZZLE
+  WIPE_STOP
+  WIPE_EXIT
+event_delay: 3.0
+pause_delay: 0.5
+switch_pin: nozzle_mcu:PB0
+
+# ACE Pro return detection module (on the back of KS1 printer)
+[filament_switch_sensor filament_runout_rdm]
+pause_on_runout: False  # Enable this only if ACE is used to feed filament
+switch_pin: PB0
+
 [include ace.cfg]
+
 ```
 
 ## ⚙️ Configuration
