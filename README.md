@@ -239,6 +239,9 @@ incremental_feeding_length: 100
 incremental_feeding_speed: 60 
 ```
 
+If you have multiple ACE PRO units, copy and paste your existing [ace] section below it and rename [ace] to [ace 1] for the second unit, [ace 2] for the third, etc.
+[ace] or [ace 0] has to be always there and refers to the first ACE PRO unit (which is directly connected to your computer).
+
 ### Pin Configuration
 ![Connector Pinout](/img/connector.png)
 
