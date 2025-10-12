@@ -1,6 +1,6 @@
-# ACE PRO SV08 - Anycubic Color Engine Pro Driver for Klipper
+# ACE PRO KOBRA-S1 Anycubic Color Engine Pro Driver for Kobra-S1 (vanilla) Klipper (based on SV08 ACE PRO)
 
-A comprehensive Klipper driver for the Anycubic Color Engine Pro multi-material unit, optimized for SOVOL SV08 and other Klipper-based 3D printers.
+A Klipper driver for the Anycubic Color Engine Pro multi-material unit(s), optimized for Kobra-S1 3D printer.
 
 ## 📋 Table of Contents
 
@@ -16,9 +16,8 @@ A comprehensive Klipper driver for the Anycubic Color Engine Pro multi-material 
 - [Credits](#-credits)
 
 ## ✨ Features
-
+- **Multi-ACE Pro Support**: Supports multiple ACE-PRO Units
 - **Multi-Material Support**: Full 4-slot filament management
-- **Endless Spool**: Automatic filament switching on runout
 - **Persistent State**: Settings and inventory saved across restarts
 - **Feed Assist**: Advanced filament feeding control
 - **Runout Detection**: Dual sensor runout detection system
@@ -26,35 +25,34 @@ A comprehensive Klipper driver for the Anycubic Color Engine Pro multi-material 
 - **Debug Tools**: Comprehensive diagnostic commands
 - **Seamless Integration**: Native Klipper integration
 
+TODO:
+- **Endless Spool**: Automatic filament switching on runout
+
 ## 🔧 Hardware Requirements
 
 ### Required Components
-- **Anycubic Color Engine Pro** multi-material unit
+- One or more **Anycubic Color Engine Pro** multi-material unit
 - **Filament Sensors**: 
-  - Extruder sensor (at splitter exit)
+  - RMS sensor (at splitter exit)
   - Toolhead sensor (before hotend)
 - **Hotend**: Compatible with filament cutting (recommended)
-
-### Recommended Hardware
-- **Filament Splitter**: [BAMBULAB filament splitter](https://www.printables.com/model/1133951-v4-toolhead-ideal-for-mmu-for-sv08-and-any-voron-g)
-- **Toolhead**: [Nadir extruder for SV08/Voron](https://www.printables.com/model/1133951-v4-toolhead-ideal-for-mmu-for-sv08-and-any-voron-g)
-- **Cutting Mod**: [Mr Goodman BAMBULAB hotend with cutter](https://www.printables.com/model/1099177-sovol-sv08-head-filament-cutting-mod)
 
 ## 📦 Installation
 
 ### 1. Clone Repository
 ```bash
 cd ~
-git clone https://github.com/szkrisz/ACEPROSV08.git
+git clone https://github.com/Kobra-S1/ACEPRO.git
 ```
 
 ### 2. Create Symbolic Links
 ```bash
 # Link the driver to Klipper extras
-ln -sf ~/ACEPROSV08/extras/ace.py ~/klipper/klippy/extras/ace.py
+ln -sf ~/ACEPRO/extras/ace.py ~/klipper/klippy/extras/ace.py
+ln -sf ~/ACEPRO/extras/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
 
 # Link the configuration file
-ln -sf ~/ACEPROSV08/ace.cfg ~/printer_data/config/ace.cfg
+ln -sf ~/ACEPRO/ace.cfg ~/printer_data/config/ace.cfg
 ```
 
 ### 3. Update Python Dependencies
@@ -76,17 +74,49 @@ Add to your `printer.cfg`:
 
 ### Basic Configuration (ace.cfg)
 ```ini
+[save_variables]
+filename: ~/printer_data/config/saved_variables.cfg
+
+# Hack to get a on/off switch to be able to switch between ACEPro and external spool print
+[virtual_pins]
+
+[output_pin ACE_Pro]
+pin: virtual_pin:ace_pro
+pwm: False
+value:1
+shutdown_value:0
+
+[respond]
+
 [ace]
-serial: /dev/ttyACM0
+#serial: /dev/ttyACM0
 baud: 115200
-extruder_sensor_pin: ^PC2
-toolhead_sensor_pin: ^PC3
-feed_speed: 50
+
+standard_filament_runout_detection: True
+#filament_runout_sensor_name_rdm: filament_runout_rdm
+#filament_runout_sensor_name_nozzle: filament_runout_nozzle
+
+feed_assist_active_after_ace_connect: False
+feed_speed: 60
 retract_speed: 50
-toolchange_retract_length: 150
-toolchange_load_length: 630
-toolhead_sensor_to_nozzle: 10
-endless_spool: True
+total_max_feeding_length:3000
+parkposition_to_toolhead_length:1000
+parkposition_to_rms_sensor_length: 100 #170
+toolhead_sensor_to_cutter: 22
+toolhead_cutter_to_nozzle: 60
+toolhead_nozzle_purge: 1
+toolhead_fast_loading_speed: 15
+toolhead_slow_loading_speed: 5
+toolchange_load_length: 3000 # Should be >= the lenght between ACE and the printers 4in1 splitter.
+max_dryer_temperature: 55
+extruder_feeding_length: 1 
+extruder_feeding_speed: 5
+extruder_retraction_length: -50
+extruder_retraction_speed: 10
+default_color_change_purge_length: 50
+default_color_change_purge_speed: 400
+incremental_feeding_length: 100 
+incremental_feeding_speed: 60 
 ```
 
 ### Pin Configuration
@@ -97,6 +127,8 @@ Connect the ACE Pro to a regular USB port and configure the sensor pins accordin
 ## 🎯 Commands Reference
 
 ### Basic Operations
+Most commands support a INSTANCE=n parameter.
+This allows to select to which ACE-pro Unit the commands shall be send, if none is given instance 0 (first ACEPRO) is assumed.
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `ACE_CHANGE_TOOL` | Manual tool change | `TOOL=<0-3\|-1>` |
@@ -118,13 +150,6 @@ Connect the ACE Pro to a regular USB port and configure the sensor pins accordin
 | `ACE_QUERY_SLOTS` | Get all slots | Returns JSON |
 | `ACE_SAVE_INVENTORY` | Save inventory | Manual save trigger |
 
-### Endless Spool
-| Command | Description |
-|---------|-------------|
-| `ACE_ENABLE_ENDLESS_SPOOL` | Enable endless spool |
-| `ACE_DISABLE_ENDLESS_SPOOL` | Disable endless spool |
-| `ACE_ENDLESS_SPOOL_STATUS` | Show endless spool status |
-
 ### Diagnostics
 | Command | Description |
 |---------|-------------|
@@ -136,6 +161,42 @@ Connect the ACE Pro to a regular USB port and configure the sensor pins accordin
 |---------|-------------|------------|
 | `ACE_START_DRYING` | Start dryer | `TEMP=<°C> [DURATION=<minutes>]` |
 | `ACE_STOP_DRYING` | Stop dryer | - |
+
+
+## 📊 Inventory Management
+
+Track filament materials, colors, and printing temperatures for each slot.
+
+### Set Slot Information
+```gcode
+# Set slot with filament
+ACE_SET_SLOT INDEX=0 COLOR=255,0,0 MATERIAL=PLA TEMP=210
+
+# Set slot as empty
+ACE_SET_SLOT INDEX=1 EMPTY=1
+```
+
+### Query Inventory
+```gcode
+# Get all slots as JSON
+ACE_QUERY_SLOTS
+
+# Example response:
+# [
+#   {"status": "ready", "color": [255,0,0], "material": "PLA", "temp": 210},
+#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0},
+#   {"status": "ready", "color": [0,255,0], "material": "PETG", "temp": 240},
+#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0}
+# ]
+```
+
+################### TODO, currently not supported: ##################
+### Endless Spool
+| Command | Description |
+|---------|-------------|
+| `ACE_ENABLE_ENDLESS_SPOOL` | Enable endless spool |
+| `ACE_DISABLE_ENDLESS_SPOOL` | Disable endless spool |
+| `ACE_ENDLESS_SPOOL_STATUS` | Show endless spool status |
 
 ## 🔄 Endless Spool Feature
 
@@ -165,34 +226,7 @@ ACE_ENDLESS_SPOOL_STATUS
 - **Enabled**: Automatic switching on runout
 - **Disabled**: Print pauses on runout (standard behavior)
 - **No Available Slots**: Print pauses automatically
-
-## 📊 Inventory Management
-
-Track filament materials, colors, and printing temperatures for each slot.
-
-### Set Slot Information
-```gcode
-# Set slot with filament
-ACE_SET_SLOT INDEX=0 COLOR=255,0,0 MATERIAL=PLA TEMP=210
-
-# Set slot as empty
-ACE_SET_SLOT INDEX=1 EMPTY=1
-```
-
-### Query Inventory
-```gcode
-# Get all slots as JSON
-ACE_QUERY_SLOTS
-
-# Example response:
-# [
-#   {"status": "ready", "color": [255,0,0], "material": "PLA", "temp": 210},
-#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0},
-#   {"status": "ready", "color": [0,255,0], "material": "PETG", "temp": 240},
-#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0}
-# ]
-```
-
+- 
 ### Persistent Storage
 - Inventory is automatically saved to Klipper's `save_variables`
 - Restored on restart
@@ -207,9 +241,10 @@ ACE_QUERY_SLOTS
 
 ### USB Connection
 Connect the ACE Pro unit to your printer's host computer via USB. The driver will automatically detect the device.
+If multiple ACE PRO units are used, daisy-chain the units (same setup as with Kobra-S1 stock FW)
 
 ### Splitter Configuration
-Use a BAMBULAB-compatible filament splitter for optimal performance with the ACE Pro system.
+Use a x-in-1 splitter, matching to your numbers or total spools in your ACE-Pro units
 
 ## 🤝 Contributing
 
@@ -228,6 +263,7 @@ This project is based on excellent work from:
 
 - **[ACEResearch](https://github.com/printers-for-people/ACEResearch.git)** - Original ACE Pro research
 - **[DuckACE](https://github.com/utkabobr/DuckACE.git)** - Base driver implementation
+- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08))** - ACEPRO SOVOL08 driver implementation from szkriz
 
 ## 📄 License
 
