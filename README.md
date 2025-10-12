@@ -18,6 +18,7 @@ A Klipper driver for the Anycubic Color Engine Pro multi-material unit(s), optim
 ## ✨ Features
 - **Multi-ACE Pro Support**: Supports multiple ACE-PRO Units
 - **Multi-Material Support**: Full 4-slot filament management
+- **Adaptive Purge Volume support (for Orcaslicer) via gcode postprocessing script
 - **Persistent State**: Settings and inventory saved across restarts
 - **Feed Assist**: Advanced filament feeding control
 - **Runout Detection**: Dual sensor runout detection system
@@ -166,6 +167,14 @@ gcode:
 ```
 G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperature[initial_tool]] tool=[initial_tool]
 ```
+### 2.3 (Optional) To support colorchange adaptive purge-volume, add postprocessing script call to your Orca Slicer Profile
+- In Orca Global Process settings select the "Others" tab.
+- Scroll down to "Post-processings Scripts"
+- Add the below line
+```/usr/bin/python3 /home/YourUserNameHere/ACEPRO/orca_flush_to_purgelength.py```
+ You need to adapt the path to the python interpreter as also to the script to you local setup.
+ For linux environment, dont use relative path like "~/", only absolute path work properly in Orca.
+ 
 ### 3. Update Python Dependencies
 ```bash
 # Activate Klipper virtual environment
@@ -273,6 +282,21 @@ This allows to select to which ACE-pro Unit the commands shall be send, if none 
 | `ACE_START_DRYING` | Start dryer | `TEMP=<°C> [DURATION=<minutes>]` |
 | `ACE_STOP_DRYING` | Stop dryer | - |
 
+### Loading/Unloading helper
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_SMART_UNLOAD` | Unload filament(s) to free filament path |
+| `ACE_SMART_LOAD` | Feeds all slots (on all ACEPro) once to the RMS and then back to parkposition  | - |
+
+### Loading/Unloading helper
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_SET_PURGE_AMOUNT` | Sets the length of Filament to extrude for purging for the next comming toolchange |`PURGELENGTH=<mm> [PURGESPEED=<mm/s>]` |
+
+### Toolchange commands
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `T<n>` | Changes to other filament spool, automatically generated for each connected ACE Pro unit |`The tool index` |
 
 ## 📊 Inventory Management
 
@@ -372,9 +396,9 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 
 This project is based on excellent work from:
 
+- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)** - ACEPRO SOVOL08 driver implementation from szkriz
 - **[ACEResearch](https://github.com/printers-for-people/ACEResearch.git)** - Original ACE Pro research
 - **[DuckACE](https://github.com/utkabobr/DuckACE.git)** - Base driver implementation
-- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08))** - ACEPRO SOVOL08 driver implementation from szkriz
 
 ## 📄 License
 
