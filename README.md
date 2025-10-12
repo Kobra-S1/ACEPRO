@@ -54,7 +54,118 @@ ln -sf ~/ACEPRO/extras/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
 # Link the configuration file
 ln -sf ~/ACEPRO/ace.cfg ~/printer_data/config/ace.cfg
 ```
+### 2.1 Update your printer.cfg Kobra S1 G9111 macro to support initial tool parameter
+```
+# =======================
+# G9111 — Startup Macro for Anycubic slicer compatibility
+# =======================
+[gcode_macro G9111]
+description: "Startup: G9111 BEDTEMP=<°C> EXTRUDERTEMP=<°C> [WIPETEMP=<°C>] [TOOL=inital tool index]"
+variable_wipe_temp: 150
+variable_heat_pos_x: 40
+variable_heat_pos_y: 276
+variable_heat_pos_z: 5
+variable_travel_speed: 200  # mm/s
 
+gcode:
+  # Helper: strip one leading '=' if present, then float
+  {% set bed_raw = (params.BEDTEMP | default(params.S) | default("60")) | string %}
+  {% set noz_raw = (params.EXTRUDERTEMP | default(params.T) | default("200")) | string %}
+  {% set wipe_raw = (params.WIPETEMP | default(printer["gcode_macro G9111"].wipe_temp) | string) %}
+
+  {% set TOOL = ((params.TOOL | default(params.tool) | default(params.T) | default(params.t) | default("-1")) | string | replace('=', '', 1) | int) %}  
+
+  {% set BEDTEMP = (bed_raw | replace('=', '', 1)) | float %}
+  {% set EXTRUDERTEMP = (noz_raw | replace('=', '', 1)) | float %}
+  {% set WIPETEMP = (wipe_raw | replace('=', '', 1)) | float %}
+  
+  {% set f_travel = (printer["gcode_macro G9111"].travel_speed | float) * 60 %}
+
+  { action_respond_info(
+      "G9111: bed=%.1f°C, wipe=%.1f°C, final nozzle=%.1f°C, travel_speed=%.1f tool=%d"
+      % (BEDTEMP, WIPETEMP, EXTRUDERTEMP, f_travel, TOOL)
+    ) }
+    
+  # Set temps
+  RESPOND TYPE=echo MSG="No wait pre-heat for nozzle wipe"
+  M104 S{WIPETEMP}
+  M140 S{BEDTEMP}
+
+  RESPOND TYPE=echo MSG="Home Y,X"
+  G28 Y X
+
+  RESPOND TYPE=echo MSG="Wait for pre-heat temp reached"
+  TO_THROW_POSITION
+  # Wait to wipe temp
+  M109 S{WIPETEMP}
+  RESPOND TYPE=echo MSG="Wipe nozzle"
+  WIPE_ENTER
+  WIPE_NOZZLE
+  WIPE_STOP
+  WIPE_EXIT
+
+  RESPOND TYPE=echo MSG="Homing"
+  G90
+  G28 Z
+  M106 S255
+ 
+  RESPOND TYPE=echo MSG="(Adaptive) bed mesh"
+  BED_MESH_CALIBRATE PROFILE=adaptive ADAPTIVE=1
+    
+  # Final nozzle temp (wait)
+  RESPOND TYPE=echo MSG="Heat nozzle to print temperature"
+  M106 S0
+  MOVE_HEAT_POS
+  M109 S{EXTRUDERTEMP}
+
+  #Inform ace that this is initial startup toolchange. This avoids double wipping from this macro and the toolchange macro
+  {% if printer["gcode_macro _ACE_STATE"] is defined
+   and printer["gcode_macro _ACE_STATE"].startup_toolchange is defined %}
+    SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=startup_toolchange VALUE=1
+  {% endif %}
+  
+  ; if a tool index was passed, activate it
+  {% if TOOL >= 0 %}
+      RESPOND TYPE=echo MSG="Selecting passed active tool"
+      T{TOOL}
+  {% else %}
+    # Assure tool active / filament loaded from ACE slot
+    {% set current_extruder = printer.toolhead.extruder %}
+    {% set suffix = current_extruder | replace('extruder','') %}
+    {% set tool_num = suffix if suffix|length > 0 else '0' %}
+    RESPOND TYPE=echo MSG="Re-selecting active tool"
+    T{tool_num}
+  {% endif %}
+
+  RESPOND TYPE=echo MSG="Prime nozzle"
+  G92 E0
+  G1 E50 F400
+  G1 E60 F150
+  G1 E90 F150
+  G92 E0
+
+  RESPOND TYPE=echo MSG="Wipe nozzle after purge"
+  TO_FRONT_OF_THROW_BLADE
+  TO_BACK_OF_THROW_BLADE
+  TO_FRONT_OF_THROW_BLADE
+  TO_BACK_OF_THROW_BLADE
+
+  WIPE_ENTER
+  WIPE_NOZZLE
+  WIPE_STOP
+  WIPE_EXIT
+
+  RESPOND TYPE=echo MSG="Purge line"
+  G91
+  G1 Z2 F1000  
+  UNDERLINE
+
+  RESPOND TYPE=echo MSG="G9111 complete."
+```
+### 2.2 Update in Orca slicer your start machine-gcode to provide the initial_tool to G9111 macro
+```
+G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperature[initial_tool]] tool=[initial_tool]
+```
 ### 3. Update Python Dependencies
 ```bash
 # Activate Klipper virtual environment
