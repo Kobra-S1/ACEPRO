@@ -50,7 +50,7 @@ git clone https://github.com/Kobra-S1/ACEPRO.git
 ```bash
 # Link the driver to Klipper extras
 ln -sf ~/ACEPRO/extras/ace.py ~/klipper/klippy/extras/ace.py
-ln -sf ~/ACEPRO/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
+ln -sf ~/ACEPRO/extras/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
 
 # Link the configuration file
 ln -sf ~/ACEPRO/ace.cfg ~/printer_data/config/ace.cfg
