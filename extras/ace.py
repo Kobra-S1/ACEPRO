@@ -242,19 +242,8 @@ class AcePro:
             ]
         }
 
-        # Add inventory for 4 slots - load from persistent variables if available
-        saved_inventory = self.variables.get('ace_inventory', None)
-        if saved_inventory:
-            self.inventory = saved_inventory
-        else:
-            self.inventory = [
-                {
-                    "status": "empty",
-                    "color": [0, 0, 0],
-                    "material": "",
-                    "temp": 0
-                } for _ in range(self.SLOT_COUNT)
-            ]
+        # Add inventory for 4 slots - load from per-instance persistent variables if available
+        self._load_inventory()
 
         self.create_mmu_sensors(config)
         
