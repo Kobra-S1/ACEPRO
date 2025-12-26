@@ -1,0 +1,25 @@
+# Coverage configuration for ACE Pro (root shim to keep tooling happy)
+
+[run]
+branch = True
+source =
+	ace
+	extras/ace
+omit = 
+	*/tests/*
+	*/test_*.py
+	*/__pycache__/*
+	*/conftest.py
+	ace/__init__.py
+
+[report]
+show_missing = True
+skip_empty = True
+precision = 2
+
+[html]
+directory = .tmp/htmlcov
+title = ACE Pro Coverage Report
+
+[term]
+skip_covered = False

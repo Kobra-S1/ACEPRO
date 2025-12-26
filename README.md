@@ -1,394 +1,579 @@
-# ACE PRO KOBRA-S1 Anycubic Color Engine Pro Driver for Kobra-S1 (vanilla) Klipper (based on SV08 ACE PRO)
+# ACE Pro - Anycubic Color Engine Pro Driver for Klipper
 
-A Klipper driver for the Anycubic Color Engine Pro multi-material unit(s), optimized for Kobra-S1 3D printer.
+Based on the great work of utkabobr ([DuckACE](https://github.com/utkabobr/DuckACE)) and szkrisz ([ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)).
+This is a fork of szkrisz' ACEPRO Klipper driver.
+
+This Anycubic-centric fork has diverged significantly from the original and focuses on:
+- Supporting multiple ACE units.
+- Adds RFID support (to automatically populate inventory)
+- Adds more Endless-Spool matching modes (exact, material only or just use the next available spool)
+- Splitting functionality into focused modules (instead of one large file)
+- Shortening load/unload times with revised feed sequences
+- Adding many console commands for experimentation ;)
+- Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5)
+- Expanding controls/panels in the ACE KlipperScreen panel
+
+The provided configurations are tailored for use with Kobra-S1 and Kobra-3 printers (I have only those, so it's also only tested with those printers).
+
+In general other (non-)Anycubic printers are possible to use, but adaptations of the feed/retract lengths and cut tip and wipe macros, etc. will be necessary.
+If your printer has only one filament-sensor at the toolhead, use Kobra-3 config files as reference/starting point.
+In case your printer has two sensors (one at toolhead, one before that/outside the print chamber), use the KS1 config.
 
 ## 📋 Table of Contents
 
 - [Features](#-features)
+- [Architecture](#-architecture)
 - [Hardware Requirements](#-hardware-requirements)
 - [Installation](#-installation)
 - [Configuration](#-configuration)
 - [Commands Reference](#-commands-reference)
 - [Endless Spool Feature](#-endless-spool-feature)
 - [Inventory Management](#-inventory-management)
-- [Hardware Setup](#-hardware-setup)
 - [Contributing](#-contributing)
 - [Credits](#-credits)
 
 ## ✨ Features
-- **Multi-ACE Pro Support**: Supports multiple ACE-PRO Units
-- **Multi-Material Support**: Full 4-slot filament management
-- **Adaptive Purge Volume support (for Orcaslicer) via gcode postprocessing script
-- **Persistent State**: Settings and inventory saved across restarts
-- **Feed Assist**: Advanced filament feeding control
-- **Runout Detection**: Dual sensor runout detection system
-- **Inventory Tracking**: Material type, color, and temperature management
-- **Debug Tools**: Comprehensive diagnostic commands
-- **Seamless Integration**: Native Klipper integration
 
-TODO:
-- **Endless Spool**: Automatic filament switching on runout
+### Core Functionality
+- ✅ **Multi-ACE Pro Support**: Multiple ACE units support (tested with 3 ACEPRO units for 12 color printing, but more should be possible)
+- ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
+- ✅ **Persistent State**: Inventory and settings saved across restarts
+- ✅ **Runout Detection**: Real-time state-change detection
+- ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
+- ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
+- ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
+
+## 📖 Documentation
+
+**Start here for complete information:**
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**
+- **[example_cmds.txt](example_cmds.txt)**
+
+## 🏗️ Architecture
+
+This implementation is organized into separate modules:
+
+```
+ace/
+├── __init__.py           # Module initialization
+├── manager.py            # AceManager - orchestrates all ACE units
+├── instance.py           # AceInstance - per-unit handler (4 slots each)
+├── endless_spool.py      # Automatic filament switching logic
+├── runout_monitor.py     # Filament runout detection during printing
+├── serial_manager.py     # USB communication protocol
+├── commands.py           # G-code command handlers (37 commands)
+└── config.py             # Configuration constants and helpers
+
+config/
+├── ace_K3.cfg            # Kobra 3 ACE configuration
+├── ace_KS1.cfg           # Kobra S1 ACE configuration
+├── printer_K3.cfg        # Kobra 3 printer macros
+├── printer_KS1.cfg       # Kobra S1 printer macros
+├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
+└── ace_macros_generic.cfg # Shared ACE helper macros
+
+
+├── ARCHITECTURE.md       
+├── example_cmds.txt
+└── README.md             # This file
+```
+
+📖 **For Detailed Architecture Documentation, see [ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ## 🔧 Hardware Requirements
 
 ### Required Components
-- One or more **Anycubic Color Engine Pro** multi-material unit
-- **Filament Sensors**: 
-  - RMS sensor (at splitter exit)
-  - Toolhead sensor (before hotend)
-- **Hotend**: Compatible with filament cutting (recommended)
+- 1-N **Anycubic Color Engine Pro** units
+- **Filament Sensors** (required): 
+  - Toolhead sensor (before hotend) - for runout detection
+  - Optional: RMS sensor (return module) - for jam detection and path validation
+- **Hotend**: Recommended: Filament cutter
+- **ACE Adapter**: Ace-Pro to USB Adapter
 
+### ACE Pro USB Pin Configuration / Adapter
+![Connector Pinout](/img/connector.png)
+Connect the ACE Pro to a regular USB port and configure the sensor pins according to your board layout.
+![USB Adapter ((c) Gwebster)](/img/Ace2USB_gwebster.png)
 ## 📦 Installation
 
-### 1. Clone Repository
+### Prerequisites
+
+1. **Clone Repository**
 ```bash
 cd ~
 git clone https://github.com/Kobra-S1/ACEPRO.git
 ```
 
-### 2. Create Symbolic Links
-```bash
-# Link the driver to Klipper extras
-ln -sf ~/ACEPRO/extras/ace.py ~/klipper/klippy/extras/ace.py
-ln -sf ~/ACEPRO/extras/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
-
-# Link the configuration file
-ln -sf ~/ACEPRO/ace.cfg ~/printer_data/config/ace.cfg
-```
-### 2.1 Update your printer.cfg Kobra S1 G9111 macro to support initial tool parameter
-```
-# =======================
-# G9111 — Startup Macro for Anycubic slicer compatibility
-# =======================
-[gcode_macro G9111]
-description: "Startup: G9111 BEDTEMP=<°C> EXTRUDERTEMP=<°C> [WIPETEMP=<°C>] [TOOL=inital tool index]"
-variable_wipe_temp: 150
-variable_heat_pos_x: 40
-variable_heat_pos_y: 276
-variable_heat_pos_z: 5
-variable_travel_speed: 200  # mm/s
-
-gcode:
-  # Helper: strip one leading '=' if present, then float
-  {% set bed_raw = (params.BEDTEMP | default(params.S) | default("60")) | string %}
-  {% set noz_raw = (params.EXTRUDERTEMP | default(params.T) | default("200")) | string %}
-  {% set wipe_raw = (params.WIPETEMP | default(printer["gcode_macro G9111"].wipe_temp) | string) %}
-
-  {% set TOOL = ((params.TOOL | default(params.tool) | default(params.T) | default(params.t) | default("-1")) | string | replace('=', '', 1) | int) %}  
-
-  {% set BEDTEMP = (bed_raw | replace('=', '', 1)) | float %}
-  {% set EXTRUDERTEMP = (noz_raw | replace('=', '', 1)) | float %}
-  {% set WIPETEMP = (wipe_raw | replace('=', '', 1)) | float %}
-  
-  {% set f_travel = (printer["gcode_macro G9111"].travel_speed | float) * 60 %}
-
-  { action_respond_info(
-      "G9111: bed=%.1f°C, wipe=%.1f°C, final nozzle=%.1f°C, travel_speed=%.1f tool=%d"
-      % (BEDTEMP, WIPETEMP, EXTRUDERTEMP, f_travel, TOOL)
-    ) }
-    
-  # Set temps
-  RESPOND TYPE=echo MSG="No wait pre-heat for nozzle wipe"
-  M104 S{WIPETEMP}
-  M140 S{BEDTEMP}
-
-  RESPOND TYPE=echo MSG="Home Y,X"
-  G28 Y X
-
-  RESPOND TYPE=echo MSG="Wait for pre-heat temp reached"
-  TO_THROW_POSITION
-  # Wait to wipe temp
-  M109 S{WIPETEMP}
-  RESPOND TYPE=echo MSG="Wipe nozzle"
-  WIPE_ENTER
-  WIPE_NOZZLE
-  WIPE_STOP
-  WIPE_EXIT
-
-  RESPOND TYPE=echo MSG="Homing"
-  G90
-  G28 Z
-  M106 S255
- 
-  RESPOND TYPE=echo MSG="(Adaptive) bed mesh"
-  BED_MESH_CALIBRATE PROFILE=adaptive ADAPTIVE=1
-    
-  # Final nozzle temp (wait)
-  RESPOND TYPE=echo MSG="Heat nozzle to print temperature"
-  M106 S0
-  MOVE_HEAT_POS
-  M109 S{EXTRUDERTEMP}
-
-  #Inform ace that this is initial startup toolchange. This avoids double wipping from this macro and the toolchange macro
-  {% if printer["gcode_macro _ACE_STATE"] is defined
-   and printer["gcode_macro _ACE_STATE"].startup_toolchange is defined %}
-    SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=startup_toolchange VALUE=1
-  {% endif %}
-  
-  ; if a tool index was passed, activate it
-  {% if TOOL >= 0 %}
-      RESPOND TYPE=echo MSG="Selecting passed active tool"
-      T{TOOL}
-  {% else %}
-    # Assure tool active / filament loaded from ACE slot
-    {% set current_extruder = printer.toolhead.extruder %}
-    {% set suffix = current_extruder | replace('extruder','') %}
-    {% set tool_num = suffix if suffix|length > 0 else '0' %}
-    RESPOND TYPE=echo MSG="Re-selecting active tool"
-    T{tool_num}
-  {% endif %}
-
-  RESPOND TYPE=echo MSG="Prime nozzle"
-  G92 E0
-  G1 E50 F400
-  G1 E60 F150
-  G1 E90 F150
-  G92 E0
-
-  RESPOND TYPE=echo MSG="Wipe nozzle after purge"
-  TO_FRONT_OF_THROW_BLADE
-  TO_BACK_OF_THROW_BLADE
-  TO_FRONT_OF_THROW_BLADE
-  TO_BACK_OF_THROW_BLADE
-
-  WIPE_ENTER
-  WIPE_NOZZLE
-  WIPE_STOP
-  WIPE_EXIT
-
-  RESPOND TYPE=echo MSG="Purge line"
-  G91
-  G1 Z2 F1000  
-  UNDERLINE
-
-  RESPOND TYPE=echo MSG="G9111 complete."
-```
-### 2.2 Update in Orca slicer your start machine-gcode to provide the initial_tool to G9111 macro
-```
-G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperature[initial_tool]] tool=[initial_tool]
-```
-### 2.3 (Optional) To support colorchange adaptive purge-volume, add postprocessing script call to your Orca Slicer Profile
-- In Orca Global Process settings select the "Others" tab.
-- Scroll down to "Post-processings Scripts"
-- Add the below line
-```/usr/bin/python3 /home/YourUserNameHere/ACEPRO/orca_flush_to_purgelength.py```
- You need to adapt the path to the python interpreter as also to the script to you local setup.
- For linux environment, dont use relative path like "~/", only absolute path work properly in Orca.
- 
-### 3. Update Python Dependencies
+2. **Install Python Dependencies (if not already installed)**
 ```bash
 # Activate Klipper virtual environment
 source ~/klippy-env/bin/activate
 
-# Update pyserial to version 4.5 or higher
+# Install required packages
 pip3 install pyserial --upgrade
 ```
 
-### 4. Update Printer Configuration
-Add to your `printer.cfg` the [ace.cfg].
-IMPORTANT: Move the existing filament_switch_sensor entries ABOVE the ace.cfg include, as they are needed by the ace driver, otherwise you get a error message which reminds you in case you forget. ;)
-Example:
+### Option 1: Automatic Installation (Recommended)
 
-```ini
-### Filament runout sensor must be defined before ace.cfg +++++++++++++++
-[filament_switch_sensor filament_runout_nozzle]
-pause_on_runout: True
-runout_gcode:
-  TO_THROW_POSITION
-insert_gcode:
-  WIPE_ENTER
-  WIPE_NOZZLE
-  WIPE_STOP
-  WIPE_EXIT
-event_delay: 3.0
-pause_delay: 0.5
-switch_pin: nozzle_mcu:PB0
+Use the interactive installer script for automated setup:
 
-# ACE Pro return detection module (on the back of KS1 printer)
-[filament_switch_sensor filament_runout_rdm]
-pause_on_runout: False  # Enable this only if ACE is used to feed filament
-switch_pin: PB0
+```bash
+cd ~/ACEPRO
+chmod +x installer.sh
+./installer.sh
+```
 
-[include ace.cfg]
+The script will:
+- Prompt for your printer model (Kobra 3 or Kobra S1)
+- Create symlinks for the ACE module
+- Backup and install printer configuration
+- Copy printer_generic_macros.cfg to your config folder (with backup prompt)
+- Link ACE configuration and macro files
+- Optional: Install KlipperScreen panel
+- Optional: Restart Klipper service
 
+**Recommended for most users** - handles all steps including backups and conflict detection.
+
+### Option 2: Manual Installation
+
+If you prefer manual setup or the automatic installer doesn't work for your setup:
+
+#### Step 1: Create Required Symlinks
+
+```bash
+# Link the ACE module folder to Klipper extras
+ln -sf ~/ACEPRO/extras/ace ~/klipper/klippy/extras/ace
+
+# Link the virtual_pins helper used by ACE
+ln -sf ~/ACEPRO/extras/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
+```
+
+#### Step 2: Backup and Install Printer Configuration
+```bash
+# Backup your current printer configuration
+cp ~/printer_data/config/printer.cfg ~/printer_data/config/printer.cfg.backup
+
+# Choose your printer variant and copy the appropriate configuration
+# IMPORTANT: Some macros in printer.cfg are also used by the ACE Pro module.
+# The provided configuration includes all necessary macros.
+# If you have custom modifications in your original printer.cfg,
+# merge them into the new configuration after installation.
+
+# For Kobra 3:
+cp ~/ACEPRO/config/printer_K3.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_K3.cfg ~/printer_data/config/ace_K3.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+
+# For Kobra S1:
+cp ~/ACEPRO/config/printer_KS1.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_KS1.cfg ~/printer_data/config/ace_KS1.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+```
+
+
+### Post-Installation Configuration
+
+#### Orca Slicer Integration
+
+1. **Update Start G-code**
+
+Update your Orca slicer start machine-gcode to provide the initial_tool parameter to G9111 macro:
+```
+G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperature[initial_tool]] tool=[initial_tool]
+```
+
+2. **Update End G-code**
+
+Update your Orca slicer end machine-gcode to call PRINT_END macro:
+```
+PRINT_END CUT_TIP=1
+```
+This will assure that at print end, ACE Pro driver (if available) gets informed of the print end, as also filament is cut and retracted and printhead moves to park position.
+If you prefer to NOT get the filament cut at print end, change CUT_TIP argument to zero:
+```
+PRINT_END CUT_TIP=0
+```
+
+3. **(Optional) Add Adaptive Purge Volume Post-processing**
+
+   To support color change adaptive purge volume:
+- In Orca Global Process settings, select the **"Others"** tab
+- Scroll down to **"Post-processing Scripts"**
+- Add the following line (adapt path to your setup):
+```
+/usr/bin/python3 /home/YourUserNameHere/ACEPRO/slicer/orca_flush_to_purgelength.py
+```
+**Note**: Use absolute paths only (not `~/` relative paths) - Orca requires full paths for post-processing scripts.
+
+4. **Optional: Add command to also start filament dryer at print start**
+
+If you want to always dry your filament at print start, use the ACE_START_DRYING command in your start gcode:
+```
+ACE_START_DRYING TEMP=55 DURATION=240
+```
+Check the documentation for the possible parameters; you can dry all ACEs or target a specific instance.
+Tip: Combined with the G4 dwell G-code, you can start drying first and wait a predefined time before continuing the print.
+
+
+#### KlipperScreen Panel (Optional, only needed if you chose manual installation)
+
+If you have KlipperScreen installed, link the ACE Pro panel:
+```bash
+ln -sf ~/ACEPRO/KlipperScreen/acepro.py ~/KlipperScreen/panels/acepro.py
+sudo systemctl restart KlipperScreen
 ```
 
 ## ⚙️ Configuration
 
-### Basic Configuration (ace.cfg)
-```ini
-[save_variables]
-filename: ~/printer_data/config/saved_variables.cfg
+### Configuration File Structure
 
-# Hack to get a on/off switch to be able to switch between ACEPro and external spool print
-[virtual_pins]
+Configuration files are located in the `config/` folder. Choose the appropriate files for your printer model.
 
-[output_pin ACE_Pro]
-pin: virtual_pin:ace_pro
-pwm: False
-value:1
-shutdown_value:0
-
-[respond]
-
-[ace]
-#serial: /dev/ttyACM0
-baud: 115200
-
-standard_filament_runout_detection: True
-#filament_runout_sensor_name_rdm: filament_runout_rdm
-#filament_runout_sensor_name_nozzle: filament_runout_nozzle
-
-feed_assist_active_after_ace_connect: False
-feed_speed: 60
-retract_speed: 50
-total_max_feeding_length:3000
-parkposition_to_toolhead_length:1000
-parkposition_to_rms_sensor_length: 100 #170
-toolhead_sensor_to_cutter: 22
-toolhead_cutter_to_nozzle: 60
-toolhead_nozzle_purge: 1
-toolhead_fast_loading_speed: 15
-toolhead_slow_loading_speed: 5
-toolchange_load_length: 3000 # Should be >= the lenght between ACE and the printers 4in1 splitter.
-max_dryer_temperature: 55
-extruder_feeding_length: 1 
-extruder_feeding_speed: 5
-extruder_retraction_length: -50
-extruder_retraction_speed: 10
-default_color_change_purge_length: 50
-default_color_change_purge_speed: 400
-incremental_feeding_length: 100 
-incremental_feeding_speed: 60 
+```
+config/
+├── ace_K3.cfg                  # Kobra 3 ACE configuration
+├── ace_KS1.cfg                 # Kobra S1 ACE configuration
+├── ace_macros_generic.cfg      # Shared ACE macros for all printers
+├── printer_generic_macros.cfg  # Shared printer macros (pause/resume/velocity/purge)
+├── printer_K3.cfg              # Kobra 3 printer macros & settings
+└── printer_KS1.cfg             # Kobra S1 printer macros & settings
 ```
 
-If you have multiple ACE PRO units, copy and paste your existing [ace] section below it and rename [ace] to [ace 1] for the second unit, [ace 2] for the third, etc.
-[ace] or [ace 0] has to be always there and refers to the first ACE PRO unit (which is directly connected to your computer).
+### Include Hierarchy
 
-### Pin Configuration
-![Connector Pinout](/img/connector.png)
+The configuration uses a modular include structure. The `printer_KS1.cfg` or `printer_K3.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
 
-Connect the ACE Pro to a regular USB port and configure the sensor pins according to your board layout.
+**For Anycubic Kobra S1:**
+```
+printer.cfg (copy from printer_KS1.cfg)
+  ├─ [include printer_generic_macros.cfg]
+  │   └─ PAUSE/RESUME, velocity stack, purge helpers, wipe/throw moves
+  └─ [include ace_KS1.cfg]
+      ├─ [include ace_macros_generic.cfg]
+      │   └─ ACE helper macros (toolchange hooks, safety wrappers)
+      ├─ [save_variables]
+      └─ [ace] section with ACE configuration parameters
+```
+
+**For Anycubic Kobra 3:**
+```
+printer.cfg (copy from printer_K3.cfg)
+  ├─ [include printer_generic_macros.cfg]
+  │   └─ PAUSE/RESUME, velocity stack, purge helpers, wipe/throw moves
+  └─ [include ace_K3.cfg]
+      ├─ [include ace_macros_generic.cfg]
+      │   └─ ACE helper macros (toolchange hooks, safety wrappers)
+      ├─ [save_variables]
+      └─ [ace] section with ACE configuration parameters
+```
+
+#### Printer Configuration Files
+
+| File | Purpose | Size | Printer |
+|------|---------|------|---------|
+| `printer_K3.cfg` | Kobra 3 printer macros & settings | - | Anycubic Kobra 3 |
+| `printer_KS1.cfg` | Kobra S1 printer macros & settings | - | Anycubic Kobra S1 |
+| `printer_generic_macros.cfg` | Shared printer macros (pause/resume, velocity stack, purge helpers) | - | All printers |
+
+### Configuration Setup by Printer Model
+
+#### For Anycubic Kobra 3
+
+Copy the configuration files:
+
+```bash
+# From ~/ACEPRO directory
+cp ~/ACEPRO/config/printer_K3.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_K3.cfg ~/printer_data/config/ace_K3.cfg
+ln -sf ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+```
+
+If you build your own `printer.cfg`, include the shared files in this order:
+```ini
+[include printer_generic_macros.cfg]
+[include ace_K3.cfg]
+# ace_K3.cfg includes ace_macros_generic.cfg for you
+```
+
+#### For Anycubic Kobra S1 / S1 Pro
+
+```bash
+cp ~/ACEPRO/config/printer_KS1.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_KS1.cfg ~/printer_data/config/ace_KS1.cfg
+ln -sf ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+```
+
+If you build your own `printer.cfg`, include the shared files in this order:
+```ini
+[include printer_generic_macros.cfg]
+[include ace_KS1.cfg]
+# ace_KS1.cfg includes ace_macros_generic.cfg for you
+```
+
+### Multi-Unit Configuration
+
+For multiple ACE units, simply set `ace_count`:
+
+```ini
+[ace]
+ace_count: 2    # Instance 0 (T0-T3) + Instance 1 (T4-T7)
+baud: 115200
+feed_speed: 60
+# ... rest of config shared by all instances
+```
+
+Each unit is automatically detected by USB topology and assigned:
+- **Instance 0**: T0-T3 (first ACE connected)
+- **Instance 1**: T4-T7 (second ACE connected)
+- **Instance 2**: T8-T11 (third ACE connected)
+- **Instance 3**: T12-T15 (fourth ACE connected)
+
+**Multiple Instance Example:**
+```ini
+[ace]
+ace_count: 4    # e.g. for four ACE units (16 tools total: T0-T15)
+baud: 115200
+feed_speed: 60
+retract_speed: 50
+```
+
+### Sensor Configuration
+
+**Filament Runout Sensors:**
+`filament_runout_sensor_name_nozzle` is required.
+`filament_runout_sensor_name_rdm` is optional and helps verify the filament has fully retracted to the hub.
+
+```ini
+[ace]
+# Enable RDM (Return Module) sensor monitoring
+filament_runout_sensor_name_rdm: filament_runout_rdm
+
+# Enable nozzle/toolhead sensor monitoring
+filament_runout_sensor_name_nozzle: filament_runout_nozzle
+```
+
+The RunoutMonitor component will pause printing if filament runs out during a job when these sensors are configured (detected by filament_runout_sensor_name_nozzle).
+
+### Customization
+
+To customize settings for your specific hardware:
+
+1. Copy the appropriate config file for your printer
+2. Modify parameters based on your:
+   - Tube lengths between components
+   - Desired feed/retract speeds
+   - Sensor configuration
+   - Printer-specific movement parameters
+3. Test with help of the T0, T1, etc. toolchange console commands first before full print cycles
+
+For detailed command examples with config parameters, see [example_cmds.txt](example_cmds.txt)
+
 
 ## 🎯 Commands Reference
 
-### Basic Operations
-Most commands support a INSTANCE=n parameter.
-This allows to select to which ACE-pro Unit the commands shall be send, if none is given instance 0 (first ACEPRO) is assumed.
-The direct to your computer connected ACE PRO get INSTANCE id 0 and gets the tool indicies 0-3 assigned (T0,T1,T2,T3), the next (daisy-chained)
-connected ACE PRO Unit will be the INSTANCE id 1 and gets the tools indicies 4-7 assigned (T4,T5,T6,T7) and so on.
+**For complete command documentation with examples, see [example_cmds.txt](example_cmds.txt)**
 
-NOTE: ACE PRO units sometimes tend to have (usb) connection issues and can disappear&reappear mid-print, the driver trys to reconnect, but that might or may not work
-properly without PAUSING the print. If print gets PAUSE and a lot of serial connection errors show up in the console output, you may have to power the ACE Units OFF/ON and/or replug the USB connection to the PC to get them in a usable state gain. Wait then until console shows the firmware info for each connected ACE once again before trying to resume the print with "RESUME" command in console/mainsail.
+This driver provides **37 GCode commands** organized by category:
 
-Example trace output to look for, for two connected ACE PROs:
-```
-ACE[1]:{'id': 0, 'code': 0, 'result': {'id': 1, 'slots': 4, 'model': 'Anycubic Color Engine Pro', 'firmware': 'V1.3.863', 'boot_firmware': 'V1.0.1', 'structure_version': '0'}, 'msg': 'success'}
-ACE[0]:{'id': 0, 'code': 0, 'result': {'id': 1, 'slots': 4, 'model': 'Anycubic Color Engine Pro', 'firmware': 'V1.3.863', 'boot_firmware': 'V1.0.1', 'structure_version': '0'}, 'msg': 'success'}
-```
+### Tool Selection
 
-By default ACE PRO driver is enabled if you include [ace.cfg] in printer.cfg.
-Either comment that out if you dont want to use ACE Pro for printing, or keep it and use the "ACE Pro" switch in mainsail, you find it in the "Miscellaneous" section of mainsail (above the filament runout sensor states). This settings is not persistent, so after restart ACE Pros are automatically active again.
-
-| Command | Description | Parameters |
-|---------|-------------|------------|
-| `ACE_CHANGE_TOOL` | Manual tool change | `TOOL=<0-3\|-1>` |
-| `ACE_FEED` | Feed filament | `INDEX=<0-3> LENGTH=<mm> [SPEED=<mm/s>]` |
-| `ACE_RETRACT` | Retract filament | `INDEX=<0-3> LENGTH=<mm> [SPEED=<mm/s>]` |
-| `ACE_GET_CURRENT_INDEX` | Get current slot | Returns: `-1, 0, 1, 2, 3` |
-
-### Feed Assist
-| Command | Description | Parameters |
-|---------|-------------|------------|
-| `ACE_ENABLE_FEED_ASSIST` | Enable feed assist | `INDEX=<0-3>` |
-| `ACE_DISABLE_FEED_ASSIST` | Disable feed assist | `INDEX=<0-3>` |
-
-### Inventory Management
-| Command | Description | Parameters |
-|---------|-------------|------------|
-| `ACE_SET_SLOT` | Set slot info | `INDEX=<0-3> COLOR=<R,G,B> MATERIAL=<name> TEMP=<°C>` |
-| `ACE_SET_SLOT` | Set slot empty | `INDEX=<0-3> EMPTY=1` |
-| `ACE_QUERY_SLOTS` | Get all slots | Returns JSON |
-| `ACE_SAVE_INVENTORY` | Save inventory | Manual save trigger |
-
-### Diagnostics
 | Command | Description |
 |---------|-------------|
-| `ACE_TEST_RUNOUT_SENSOR` | Test sensor states |
-| `ACE_DEBUG` | Debug ACE communication |
+| `T0` - `Tn` | Change to tool (auto-registered based on `ace_count`) |
+| `ACE_GET_CURRENT_INDEX` | Query currently loaded tool index |
+| `ACE_CHANGE_TOOL` | Execute tool change with validation |
 
-### Dryer Control
+**Custom Tool Macro Support:**
+
+ACE automatically detects if you have defined custom `[gcode_macro T<n>]` macros in your printer.cfg and will **not** auto-register those tools. This allows you to implement custom tool change logic for integrations like [Spoolman](https://github.com/Donkie/Spoolman).
+
+**Example for Spoolman integration:**
+```ini
+# Custom T0 macro with Spoolman support
+[gcode_macro T0]
+gcode:
+    # Set active spool in Spoolman
+    SET_ACTIVE_SPOOL ID=1
+    # Delegate to ACE for actual tool change
+    ACE_CHANGE_TOOL TOOL=0
+```
+
+See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
+(I don't use Spoolman, so this feature is not thoroughly tested.)
+
+### Smart Operations (Recommended)
+
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_START_DRYING` | Start dryer | `TEMP=<°C> [DURATION=<minutes>]` |
-| `ACE_STOP_DRYING` | Stop dryer | - |
+| `ACE_SMART_UNLOAD` | Intelligent unload with multi-slot fallback | `[TOOL=<index>]` |
+| `ACE_SMART_LOAD` | Load all non-empty slots to RMS sensor | - |
+| `ACE_FULL_UNLOAD` | Complete unload until slot empty | `TOOL=<index>` or `TOOL=ALL` |
+| `_ACE_HANDLE_PRINT_END` | End-of-print sequence (retract, cut, store) | Called by END_PRINT |
 
-### Loading/Unloading helper
+### Manual Feed/Retract Operations
+
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_SMART_UNLOAD` | Unload filament(s) to free filament path |
-| `ACE_SMART_LOAD` | Feeds all slots (on all ACEPro) once to the RMS and then back to parkposition  | - |
+| `ACE_FEED` | Feed filament from slot | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `LENGTH=<mm> [SPEED=<mm/s>]` |
+| `ACE_RETRACT` | Retract filament to slot | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `LENGTH=<mm> [SPEED=<mm/s>]` |
+| `ACE_STOP_FEED` | Stop active feed operation | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
+| `ACE_STOP_RETRACT` | Stop active retract operation | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
+| `ACE_SET_FEED_SPEED` | Dynamically update feed speed | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `SPEED=<mm/s>` |
+| `ACE_SET_RETRACT_SPEED` | Dynamically update retract speed | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `SPEED=<mm/s>` |
 
-### Loading/Unloading helper
+### Feed Assist Control
+
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_SET_PURGE_AMOUNT` | Sets the length of Filament to extrude for purging for the next comming toolchange |`PURGELENGTH=<mm> [PURGESPEED=<mm/s>]` |
+| `ACE_ENABLE_FEED_ASSIST` | Enable auto-push on spool detection | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
+| `ACE_DISABLE_FEED_ASSIST` | Disable auto-push | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
 
-### Toolchange commands
+### Inventory Management (5 commands)
+
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `T<n>` | Changes to other filament spool, automatically generated for each connected ACE Pro unit |`The tool index` |
+| `ACE_SET_SLOT` | Set slot metadata | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `COLOR=R,G,B MATERIAL=<name> TEMP=<°C>` |
+| `ACE_SET_SLOT` | Mark slot empty | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `EMPTY=1` |
+| `ACE_QUERY_SLOTS` | Query all slots across instances | `[INSTANCE=<0-3>]` omit for all |
+| `ACE_SAVE_INVENTORY` | Persist inventory to saved_variables.cfg | `[INSTANCE=<0-3>]` |
+| `ACE_RESET_PERSISTENT_INVENTORY` | Clear all slot metadata | `INSTANCE=<0-3>` |
+
+### RFID Inventory Sync (3 commands)
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_ENABLE_RFID_SYNC` | Enable RFID-driven inventory updates | `[INSTANCE=<0-3>]` omit for all |
+| `ACE_DISABLE_RFID_SYNC` | Disable RFID-driven inventory updates | `[INSTANCE=<0-3>]` omit for all |
+| `ACE_RFID_SYNC_STATUS` | Show RFID sync enablement state | `[INSTANCE=<0-3>]` omit for all |
+
+### Endless Spool Feature (5 commands)
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_ENABLE_ENDLESS_SPOOL` | Enable automatic filament swap on runout | - |
+| `ACE_DISABLE_ENDLESS_SPOOL` | Disable endless spool | - |
+| `ACE_ENDLESS_SPOOL_STATUS` | Query endless spool status | - |
+| `ACE_SET_ENDLESS_SPOOL_MODE` | Set match mode (exact, material, or next-ready) | `MODE=exact\|material\|next` |
+| `ACE_GET_ENDLESS_SPOOL_MODE` | Query current match mode | - |
+
+
+### Dryer Control (2 commands)
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_START_DRYING` | Start filament dryer | `[INSTANCE=<0-3>] TEMP=<°C> [DURATION=<minutes>]` |
+| `ACE_STOP_DRYING` | Stop dryer | `[INSTANCE=<0-3>]` |
+
+### Configuration & Purge
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_SET_PURGE_AMOUNT` | Override purge for next tool change | `PURGELENGTH=<mm> PURGESPEED=<mm/min> [INSTANCE=<0-3>]` |
+| `ACE_RESET_ACTIVE_TOOLHEAD` | Reset active tool to -1 | `INSTANCE=<0-3>` |
+
+### System & Diagnostics (7 commands)
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_GET_STATUS` | Query ACE hardware status | `[INSTANCE=<0-3>]` or omit for all |
+| `ACE_RECONNECT` | Manually reconnect serial | `[INSTANCE=<0-3>]` or omit for all |
+| `ACE_DEBUG_SENSORS` | Print all sensor states | - |
+| `ACE_DEBUG_STATE` | Print manager and instance state | - |
+| `ACE_DEBUG` | Send raw debug request to hardware | `INSTANCE=<0-3> METHOD=<name> [PARAMS=<json>]` |
+| `ACE_DEBUG_CHECK_SPOOL_READY` | Test spool ready check with timeout | `TOOL=<0-15> [TIMEOUT=<sec>]` |
+| `ACE_SHOW_INSTANCE_CONFIG` | Display resolved configuration | `[INSTANCE=<0-3>]` |
+
+### Testing & Advanced
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `ACE_DEBUG_INJECT_SENSOR_STATE` | Inject sensor state for testing | `TOOLHEAD=0\|1 RMS=0\|1` or `RESET=1` |
+
+**Command Parameter Resolution:**
+- **Priority 1**: `INSTANCE=<n> INDEX=<n>` (explicit slot)
+- **Priority 2**: `T=<tool>` or `TOOL=<tool>` (mapped to instance/slot)
+- **Priority 3**: Fallback to instance 0 if neither specified
+
+
+### System Control
+
+The ACE Pro switch in Mainsail (Miscellaneous section) enables or disables the system. The setting is **persistent**, so the next restart follows the last state of the switch.
 
 ## 📊 Inventory Management
 
-Track filament materials, colors, and printing temperatures for each slot.
+Track filament materials, colors, and temperatures for intelligent toolchanges and endless spool.
+
+**RFID handling:** When a slot transitions to `ready` and ACE reports `rfid=2` with non-empty material and color, the driver copies that material/color into the slot inventory, persists it, and emits a `// {"instance":..., "slots":...}` notify line. KlipperScreen listens for those notify lines and refreshes immediately, so the panel updates without pressing Refresh. RFID sync can be toggled with `ACE_ENABLE_RFID_SYNC` / `ACE_DISABLE_RFID_SYNC` (per-instance or all). Black RFID tag colors (0,0,0) are accepted and overwrite manual values; when RFID sync is enabled and a slot has an RFID spool, the KlipperScreen config dialog locks manual material/color changes.
+
+For detailed inventory examples, see [example_cmds.txt](example_cmds.txt#inventory-management).
 
 ### Set Slot Information
+
 ```gcode
 # Set slot with filament
-ACE_SET_SLOT INDEX=0 COLOR=255,0,0 MATERIAL=PLA TEMP=210
+ACE_SET_SLOT INSTANCE=0 INDEX=0 COLOR=255,0,0 MATERIAL=PLA TEMP=210
 
-# Set slot as empty
-ACE_SET_SLOT INDEX=1 EMPTY=1
+# Set multiple slots
+ACE_SET_SLOT INSTANCE=0 INDEX=1 COLOR=0,255,0 MATERIAL=PETG TEMP=240
+ACE_SET_SLOT INSTANCE=1 INDEX=0 COLOR=255,0,0 MATERIAL=PLA TEMP=210
+
+# Mark slot as empty
+ACE_SET_SLOT INSTANCE=0 INDEX=3 EMPTY=1
 ```
 
 ### Query Inventory
+
 ```gcode
-# Get all slots as JSON
+# Query all instances
 ACE_QUERY_SLOTS
 
+# Query specific instance
+ACE_QUERY_SLOTS INSTANCE=0
+
 # Example response:
+# Instance 0:
 # [
 #   {"status": "ready", "color": [255,0,0], "material": "PLA", "temp": 210},
-#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0},
 #   {"status": "ready", "color": [0,255,0], "material": "PETG", "temp": 240},
+#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0},
 #   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0}
 # ]
 ```
 
-################### TODO, currently not supported: ##################
-### Endless Spool
-| Command | Description |
-|---------|-------------|
-| `ACE_ENABLE_ENDLESS_SPOOL` | Enable endless spool |
-| `ACE_DISABLE_ENDLESS_SPOOL` | Disable endless spool |
-| `ACE_ENDLESS_SPOOL_STATUS` | Show endless spool status |
-
 ## 🔄 Endless Spool Feature
 
-The endless spool feature automatically switches to the next available filament slot when runout is detected, enabling continuous printing across multiple spools.
+Automatically switches to a matching spool when filament runs out, enabling continuous multi-day prints.
+
+📖 **For complete endless spool documentation, see [ARCHITECTURE.md - EndlessSpool Section](ARCHITECTURE.md#3-endless-spool-endless_spoolpy)**
 
 ### How It Works
-1. **Runout Detection** → Immediate response (no delay)
-2. **Disable Feed Assist** → Stop feeding from empty slot
-3. **Switch Filament** → Feed from next available slot
-4. **Enable Feed Assist** → Resume normal operation
-5. **Update State** → Save new slot index
-6. **Continue Printing** → Seamless continuation
+
+1. **Runout Detected** → Toolhead sensor detects filament absence
+2. **Jam Detection** → RMS sensor distinguishes true runout from jam
+3. **Material Matching** → Searches all slots for a compatible replacement
+  - **Match Mode "exact"**: Material **and** color must match
+  - **Match Mode "material"**: Material must match, color is ignored
+  - **Match Mode "next"**: First **ready** spool in round-robin order, ignoring material/color
+4. **Automatic Swap** → Marks old slot empty, changes to matching tool
+5. **Resume Print** → Continues printing without user intervention (or pauses if no match)
+
+### Detection Logic
+
+| Toolhead Sensor | RMS Sensor | Diagnosis |
+|----------------|------------|-----------|
+| CLEAR | CLEAR | **True Runout** → Find match & swap |
+| CLEAR | TRIGGERED | **Jam/Break** → Pause & notify |
+| TRIGGERED | TRIGGERED | Normal (filament present) |
 
 ### Enable/Disable
+
 ```gcode
-# Enable endless spool
+# Enable endless spool (global setting)
 ACE_ENABLE_ENDLESS_SPOOL
 
 # Disable endless spool
@@ -396,50 +581,264 @@ ACE_DISABLE_ENDLESS_SPOOL
 
 # Check status
 ACE_ENDLESS_SPOOL_STATUS
+
+# Set search mode (global)
+ACE_SET_ENDLESS_SPOOL_MODE MODE=exact      # Match material AND color (default)
+ACE_SET_ENDLESS_SPOOL_MODE MODE=material   # Match material only
+ACE_SET_ENDLESS_SPOOL_MODE MODE=next       # Take the next ready slot (ignores material/color)
+
+# Query current mode
+ACE_GET_ENDLESS_SPOOL_MODE
 ```
 
+### Match Mode Examples
+
+- **Exact**: T0 (red PLA) runs out → chooses the next **red PLA** slot; ignores blue PLA.
+- **Material**: T0 (red PLA) runs out → chooses any **PLA** slot (color ignored); still skips PETG.
+- **Next**: T0 runs out → picks the next **ready** slot in tool order (T1→T2→…), regardless of material/color; skips non-ready slots.
+
 ### Behavior
-- **Enabled**: Automatic switching on runout
-- **Disabled**: Print pauses on runout (standard behavior)
-- **No Available Slots**: Print pauses automatically
-- 
+
+- **Match Found**: Automatic tool change, print continues
+- **No Match**: Print pauses, user notification with RESUME/CANCEL buttons
+- **Jam Detected**: Immediate pause, notify user of jam location
+- **Search Order**: Starts at the next tool index and wraps around; `next` mode still requires slot status `ready`.
+- **Timeout Protection**: 5-minute safety timeout for swap operations
+
+### Requirements
+
+- Inventory should include material/color for best matching (required for `exact`, optional for `next`)
+- Matching is **case-insensitive** and **whitespace-trimmed**
+- `exact` requires material **and** color; `material` ignores color; `next` ignores both
+- Only `ready` slots are considered for swapping in all modes
+
 ### Persistent Storage
-- Inventory is automatically saved to Klipper's `save_variables`
-- Restored on restart
-- Manual save: `ACE_SAVE_INVENTORY`
+
+All inventory and state is automatically saved to `saved_variables.cfg`:
+- Slot metadata (material, color, temp, status)
+- Current tool index
+- Filament position (splitter, bowden, toolhead, nozzle)
+- Endless spool enabled state
+- Match mode configuration
+
+📖 **See [ARCHITECTURE.md - Runout Detection Flow](ARCHITECTURE.md#runout-detection-flow) for detailed sequence diagram**
+
+## ⚠️ Error Recovery & Toolchange Failure Handling
+
+ACE Pro includes error handling for toolchange failures with interactive recovery dialogs.
+
+### Toolchange Failure Dialog
+
+When a tool change fails (e.g., filament loading issue, sensor timeout, path blocked), ACE automatically:
+
+1. **Pauses the print** (if printing)
+2. **Shows an interactive dialog** with the error details
+3. **Provides recovery options:**
+   - **Retry T<n>** - Retry the failed toolchange
+   - **Extrude 100mm** - Manually push filament through (useful for clearing blockages)
+   - **Retract 100mm** - Manually pull filament back (useful for clearing jams)
+   - **Resume** (during print) - Continue printing once tool is loaded
+   - **Cancel Print** (during print) - Abort the print job
+   - **Continue** (not printing) - Dismiss dialog and continue
+
+**If not printing:** Extruder heater is automatically turned off for safety.
+If printing, the idle time of the printer in PAUSE mode (before shutting down) is extended to a couple of hours to survive overnight pauses.
+Heatbed is left ON, but nozzle temp is reduced in PAUSE mode, so resuming / retry toolchange can take few minutes until the nozzle reaches print temperature again.
+### Recommended Recovery Procedure
+
+When a toolchange fails:
+
+1. **Check the filament path is clear:**
+   - Use `ACE_DEBUG_SENSORS` to verify sensor states
+   - Ensure toolhead sensor shows CLEAR (no filament blocking)
+   - Check RMS sensor is also CLEAR (if available)
+   - Look for physical obstructions (tangled filament, jam at splitter, etc.)
+
+2. **Clear any obstructions:**
+   - If path is blocked, use **"Retract 100mm"** button to pull back filament
+   - Manually remove any tangled or jammed filament
+   - Check that splitter/bowden tube is not clogged
+
+3. **Retry the toolchange:**
+   - Press **"Retry T<n>"** button to reattempt loading the tool
+   - May need multiple retry attempts depending on issue
+   - Each retry will re-run the full load sequence
+
+4. **Verify filament extrusion:**
+   - Once tool loads successfully, filament should come out of the hotend by priming operation. You can also use **"Extrude 100mm"** to verify filament is flowing
+   - Check that filament is actually coming out of the nozzle
+   - Ensure consistent extrusion before resuming print
+
+5. **Resume print:**
+   - Only press **"Resume"** when you've confirmed:
+     - Tool is fully loaded to nozzle
+     - Filament is extruding properly
+     - No obstructions remain in path
+   - Print will continue from pause point
+
+
+## 🧪 Testing
+
+### Debug Commands
+
+```gcode
+ACE_DEBUG_SENSORS          # Print all sensor states (toolhead, RMS, path-free)
+ACE_DEBUG_STATE            # Print manager state (tool mapping, filament position)
+ACE_GET_STATUS INSTANCE=0  # Query ACE hardware status
+ACE_QUERY_SLOTS            # Check inventory (all instances)
+ACE_QUERY_SLOTS INSTANCE=0 # Check inventory (instance 0 only)
+ACE_SHOW_INSTANCE_CONFIG   # Display resolved configuration
+```
+
+### Sensor Validation
+
+For Test sensor functionality, DONT use it if you are not know what you are doing:
+
+```gcode
+# Manual sensor state injection (for testing)
+ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=1 RMS=0   # Simulate runout
+ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0 RMS=1   # Simulate jam
+ACE_DEBUG_INJECT_SENSOR_STATE RESET=1             # Use real sensors again
+```
+
+
+## 🖥️ KlipperScreen Integration (Optional)
+
+KlipperScreen ships with a dedicated ACE Pro panel. The panel stays usable on small touch screens and mirrors the driver features:
+- **Endless spool + match mode**: Toggle endless spool for all instances and pick match mode (exact/material/next). Match mode selection is disabled while endless spool is off.
+- **Instance cycling**: A shuffle button cycles ACE instances and shows the active one (e.g., "ACE 1 (2 of 3)").
+- **Refresh & utilities**: A refresh button pulls inventory + active tool; a Utilities button opens feed/retract controls.
+- **Slots UI**: Gear button runs load/unload; tapping a slot opens config. RFID-tagged slots display “(RFID)”. If RFID sync is enabled and a slot has an RFID tag, material/color editing is locked. Saving requires a material and temperature; “Empty” is not saved as ready. Material picks auto-fill a default temperature; color picker offers sliders and presets.
+- **Utilities panel**: Tool selector disables empty slots. Actions include feed/retract with keypad amount, stop feed/retract, smart load all, smart unload (optional tool), full unload (selected tool), feed-assist on/off, RFID sync on/off, and ACE reconnect.
+- **Dryer control**: Per-instance controls with temp slider (25–55°C, default 45°C) and duration slider (30–480 min, default 240). Buttons: start/stop per instance, toggle current instance, start all dryers, stop all dryers.
+
+### Panel Screenshots
+
+**Main ACE Pro Panel**
+
+![KlipperScreen Main Panel](/img/ks_main_ace_pro.png)
+
+The main panel shows all configured tools with their colors, materials, and temperatures. Toggle endless spool and match mode directly from the interface.
+
+**Tool Configuration**
+
+![Spool Configuration](/img/ks_spool_config.png)
+
+Configure each tool slot by setting material, color, and printing temperature.
+
+**Material Selection**
+
+![Material Selection](/img/ks_material_selection.png)
+
+Choose from predefined materials (PLA, PETG, ABS, etc.)
+
+**Color Picker**
+
+![Color Picker](/img/ks_color_picker.png)
+
+RGB color picker with preset color buttons for quick selection. Color is used for endless spool matching.
+
+**Spool Load/Unload Operations**
+
+![Spool Load/Unload](/img/ks_spool_load_unload.png)
+
+Manual operations including Smart Unload, Smart Load All, Full Unload, and Feed Assist control.
+
+**Dryer Control**
+
+![Dryer Control](/img/ks_dryer.png)
+
+Set target temperature and duration for the ACE Pro's built-in filament dryer. Control individual ACE units or start all dryers simultaneously.
+
+### Prerequisites
+
+- **KlipperScreen** must be installed and running
+- This panel is **optional** — ACE Pro functions via G-code commands regardless
+
+### Installation
+
+1. **Verify KlipperScreen is installed:**
+   ```bash
+   # Check if KlipperScreen directory exists
+   ls -la ~/KlipperScreen/panels/
+   ```
+
+2. **Link the ACE Pro panel into KlipperScreen:**
+   ```bash
+   # Create symlink to the panel file
+   ln -sf ~/ACEPRO/KlipperScreen/acepro.py ~/KlipperScreen/panels/acepro.py
+   ```
+
+3. **Restart KlipperScreen service:**
+   ```bash
+   # Restart the KlipperScreen service
+   sudo systemctl restart KlipperScreen
+   
+   # Or if using supervisor (check your setup)
+   sudo supervisorctl restart klipperscreen
+   ```
+
+4. **Verify installation:**
+   - Open KlipperScreen
+   - Look for "ACE Pro" panel in the menu
+   - Panel should appear with inventory slots and controls
+
+### Panel Features
+
+**Inventory Management:**
+- View all loaded materials and colors
+- Set material/color/temperature for each slot
+- Mark slots as empty
+- Persist inventory to `saved_variables.cfg`
+
+**Tool Control:**
+- Quick tool selection (T0-T15)
+- View current active tool
+- Manual feed/retract operations
+
+**Endless Spool:**
+- Toggle endless spool on/off
+- Set match mode (exact material+color or material only)
+- View current endless spool status
+
+**Dryer Control:**
+- Start/stop filament dryer
+- Set temperature and duration
 
 ## 🔌 Hardware Setup
 
-### Sensor Installation
-1. **Extruder Sensor**: Install at the splitter exit point
-2. **Toolhead Sensor**: Install before the hotend entry
-3. **Wiring**: Connect sensors to configured pins with pullup resistors
+### Sensor Installation (Required)
+
+1. **Toolhead Sensor**: Before hotend entry (runout detection)
+2. **RMS Sensor**: At splitter/return module (jam detection, path validation)
+3. **Wiring**: Connect to configured pins with proper pullup/pulldown
 
 ### USB Connection
-Connect the ACE Pro unit to your printer's host computer via USB. The driver will automatically detect the device.
-If multiple ACE PRO units are used, daisy-chain the units (same setup as with Kobra-S1 stock FW)
+
+- Connect ACE Pro unit(s) to host computer via USB
+- Driver auto-detects by USB topology (consistent ordering)
+- For multiple units: daisy-chain via ACE rear USB ports
 
 ### Splitter Configuration
-Use a x-in-1 splitter, matching to your numbers or total spools in your ACE-Pro units
 
-## 🤝 Contributing
+Use an N-in-1 splitter matching your total tool count:
+- 1 ACE (4 tools) → 4-in-1 splitter
+- 2 ACE (8 tools) → 8-in-1 splitter
+- 3 ACE (12 tools) → 12-in-1 splitter
+- 4 ACE (16 tools) → 16-in-1 splitter
 
-Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.
 
-### Development Setup
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+
 
 ## 📜 Credits
 
-This project is based on excellent work from:
+This project builds upon excellent prior work:
 
-- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)** - ACEPRO SOVOL08 driver implementation from szkriz
-- **[ACEResearch](https://github.com/printers-for-people/ACEResearch.git)** - Original ACE Pro research
-- **[DuckACE](https://github.com/utkabobr/DuckACE.git)** - Base driver implementation
+- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)** - ACEPRO SV08 driver implementation (szkriz)
+- **[ACEResearch](https://github.com/printers-for-people/ACEResearch)** - Original ACE Pro research
+- **[DuckACE](https://github.com/utkabobr/DuckACE)** - Base driver implementation
+
+Special thanks to the Klipper community and all contributors!
 
 ## 📄 License
 
@@ -447,7 +846,6 @@ This project is licensed under the same terms as the original projects it's base
 
 ---
 
-**⚠️ Note**: This is a work-in-progress driver. Please test thoroughly and report any issues you encounter.
 
 
 

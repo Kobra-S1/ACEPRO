@@ -1,0 +1,291 @@
+# ========== ACE Pro GCode Command Examples ==========
+#
+# This file demonstrates all available ACE commands with their parameters and options.
+# For detailed documentation, see ARCHITECTURE.md
+#
+
+# ========== TOOL SELECTION ==========
+# These are the most common commands - select a tool by index
+# Tools map to instances: T0-T3→ace0, T4-T7→ace1, T8-T11→ace2, T12-T15→ace3
+
+T0                          # Select tool 0 (slot 0 on instance 0)
+T1                          # Select tool 1 (slot 1 on instance 0)
+T4                          # Select tool 4 (slot 0 on instance 1)
+T7                          # Select tool 7 (slot 3 on instance 1)
+
+# ========== MANUAL FEED/RETRACT CONTROL ==========
+
+# Feed filament from slot (by tool index)
+ACE_FEED T=0 LENGTH=100 SPEED=60           # Feed 100mm at 60 mm/s from tool 0
+ACE_FEED T=4 LENGTH=50                     # Feed 50mm from tool 4 (uses default speed)
+
+# Feed filament from slot (by instance and local slot)
+ACE_FEED INSTANCE=0 INDEX=1 LENGTH=100 SPEED=60    # Feed from instance 0, slot 1
+ACE_FEED INSTANCE=1 INDEX=3 LENGTH=50              # Feed from instance 1, slot 3
+
+# Stop feeding
+ACE_STOP_FEED T=0                          # Stop feed on tool 0
+ACE_STOP_FEED INSTANCE=0 INDEX=2           # Stop feed on instance 0, slot 2
+
+# Retract filament
+ACE_RETRACT T=0 LENGTH=50 SPEED=40         # Retract 50mm at 40 mm/s from tool 0
+ACE_RETRACT INSTANCE=1 INDEX=2 LENGTH=100  # Retract 100mm from instance 1, slot 2
+
+# Stop retraction
+ACE_STOP_RETRACT T=0                       # Stop retract on tool 0
+ACE_STOP_RETRACT INSTANCE=0 INDEX=1        # Stop retract on instance 0, slot 1
+
+# ========== INTELLIGENT UNLOAD/LOAD ==========
+
+# Smart unload - tries multiple strategies if first slot doesn't clear
+ACE_SMART_UNLOAD TOOL=0                    # Unload tool 0 (tries slot 0, others, cross-instance)
+ACE_SMART_UNLOAD                           # Unload current tool (defaults to current index)
+
+# Smart load - load all non-empty slots to RMS sensor
+ACE_SMART_LOAD                             # Load all slots to RMS sensor for verification
+
+# Full unload - completely empty a slot
+ACE_FULL_UNLOAD TOOL=0                     # Full unload tool 0
+ACE_FULL_UNLOAD TOOL=ALL                   # Full unload all tools
+ACE_FULL_UNLOAD                            # Full unload current tool
+
+# ========== INVENTORY MANAGEMENT ==========
+
+# Set slot contents (material, color, temperature)
+ACE_SET_SLOT T=0 COLOR="255,0,0" MATERIAL="PLA" TEMP=210
+    # Set tool 0: red PLA (255,0,0 = red), print temp 210°C
+
+ACE_SET_SLOT INSTANCE=0 INDEX=1 COLOR="0,255,0" MATERIAL="PETG" TEMP=240
+    # Set instance 0 slot 1: green PETG, 240°C
+
+ACE_SET_SLOT INSTANCE=1 INDEX=2 COLOR="0,0,255" MATERIAL="ABS" TEMP=250
+    # Set instance 1 slot 2: blue ABS, 250°C
+
+# Mark slot as empty
+ACE_SET_SLOT T=3 EMPTY=1                   # Clear tool 3 (mark empty)
+ACE_SET_SLOT INSTANCE=0 INDEX=0 EMPTY=1   # Clear instance 0 slot 0
+
+# Query all slots
+ACE_QUERY_SLOTS                            # Show all slots (all instances)
+ACE_QUERY_SLOTS INSTANCE=0                 # Show all slots on instance 0
+ACE_QUERY_SLOTS INSTANCE=1                 # Show all slots on instance 1
+
+# Save inventory to persistent storage
+ACE_SAVE_INVENTORY                         # Save (all instances)
+ACE_SAVE_INVENTORY INSTANCE=0              # Save instance 0 inventory
+
+# Reset inventory
+ACE_RESET_PERSISTENT_INVENTORY INSTANCE=0  # Clear all slot data on instance 0
+ACE_RESET_ACTIVE_TOOLHEAD INSTANCE=0       # Reset active tool index to -1
+
+# ========== FEED ASSIST CONTROL ==========
+# Feed assist auto-pushes filament when detected at sensor
+
+# Enable feed assist
+ACE_ENABLE_FEED_ASSIST T=0                 # Enable on tool 0
+ACE_ENABLE_FEED_ASSIST INSTANCE=0 INDEX=1  # Enable on instance 0, slot 1
+
+# Disable feed assist  
+ACE_DISABLE_FEED_ASSIST T=0                # Disable on tool 0
+ACE_DISABLE_FEED_ASSIST INSTANCE=1 INDEX=2 # Disable on instance 1, slot 2
+
+# ========== SPEED ADJUSTMENTS ==========
+# Dynamically change feed/retract speeds
+
+# Set feed speed
+ACE_SET_FEED_SPEED T=0 SPEED=80            # Set tool 0 feed speed to 80 mm/s
+ACE_SET_FEED_SPEED INSTANCE=0 INDEX=1 SPEED=100   # Instance 0 slot 1: 100 mm/s
+
+# Set retract speed
+ACE_SET_RETRACT_SPEED T=0 SPEED=60         # Set tool 0 retract speed to 60 mm/s
+ACE_SET_RETRACT_SPEED INSTANCE=1 INDEX=3 SPEED=50  # Instance 1 slot 3: 50 mm/s
+
+# ========== ENDLESS SPOOL ==========
+# Auto-swap to matching filament when runout detected
+
+# Enable/disable endless spool
+ACE_ENABLE_ENDLESS_SPOOL                   # Enable auto-swap feature
+ACE_DISABLE_ENDLESS_SPOOL                  # Disable auto-swap (stay paused on runout)
+
+# Set match mode
+ACE_SET_ENDLESS_SPOOL_MODE MODE=exact      # Match material AND color (default)
+ACE_SET_ENDLESS_SPOOL_MODE MODE=material   # Match material only (ignore color)
+ACE_SET_ENDLESS_SPOOL_MODE MODE=next       # Take the next ready slot, ignoring material/color
+
+# Query modes
+ACE_GET_ENDLESS_SPOOL_MODE                 # Show current match mode
+ACE_ENDLESS_SPOOL_STATUS                   # Show endless spool configuration
+
+# ========== RFID INVENTORY SYNC ==========
+# Auto-sync RFID data to Klipper inventory when ACE detects changes
+
+# Enable/disable RFID sync
+ACE_ENABLE_RFID_SYNC                       # Enable sync (all instances)
+ACE_ENABLE_RFID_SYNC INSTANCE=0            # Enable sync instance 0 only
+
+ACE_DISABLE_RFID_SYNC                      # Disable sync (all instances)
+ACE_DISABLE_RFID_SYNC INSTANCE=1           # Disable sync instance 1 only
+
+# Query RFID sync status
+ACE_RFID_SYNC_STATUS                       # Show status (all instances)
+ACE_RFID_SYNC_STATUS INSTANCE=0            # Show status instance 0 only
+
+# ========== DRYER CONTROL ==========
+# Start/stop filament drying
+
+# Start drying
+ACE_START_DRYING TEMP=50 DURATION=240      # Dry all slots at 50°C for 240 minutes
+ACE_START_DRYING INSTANCE=0 TEMP=45 DURATION=180  # Dry instance 0 only
+
+# Stop drying
+ACE_STOP_DRYING                            # Stop dryer (all instances)
+ACE_STOP_DRYING INSTANCE=1                 # Stop dryer instance 1 only
+
+# ========== PURGE SETTINGS ==========
+
+# Set purge parameters for tool changes
+ACE_SET_PURGE_AMOUNT PURGELENGTH=50 PURGESPEED=400
+    # Set purge: 50mm at 400 mm/min
+
+ACE_SET_PURGE_AMOUNT PURGELENGTH=75 PURGESPEED=500 INSTANCE=0
+    # Set purge for instance 0 only
+
+# ========== STATUS & DIAGNOSTICS ==========
+
+# Get current tool index
+ACE_GET_CURRENT_INDEX                      # Query: which tool is currently loaded? (-1 = none)
+
+# Get ACE hardware status
+ACE_GET_STATUS                             # Query all instances
+ACE_GET_STATUS INSTANCE=0                  # Query instance 0 only
+
+# Reconnect serial
+ACE_RECONNECT                              # Reconnect all instances
+ACE_RECONNECT INSTANCE=0                   # Reconnect instance 0 only
+
+# ========== DEBUG COMMANDS ==========
+
+# Print sensor states
+ACE_DEBUG_SENSORS                          # Show: toolhead sensor, RMS sensor, path free status
+
+# Print manager/instance state
+ACE_DEBUG_STATE                            # Show: tool mapping, filament position, loaded tool
+
+# Check spool ready
+ACE_DEBUG_CHECK_SPOOL_READY TOOL=0         # Test spool ready check for tool 0
+
+# Inject sensor state (testing)
+ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=1 RMS=0
+    # Simulate: toolhead sensor triggered, RMS clear
+
+ACE_DEBUG_INJECT_SENSOR_STATE RESET=1      # Clear sensor injection, use real sensors
+
+# Show resolved configuration
+ACE_SHOW_INSTANCE_CONFIG                   # Show config for all instances
+ACE_SHOW_INSTANCE_CONFIG INSTANCE=0        # Show config for instance 0
+
+# Generic debug request
+ACE_DEBUG INSTANCE=0 METHOD="get_status"   # Send raw debug request to ACE hardware
+
+# ========== PRINT END HANDLER ==========
+# (Called automatically by Klipper at print end)
+
+_ACE_HANDLE_PRINT_END                      # Execute print end sequence
+                                           # (retract, cut, store to park position)
+
+# ========== TOOL SELECTOR MACROS ==========
+# (Auto-registered dynamically based on ace_count)
+
+# ace_count=1 creates: T0, T1, T2, T3
+# ace_count=2 creates: T0, T1, T2, T3, T4, T5, T6, T7
+# ace_count=3 creates: T0-T11
+# ace_count=4 creates: T0-T15
+
+# Example for multi-instance setup:
+T0   # Instance 0, Slot 0
+T3   # Instance 0, Slot 3
+T4   # Instance 1, Slot 0
+T7   # Instance 1, Slot 3
+
+# ========== TYPICAL WORKFLOW ==========
+
+# 1. STARTUP
+ACE_QUERY_SLOTS                     # Verify inventory loaded
+ACE_ENABLE_ENDLESS_SPOOL            # Enable auto-swap on runout
+ACE_ENABLE_RFID_SYNC                # Enable RFID inventory updates
+
+# 2. BEFORE PRINT
+T0                                  # Load first tool (auto-executes smart load)
+ACE_DEBUG_SENSORS                   # Verify filament at nozzle
+
+# 3. DURING PRINT
+# (Automatic tool changes via T<n> commands)
+# (Automatic runout detection and swap)
+
+# 4. AFTER PRINT
+# (Automatic via _ACE_HANDLE_PRINT_END)
+# - Retract filament to splitter
+# - Cut filament
+# - Store to park position
+# - Set active tool to -1
+
+# ========== CONFIGURATION REFERENCE ==========
+
+[ace]
+ace_count: 2                                 # Number of ACE units (1-4)
+
+# Serial Communication
+baud: 115200                                 # Serial baud rate
+
+# Filament Paths
+parkposition_to_toolhead_length: 1000        # Splitter to toolhead sensor (mm)
+parkposition_to_rdm_length: 150              # Splitter to RMS sensor (mm)
+
+# Movement Speeds
+feed_speed: 60                               # Default feed speed (mm/s)
+retract_speed: 50                            # Default retract speed (mm/s)
+toolhead_slow_loading_speed: 5               # Slow load to nozzle (mm/s)
+
+# Purge Settings
+default_color_change_purge_length: 50        # Purge amount (mm)
+default_color_change_purge_speed: 400        # Purge speed (mm/min)
+purge_multiplier: 1.0                        # Purge multiplier (for endless spool: 1.5x)
+
+# Safety Limits
+total_max_feeding_length: 3000               # Max feed before error (mm)
+toolhead_retraction_length: 40               # Retract from nozzle (mm)
+
+# Per-Instance Overrides (format: "default,inst:override")
+feed_speed: "60,1:80"                        # Instance 0: 60 mm/s, Instance 1: 80 mm/s
+retract_speed: "50,0:45,1:55"                # Instance 0: 45, Instance 1: 55
+
+# ========== ADVANCED: PER-INSTANCE COMMANDS ==========
+
+# All commands support INSTANCE and INDEX parameters for precise control:
+
+# Feed from specific instance slot
+ACE_FEED INSTANCE=1 INDEX=2 LENGTH=100 SPEED=60
+
+# Retract from specific instance slot
+ACE_RETRACT INSTANCE=1 INDEX=2 LENGTH=100 SPEED=50
+
+# Enable feed assist on specific slot
+ACE_ENABLE_FEED_ASSIST INSTANCE=0 INDEX=3
+
+# Or use tool mapping (automatically resolves to instance/slot)
+ACE_FEED T=6 LENGTH=100                     # T6 = Instance 1, Slot 2
+ACE_RETRACT T=6 LENGTH=100                  # Same as INSTANCE=1 INDEX=2
+
+# ========== PARAMETER RESOLUTION PRIORITY ==========
+# Most commands resolve parameters in this order:
+
+# 1. INSTANCE + INDEX (explicit)
+#    ACE_FEED INSTANCE=0 INDEX=1 LENGTH=100
+
+# 2. T / TOOL parameter (mapped to instance/slot)
+#    ACE_FEED T=0 LENGTH=100               # T0 → Instance 0, Slot 0
+#    ACE_FEED T=5 LENGTH=100               # T5 → Instance 1, Slot 1
+
+# 3. Fallback to instance 0
+#    ACE_FEED LENGTH=100                   # Uses Instance 0, default slot
+

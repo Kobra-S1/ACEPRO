@@ -1,0 +1,34 @@
+# Coverage configuration for ACE Pro
+# Only measure coverage for implementation files, not tests
+
+[run]
+branch = True
+# Measure both the shim package (ace/) and the real code under extras/ace
+source =
+    ace
+    extras/ace
+omit = 
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */conftest.py
+    ace/__init__.py
+
+[report]
+# Show missing lines
+show_missing = True
+# Skip files with no statements
+skip_empty = True
+# Fail if coverage is below threshold (optional)
+# fail_under = 80
+
+# Precision for coverage percentage
+precision = 2
+
+[html]
+directory = ../.tmp/htmlcov
+title = ACE Pro Coverage Report
+
+[term]
+# Show per-file coverage in terminal
+skip_covered = False

@@ -1,2 +1,5 @@
-pyserial==3.5
-pyjson==1.4.1
+# ACE Pro Runtime Dependencies
+# Install with: pip install -r requirements.txt
+
+pyserial>=3.5
+jinja2>=3.0.0
