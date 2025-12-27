@@ -25,7 +25,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 
 | File | Tests | Description |
 |------|-------|-------------|
-| **test_commands.py** | 64 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
+| **test_commands.py** | 71 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
 | **test_manager.py** | 113 | AceManager core logic, sensor management, tool changes, state tracking |
 | **test_instance.py** | 25 | AceInstance initialization, configuration, serial communication |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
@@ -39,7 +39,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_set_and_save.py** | 15 | Persistent variable storage to saved_variables.cfg |
 | **test_toolchange_integration.py** | 7 | End-to-end tool change scenarios across multiple ACE units |
 
-**Total: 293 tests** across 8 test modules
+**Total: 297 tests** across 8 test modules
 
 ## Running Tests
 
@@ -180,6 +180,13 @@ test_cmd_ACE_CHANGE_TOOL_WRAPPER
 # Inventory management
 test_cmd_ACE_SET_SLOT_empty
 test_cmd_ACE_SET_SLOT_with_material
+test_cmd_ACE_SET_SLOT_named_color_red
+test_cmd_ACE_SET_SLOT_named_color_blue
+test_cmd_ACE_SET_SLOT_named_color_case_insensitive
+test_cmd_ACE_SET_SLOT_named_color_orange
+test_cmd_ACE_SET_SLOT_named_color_orca
+test_cmd_ACE_SET_SLOT_rgb_fallback_still_works
+test_cmd_ACE_SET_SLOT_invalid_named_color
 test_cmd_ACE_SAVE_INVENTORY
 test_cmd_ACE_RESET_PERSISTENT_INVENTORY
 
@@ -404,7 +411,7 @@ Tests provide mock Klipper objects. Real Klipper is not required for testing.
 
 ## Performance
 
-- **Full test suite**: ~5 seconds (293 tests)
+- **Full test suite**: ~5 seconds (297 tests)
 - **Single test file**: ~0.5-1 second
 - **Single test**: <0.1 second
 

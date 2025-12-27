@@ -214,6 +214,93 @@ class TestCommandSmoke:
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
 
+    def test_cmd_ACE_SET_SLOT_named_color_red(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT with named color RED."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
+        mock_gcmd.get = Mock(side_effect=["RED", "PLA"])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        # Verify color was set to [255, 0, 0]
+        assert ACE_INSTANCES[0].inventory[0]["color"] == [255, 0, 0]
+
+    def test_cmd_ACE_SET_SLOT_named_color_blue(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT with named color BLUE."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 1})
+        mock_gcmd.get_int = Mock(side_effect=[0, 1, 0, 240])
+        mock_gcmd.get = Mock(side_effect=["BLUE", "PETG"])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        # Verify color was set to [0, 0, 255]
+        assert ACE_INSTANCES[0].inventory[1]["color"] == [0, 0, 255]
+
+    def test_cmd_ACE_SET_SLOT_named_color_case_insensitive(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT with lowercase named color."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 200])
+        mock_gcmd.get = Mock(side_effect=["green", "PLA"])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        # Verify color was set to [0, 255, 0] (GREEN)
+        assert ACE_INSTANCES[0].inventory[0]["color"] == [0, 255, 0]
+
+    def test_cmd_ACE_SET_SLOT_named_color_orange(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT with named color ORANGE."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 2})
+        mock_gcmd.get_int = Mock(side_effect=[0, 2, 0, 220])
+        mock_gcmd.get = Mock(side_effect=["ORANGE", "ABS"])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        # Verify color was set to [235, 128, 66]
+        assert ACE_INSTANCES[0].inventory[2]["color"] == [235, 128, 66]
+
+    def test_cmd_ACE_SET_SLOT_named_color_orca(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT with named color ORCA."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 3})
+        mock_gcmd.get_int = Mock(side_effect=[0, 3, 0, 230])
+        mock_gcmd.get = Mock(side_effect=["ORCA", "PETG"])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        # Verify color was set to [0, 150, 136]
+        assert ACE_INSTANCES[0].inventory[3]["color"] == [0, 150, 136]
+
+    def test_cmd_ACE_SET_SLOT_rgb_fallback_still_works(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT still accepts R,G,B format."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 215])
+        mock_gcmd.get = Mock(side_effect=["128,64,192", "TPU"])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        # Verify color was parsed from R,G,B
+        assert ACE_INSTANCES[0].inventory[0]["color"] == [128, 64, 192]
+
+    def test_cmd_ACE_SET_SLOT_invalid_named_color(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT with invalid named color that also fails R,G,B parsing."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
+        # "PURPLE" is not a valid named color and will fail R,G,B parsing too
+        mock_gcmd.get = Mock(side_effect=["PURPLE", "PLA"])
+        
+        # Mock error to raise exception (will be caught and converted to respond_info)
+        def error_func(msg):
+            raise Exception(msg)
+        mock_gcmd.error = error_func
+        
+        # The function catches all exceptions and calls respond_info with error message
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        
+        # Verify respond_info was called with error message
+        assert mock_gcmd.respond_info.called
+        call_args = str(mock_gcmd.respond_info.call_args)
+        # Check that error message mentions color format
+        assert "COLOR" in call_args or "named color" in call_args.lower()
+
     def test_cmd_ACE_SAVE_INVENTORY(self, mock_gcmd, setup_mocks):
         """Test ACE_SAVE_INVENTORY."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})

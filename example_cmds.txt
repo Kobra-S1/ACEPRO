@@ -52,14 +52,26 @@ ACE_FULL_UNLOAD                            # Full unload current tool
 # ========== INVENTORY MANAGEMENT ==========
 
 # Set slot contents (material, color, temperature)
+# Colors can be specified as:
+#   - Named colors: RED, BLUE, WHITE, BLACK, ORANGE, ORCA, etc.
+#   - RGB values: R,G,B (0-255)
+
+ACE_SET_SLOT T=0 COLOR=RED MATERIAL="PLA" TEMP=210
+    # Set tool 0: red PLA using named color, print temp 210°C
+
 ACE_SET_SLOT T=0 COLOR="255,0,0" MATERIAL="PLA" TEMP=210
-    # Set tool 0: red PLA (255,0,0 = red), print temp 210°C
+    # Same as above but using RGB values (255,0,0 = red)
 
-ACE_SET_SLOT INSTANCE=0 INDEX=1 COLOR="0,255,0" MATERIAL="PETG" TEMP=240
-    # Set instance 0 slot 1: green PETG, 240°C
+ACE_SET_SLOT INSTANCE=0 INDEX=1 COLOR=GREEN MATERIAL="PETG" TEMP=240
+    # Set instance 0 slot 1: green PETG using named color, 240°C
 
-ACE_SET_SLOT INSTANCE=1 INDEX=2 COLOR="0,0,255" MATERIAL="ABS" TEMP=250
-    # Set instance 1 slot 2: blue ABS, 250°C
+ACE_SET_SLOT INSTANCE=1 INDEX=2 COLOR=BLUE MATERIAL="ABS" TEMP=250
+    # Set instance 1 slot 2: blue ABS using named color, 250°C
+
+# Available named colors:
+# BLACK, BLUE, BLUEISH, CYAN, DARK_GRAY, DARK_YELLOW, GRAY, GREEN, GREENISH,
+# LIGHT_GRAY, MAGENTA, ORANGE, RED, REDISH, YELLOW, WHITE, ORCA
+# (Case-insensitive: RED, red, Red all work)
 
 # Mark slot as empty
 ACE_SET_SLOT T=3 EMPTY=1                   # Clear tool 3 (mark empty)
@@ -206,6 +218,32 @@ T0   # Instance 0, Slot 0
 T3   # Instance 0, Slot 3
 T4   # Instance 1, Slot 0
 T7   # Instance 1, Slot 3
+
+# ========== ANYCUBIC SLICER COMPATIBILITY ==========
+
+# G9111 - Anycubic Slicer Start Macro
+# Compatible with Anycubic slicer's startup sequence
+# Handles homing, bed mesh, tool selection, and optional purge
+
+G9111 BEDTEMP=60 EXTRUDERTEMP=200 TOOL=0
+    # Standard startup: heat bed, heat extruder, select T0, always purge
+
+G9111 BEDTEMP=60 EXTRUDERTEMP=200 TOOL=0 SKIP_PURGE_FOR_ALREADY_LOADED_TOOL=1
+    # Smart purge mode: skip purge if T0 already loaded and at nozzle
+    # Checks ACE variables (ace_current_index, ace_filament_pos) and sensors
+    # Saves time on repeated prints with same tool
+
+# SKIP_PURGE_FOR_ALREADY_LOADED_TOOL parameter:
+#   0 = Always purge (default, safe for all scenarios)
+#   1 = Enable smart logic to skip purge when tool already loaded
+#       Smart logic checks:
+#       - ace_current_index matches requested tool
+#       - ace_filament_pos = "nozzle" or "toolhead"
+#       - Toolhead sensor triggered
+#       If all conditions met, purge is skipped
+
+# Example for Orca Slicer start G-code:
+G9111 BEDTEMP=[first_layer_bed_temperature] EXTRUDERTEMP=[first_layer_temperature[initial_tool]] TOOL=[initial_tool] SKIP_PURGE_FOR_ALREADY_LOADED_TOOL=1
 
 # ========== TYPICAL WORKFLOW ==========
 

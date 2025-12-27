@@ -303,6 +303,28 @@ def cmd_ACE_STOP_RETRACT(gcmd):
         gcmd.respond_info(f"ACE_STOP_RETRACT error: {e}")
 
 
+# Predefined color names mapping (0.0-1.0 float range converted to 0-255 RGB)
+COLOR_NAMES = {
+    "BLACK": [0, 0, 0],
+    "BLUE": [0, 0, 255],
+    "BLUEISH": [128, 128, 255],
+    "CYAN": [0, 255, 255],
+    "DARK_GRAY": [64, 64, 64],
+    "DARK_YELLOW": [128, 128, 0],
+    "GRAY": [128, 128, 128],
+    "GREEN": [0, 255, 0],
+    "GREENISH": [128, 255, 128],
+    "LIGHT_GRAY": [191, 191, 191],
+    "MAGENTA": [255, 0, 255],
+    "ORANGE": [235, 128, 66],
+    "RED": [255, 0, 0],
+    "REDISH": [255, 128, 128],
+    "YELLOW": [255, 255, 0],
+    "WHITE": [255, 255, 255],
+    "ORCA": [0, 150, 136],
+}
+
+
 def cmd_ACE_SET_SLOT(gcmd):
     """Set slot inventory information."""
     try:
@@ -325,12 +347,19 @@ def cmd_ACE_SET_SLOT(gcmd):
         if not color_str or not material or temp <= 0:
             raise gcmd.error("COLOR, MATERIAL, and TEMP must be set unless EMPTY=1")
 
-        try:
-            color = [int(x) for x in color_str.split(",")]
-            if len(color) != 3:
-                raise ValueError()
-        except (ValueError, AttributeError):
-            raise gcmd.error("COLOR must be R,G,B format")
+        # Parse color - check for named color first, then R,G,B format
+        color_upper = color_str.upper()
+        if color_upper in COLOR_NAMES:
+            color = COLOR_NAMES[color_upper]
+        else:
+            try:
+                color = [int(x) for x in color_str.split(",")]
+                if len(color) != 3:
+                    raise ValueError()
+            except (ValueError, AttributeError):
+                raise gcmd.error(
+                    f"COLOR must be a named color ({', '.join(COLOR_NAMES.keys())}) or R,G,B format"
+                )
 
         ace.inventory[idx] = {"status": "ready", "color": color, "material": material, "temp": temp, "rfid": False}
         manager = ace_get_manager(ace.instance_num)
@@ -1502,7 +1531,7 @@ ACE_COMMANDS = [
     ("ACE_SMART_LOAD", cmd_ACE_SMART_LOAD, "Load all non-empty slots to verification sensor."),
     ("_ACE_HANDLE_PRINT_END", cmd_ACE_HANDLE_PRINT_END, "Execute print end sequence (retract, cut, store)"),
     ("ACE_SET_SLOT", cmd_ACE_SET_SLOT,
-     "Set slot: T=<tool> or INSTANCE= INDEX=, COLOR=R,G,B MATERIAL= TEMP= or EMPTY=1"),
+     "Set slot: T=<tool> or INSTANCE= INDEX=, COLOR=<name>|R,G,B MATERIAL= TEMP= or EMPTY=1"),
     ("ACE_SAVE_INVENTORY", cmd_ACE_SAVE_INVENTORY, "Save inventory. INSTANCE="),
     ("ACE_START_DRYING", cmd_ACE_START_DRYING, "Start dryer. [INSTANCE=] TEMP= [DURATION=240]"),
     ("ACE_STOP_DRYING", cmd_ACE_STOP_DRYING, "Stop dryer. [INSTANCE=]"),
