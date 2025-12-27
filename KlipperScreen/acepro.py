@@ -1100,20 +1100,18 @@ class Panel(ScreenPanel):
         title_label.set_markup("<big><b>ACE Dryer Control</b></big>")
         main_box.pack_start(title_label, False, False, 5)
 
-        # Per-instance dryer controls in scrollable area
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-
+        # Per-instance dryer controls
         instances_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=15
         )
+        instances_box.set_margin_top(5)
+        instances_box.set_margin_bottom(5)
 
         for instance_id in self.ace_instances:
             instance_frame = self._create_dryer_instance_control(instance_id)
             instances_box.pack_start(instance_frame, False, False, 0)
 
-        scroll.add(instances_box)
-        main_box.pack_start(scroll, True, True, 0)
+        main_box.pack_start(instances_box, False, False, 0)
 
         # Bottom buttons
         button_box = Gtk.Box(
@@ -1702,27 +1700,6 @@ class Panel(ScreenPanel):
         duration_box.pack_start(duration_scale, True, True, 0)
 
         box.pack_start(duration_box, False, False, 0)
-
-        # Control buttons
-        control_box = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL, spacing=10
-        )
-        control_box.set_homogeneous(True)
-
-        start_btn = self._gtk.Button("heat-up", "Start", "color1")
-        start_btn.set_size_request(-1, 40)
-        start_btn.connect(
-            "clicked", self.start_single_dryer,
-            instance_id, temp_scale, duration_scale
-        )
-        control_box.pack_start(start_btn, True, True, 0)
-
-        stop_btn = self._gtk.Button("cancel", "Stop", "color4")
-        stop_btn.set_size_request(-1, 40)
-        stop_btn.connect("clicked", self.stop_single_dryer, instance_id)
-        control_box.pack_start(stop_btn, True, True, 0)
-
-        box.pack_start(control_box, False, False, 0)
 
         frame.add(box)
         
