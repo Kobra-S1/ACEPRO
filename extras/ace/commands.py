@@ -1115,7 +1115,7 @@ def cmd_ACE_RFID_SYNC_STATUS(gcmd):
 
 
 def cmd_ACE_DEBUG_INJECT_SENSOR_STATE(gcmd):
-    """Debug: Inject sensor state for testing. TOOLHEAD=0/1 RMS=0/1 or RESET=1. All optional."""
+    """Debug: Inject sensor state for testing. TOOLHEAD=0/1 RDM=0/1 or RESET=1. All optional."""
     try:
         manager = ace_get_manager(0)
 
@@ -1125,15 +1125,15 @@ def cmd_ACE_DEBUG_INJECT_SENSOR_STATE(gcmd):
             return
 
         toolhead = gcmd.get_int("TOOLHEAD", None)
-        rms = gcmd.get_int("RMS", None)
+        rdm = gcmd.get_int("RDM", None)
 
-        if toolhead is None and rms is None:
-            gcmd.respond_info("ACE: No sensor state specified. Use TOOLHEAD=0/1, RMS=0/1, or RESET=1")
+        if toolhead is None and rdm is None:
+            gcmd.respond_info("ACE: No sensor state specified. Use TOOLHEAD=0/1, RDM=0/1, or RESET=1")
             return
 
         override = {
             **({SENSOR_TOOLHEAD: bool(toolhead)} if toolhead is not None else {}),
-            **({SENSOR_RDM: bool(rms)} if rms is not None else {})
+            **({SENSOR_RDM: bool(rdm)} if rdm is not None else {})
         }
 
         manager._sensor_override = override
@@ -1149,7 +1149,7 @@ def cmd_ACE_DEBUG_INJECT_SENSOR_STATE(gcmd):
 
         gcmd.respond_info("ACE: Sensor override ENABLED:")
         gcmd.respond_info(f"  Toolhead: {format_sensor_state(SENSOR_TOOLHEAD)}")
-        gcmd.respond_info(f"  RMS: {format_sensor_state(SENSOR_RDM)}")
+        gcmd.respond_info(f"  RDM: {format_sensor_state(SENSOR_RDM)}")
 
     except Exception as e:
         gcmd.respond_info(f"ACE_DEBUG_INJECT_SENSOR_STATE error: {e}")
@@ -1516,15 +1516,15 @@ ACE_COMMANDS = [
     ("ACE_ENABLE_RFID_SYNC", cmd_ACE_ENABLE_RFID_SYNC, "Enable RFID inventory sync. [INSTANCE=] optional"),
     ("ACE_DISABLE_RFID_SYNC", cmd_ACE_DISABLE_RFID_SYNC, "Disable RFID inventory sync. [INSTANCE=] optional"),
     ("ACE_DEBUG", cmd_ACE_DEBUG, "Send debug request to device. INSTANCE= METHOD= [PARAMS=]"),
-    ("ACE_DEBUG_SENSORS", cmd_ACE_DEBUG_SENSORS, "Print all sensor states (toolhead, RMS, path-free)"),
+    ("ACE_DEBUG_SENSORS", cmd_ACE_DEBUG_SENSORS, "Print all sensor states (toolhead, RDM, path-free)"),
     ("ACE_DEBUG_STATE", cmd_ACE_DEBUG_STATE, "Print manager and instance state information"),
     ("ACE_RESET_PERSISTENT_INVENTORY", cmd_ACE_RESET_PERSISTENT_INVENTORY, "Reset inventory to empty. INSTANCE="),
     ("ACE_RESET_ACTIVE_TOOLHEAD", cmd_ACE_RESET_ACTIVE_TOOLHEAD, "Reset active toolhead state. INSTANCE="),
     ("ACE_RFID_SYNC_STATUS", cmd_ACE_RFID_SYNC_STATUS, "Query RFID sync status. [INSTANCE=]"),
     ("ACE_DEBUG_INJECT_SENSOR_STATE", cmd_ACE_DEBUG_INJECT_SENSOR_STATE,
-     "Inject sensor state for testing. TOOLHEAD=0/1 RMS=0/1 or RESET=1"),
+     "Inject sensor state for testing. TOOLHEAD=0/1 RDM=0/1 or RESET=1"),
     ("ACE_SET_ENDLESS_SPOOL_MODE", cmd_ACE_SET_ENDLESS_SPOOL_MODE,
-     "Set endless spool match mode. MODE=exact|material"),
+     "Set endless spool match mode. MODE=exact|material|next"),
     ("ACE_GET_ENDLESS_SPOOL_MODE", cmd_ACE_GET_ENDLESS_SPOOL_MODE, "Query current match mode"),
     ("ACE_CHANGE_TOOL", cmd_ACE_CHANGE_TOOL_WRAPPER, "Change tool or unload. TOOL=<index> or TOOL=-1"),
     ("ACE_SET_RETRACT_SPEED", cmd_ACE_SET_RETRACT_SPEED,
