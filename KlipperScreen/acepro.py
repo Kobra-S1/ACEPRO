@@ -63,6 +63,7 @@ class Panel(ScreenPanel):
         self.dryer_enabled = False
         self.numpad_visible = False
         self.current_instance = 0  # Currently displayed instance
+        self.selected_dryer_instance = "ALL"  # Selected dryer instance: 0, 1, or "ALL"
         self.rfid_sync_enabled = True  # Track RFID sync toggle locally
 
         # Initialize attributes used in various methods
@@ -862,6 +863,49 @@ class Panel(ScreenPanel):
         """Process updates from Klipper"""
         try:
             if action == "notify_gcode_response":
+                # Check for ACE_GET_STATUS responses
+                if '{"instance"' in data and '"temp"' in data and '"dryer_status"' in data:
+                    try:
+                        # Parse JSON response - strip all '//' prefixes
+                        json_str = data
+                        while json_str.startswith('// '):
+                            json_str = json_str[3:].strip()
+                        
+                        status_data = json.loads(json_str)
+                        instance_id = status_data.get('instance', 0)
+                        
+                        logging.info(f"ACE: Parsed status response for instance {instance_id}: {status_data}")
+                        
+                        # Update dryer panel if we're on it
+                        if self.current_view == "dryer" and instance_id in self._dryer_controls:
+                            controls = self._dryer_controls[instance_id]
+                            current_temp = status_data.get('temp', 0)
+                            
+                            # Extract dryer-specific status
+                            dryer_status = status_data.get('dryer_status', {})
+                            target_temp = dryer_status.get('target_temp', 0)
+                            dryer_state = dryer_status.get('status', 'stop')
+                            remain_time = dryer_status.get('remain_time', 0)
+                            
+                            # Update status label with remaining time if drying
+                            if dryer_state == 'drying':
+                                hours = remain_time // 3600
+                                minutes = (remain_time % 3600) // 60
+                                time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                                controls['status_label'].set_markup(f'<span foreground="green"><b>DRYING ({time_str})</b></span>')
+                            elif dryer_state == 'stop':
+                                controls['status_label'].set_markup('<span foreground="gray"><b>STOPPED</b></span>')
+                            else:
+                                # Show any other status (errors, unknown states) in red
+                                controls['status_label'].set_markup(f'<span foreground="red"><b>{dryer_state.upper()}</b></span>')
+                            
+                            # Update temperature labels
+                            controls['target_label'].set_text(f"Target: {target_temp}°C")
+                            controls['current_label'].set_text(f"Current: {current_temp}°C")
+                            
+                            logging.info(f"ACE: Updated dryer labels for instance {instance_id}: target={target_temp}, current={current_temp}, state={dryer_state}")
+                    except json.JSONDecodeError as e:
+                        logging.error(f"ACE: Failed to parse status JSON from '{data}': {e}")
                 response_str = str(data).strip()
 
                 # Handle double slashes from Klipper responses
@@ -1033,6 +1077,12 @@ class Panel(ScreenPanel):
     def show_dryer_panel(self, widget):
         """Show dryer control panel for all ACE instances"""
         self.current_view = "dryer"
+        
+        logging.info(f"ACE: Opening dryer panel. Instances detected: {self.ace_instances}")
+        
+        # Store references to dryer controls for updates
+        self._dryer_controls = {}
+        
         # Clear content
         for child in self.content.get_children():
             self.content.remove(child)
@@ -1071,27 +1121,28 @@ class Panel(ScreenPanel):
         )
         button_box.set_homogeneous(True)
 
-        # Toggle Current Instance Dryer button
-        current_dryer_btn = self._gtk.Button(
-            "heat-up", f"Toggle ACE {self.current_instance}", "color2"
+        # Instance Selection button
+        selection_label = self._get_selection_label()
+        self._dryer_selection_btn = self._gtk.Button(
+            "arrow-right", selection_label, "color2"
         )
-        current_dryer_btn.set_size_request(-1, 50)
-        current_dryer_btn.connect("clicked", self.toggle_current_dryer)
-        button_box.pack_start(current_dryer_btn, True, True, 0)
+        self._dryer_selection_btn.set_size_request(-1, 50)
+        self._dryer_selection_btn.connect("clicked", self.cycle_selected_dryer_instance)
+        button_box.pack_start(self._dryer_selection_btn, True, True, 0)
 
-        # Start All button
-        start_all_btn = self._gtk.Button(
-            "heat-up", "Start All Dryers", "color1"
+        # Start Dryer button
+        start_btn = self._gtk.Button(
+            "heat-up", "Start Dryer", "color1"
         )
-        start_all_btn.set_size_request(-1, 50)
-        start_all_btn.connect("clicked", self.start_all_dryers)
-        button_box.pack_start(start_all_btn, True, True, 0)
+        start_btn.set_size_request(-1, 50)
+        start_btn.connect("clicked", self.start_selected_dryer)
+        button_box.pack_start(start_btn, True, True, 0)
 
-        # Stop All button
-        stop_all_btn = self._gtk.Button("cancel", "Stop All Dryers", "color4")
-        stop_all_btn.set_size_request(-1, 50)
-        stop_all_btn.connect("clicked", self.stop_all_dryers)
-        button_box.pack_start(stop_all_btn, True, True, 0)
+        # Stop Dryer button
+        stop_btn = self._gtk.Button("cancel", "Stop Dryer", "color4")
+        stop_btn.set_size_request(-1, 50)
+        stop_btn.connect("clicked", self.stop_selected_dryer)
+        button_box.pack_start(stop_btn, True, True, 0)
 
         # Back button
         back_btn = self._gtk.Button("arrow-left", "Back", "color3")
@@ -1103,6 +1154,36 @@ class Panel(ScreenPanel):
 
         self.content.add(main_box)
         self.content.show_all()
+        
+        # Update frame labels to show current selection
+        self._update_dryer_frame_labels()
+        logging.info(f"ACE: Dryer panel shown. Controls created for: {list(self._dryer_controls.keys())}")
+        
+        # Query status immediately for instant display
+        for instance_id in self.ace_instances:
+            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+            cmd = f"ACE_GET_STATUS{instance_param}"
+            logging.info(f"ACE: Querying status with command: '{cmd}' for instance {instance_id}")
+            self._send_gcode(cmd)
+        
+        # Start periodic refresh of dryer status (every 3 seconds)
+        if hasattr(self, '_dryer_refresh_timer') and self._dryer_refresh_timer:
+            GLib.source_remove(self._dryer_refresh_timer)
+        self._dryer_refresh_timer = GLib.timeout_add_seconds(3, self._periodic_dryer_refresh)
+
+    def _periodic_dryer_refresh(self):
+        """Periodically refresh dryer panel labels (not full rebuild)"""
+        if self.current_view == "dryer":
+            # Query all ACE instances for status updates
+            for instance_id in self.ace_instances:
+                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+                self._send_gcode(f"ACE_GET_STATUS{instance_param}")
+            
+            return True  # Continue timer
+        else:
+            # Stop timer if we left the dryer panel
+            self._dryer_refresh_timer = None
+            return False
 
     def show_spool_panel(self, widget, reset_selection=True):
         """Show utilities panel"""
@@ -1516,7 +1597,11 @@ class Panel(ScreenPanel):
     def _create_dryer_instance_control(self, instance_id):
         """Create dryer control UI for a single ACE instance"""
         frame = Gtk.Frame()
-        frame.set_label(f"ACE {instance_id}")
+        frame_label = Gtk.Label()
+        frame_label.set_use_markup(True)  # Enable markup rendering
+        initial_markup = f"<b>ACE {instance_id}</b>"
+        frame_label.set_markup(initial_markup)
+        frame.set_label_widget(frame_label)
         frame.get_style_context().add_class("frame-item")
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -1530,15 +1615,15 @@ class Panel(ScreenPanel):
             orientation=Gtk.Orientation.HORIZONTAL, spacing=10
         )
 
-        status_label = Gtk.Label(label="Status:")
-        status_label.set_halign(Gtk.Align.START)
-        status_box.pack_start(status_label, False, False, 0)
+        status_label_prefix = Gtk.Label(label="Status:")
+        status_label_prefix.set_halign(Gtk.Align.START)
+        status_box.pack_start(status_label_prefix, False, False, 0)
 
         # Get dryer status from printer data
         dryer_status = self._get_dryer_status(instance_id)
         status_text = dryer_status.get('status', 'unknown')
 
-        # Create status indicator with ID for updates
+        # Create status indicator - store reference for updates
         status_indicator = Gtk.Label(label=status_text.upper())
         status_indicator.set_halign(Gtk.Align.START)
 
@@ -1546,24 +1631,33 @@ class Panel(ScreenPanel):
             status_indicator.set_markup(
                 '<span foreground="green"><b>DRYING</b></span>'
             )
-        elif status_text == 'heater_err':
-            status_indicator.set_markup(
-                '<span foreground="red"><b>ERROR</b></span>'
-            )
-        else:
+        elif status_text == 'stop':
             status_indicator.set_markup(
                 '<span foreground="gray"><b>STOPPED</b></span>'
+            )
+        else:
+            # Show any other status (errors, unknown states) in red
+            status_indicator.set_markup(
+                f'<span foreground="red"><b>{status_text.upper()}</b></span>'
             )
 
         status_box.pack_start(status_indicator, False, False, 0)
 
-        # Current temperature display (if available)
-        current_temp = dryer_status.get('temperature', 0)
-        temp_label = Gtk.Label(
-            label=f"Current Temp: {current_temp}°C"
+        # Target temperature display - store reference
+        target_temp = dryer_status.get('target_temp', 0)
+        target_label = Gtk.Label(
+            label=f"Target: {target_temp}°C"
         )
-        temp_label.set_halign(Gtk.Align.START)
-        status_box.pack_start(temp_label, True, True, 0)
+        target_label.set_halign(Gtk.Align.START)
+        status_box.pack_start(target_label, False, False, 0)
+        
+        # Current temperature display - store reference
+        current_temp = dryer_status.get('current_temp', 0)
+        current_label = Gtk.Label(
+            label=f"Current: {current_temp}°C"
+        )
+        current_label.set_halign(Gtk.Align.START)
+        status_box.pack_start(current_label, False, False, 0)
 
         box.pack_start(status_box, False, False, 0)
 
@@ -1631,6 +1725,18 @@ class Panel(ScreenPanel):
         box.pack_start(control_box, False, False, 0)
 
         frame.add(box)
+        
+        # Store references for updates without rebuilding
+        self._dryer_controls[instance_id] = {
+            'frame': frame,  # Store frame itself for show/hide
+            'frame_label': frame_label,
+            'status_label': status_indicator,
+            'target_label': target_label,
+            'current_label': current_label,
+            'temp_scale': temp_scale,
+            'duration_scale': duration_scale
+        }
+        
         return frame
 
     def _get_dryer_status(self, instance_id):
@@ -1643,21 +1749,34 @@ class Panel(ScreenPanel):
                 ace_obj = self._printer.lookup_object(ace_name, None)
                 if ace_obj and hasattr(ace_obj, 'get_status'):
                     status = ace_obj.get_status()
-                    if 'dryer_status' in status:
-                        return status['dryer_status']
-                    # Dryer info might be in _info
-                    if hasattr(ace_obj, '_info'):
-                        return ace_obj._info.get('dryer_status', {})
+                    logging.info(f"ACE: Got status from {ace_name}: {status}")
+                    # Get dryer_status dict and current temp from main status
+                    dryer_status = status.get('dryer_status', {})
+                    current_temp = status.get('temp', 0)  # Current dryer temperature
+                    
+                    # Combine dryer_status with current temp
+                    result = dict(dryer_status)
+                    result['current_temp'] = current_temp
+                    logging.info(f"ACE: Dryer status result: {result}")
+                    return result
+                else:
+                    logging.warning(f"ACE: Could not get ACE object or get_status for {ace_name}")
 
             # Fallback: try from printer.data
             if hasattr(self._printer, 'data'):
                 ace_data = self._printer.data.get(ace_name, {})
                 if 'dryer_status' in ace_data:
-                    return ace_data['dryer_status']
+                    result = dict(ace_data['dryer_status'])
+                    result['current_temp'] = ace_data.get('temp', 0)
+                    logging.info(f"ACE: Dryer status from printer.data: {result}")
+                    return result
+                else:
+                    logging.warning(f"ACE: No dryer_status in printer.data for {ace_name}")
         except Exception as e:
-            logging.error(f"ACE: Error getting dryer status: {e}")
+            logging.error(f"ACE: Error getting dryer status: {e}", exc_info=True)
 
-        return {'status': 'unknown', 'temperature': 0}
+        logging.warning(f"ACE: Returning default dryer status for instance {instance_id}")
+        return {'status': 'stop', 'target_temp': 0, 'current_temp': 0, 'remain_time': 0}
 
     def start_single_dryer(
         self, widget, instance_id, temp_scale, duration_scale
@@ -1675,6 +1794,9 @@ class Panel(ScreenPanel):
         )
 
         self._send_gcode(gcode)
+        # Query status immediately for instant feedback
+        instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+        self._send_gcode(f"ACE_GET_STATUS{instance_param}")
         self._screen.show_popup_message(
             f"Starting dryer on ACE {instance_id}\n"
             f"{temp}°C for {duration} minutes", 2
@@ -1686,59 +1808,157 @@ class Panel(ScreenPanel):
             f" INSTANCE={instance_id}" if instance_id > 0 else ""
         )
         self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
+        # Query status immediately for instant feedback
+        self._send_gcode(f"ACE_GET_STATUS{instance_param}")
         self._screen.show_popup_message(
             f"Stopping dryer on ACE {instance_id}", 1
         )
 
-    def start_all_dryers(self, widget):
-        """Start all ACE dryers with default settings"""
+    def _get_selection_label(self):
+        """Get label text for current dryer selection"""
+        if self.selected_dryer_instance == "ALL":
+            return "Selected: ALL"
+        else:
+            return f"Selected: ACE {self.selected_dryer_instance}"
+    
+    def _update_dryer_frame_labels(self):
+        """Update frame visibility and labels based on which instance is selected"""
         for instance_id in self.ace_instances:
-            instance_param = (
-                f" INSTANCE={instance_id}" if instance_id > 0 else ""
-            )
-            self._send_gcode(
-                f"ACE_START_DRYING{instance_param} TEMP=45 DURATION=240"
-            )
-        self._screen.show_popup_message(
-            f"Starting all {len(self.ace_instances)} dryers", 1
-        )
+            if instance_id in self._dryer_controls:
+                frame = self._dryer_controls[instance_id].get('frame')
+                frame_label = self._dryer_controls[instance_id]['frame_label']
+                
+                if self.selected_dryer_instance == "ALL":
+                    # When ALL is selected, show only ACE 0's controls
+                    if instance_id == 0:
+                        if frame:
+                            frame.show_all()
+                        frame_label.set_markup("<b>ALL ACEs (Temp of ACE 0 shown)</b>")
+                    else:
+                        if frame:
+                            frame.hide()
+                elif self.selected_dryer_instance == instance_id:
+                    # Show only selected frame with highlight
+                    if frame:
+                        frame.show_all()
+                    frame_label.set_markup(f"<span foreground='#4a9eff'><b>ACE {instance_id}</b></span>")
+                else:
+                    # Hide non-selected frames
+                    if frame:
+                        frame.hide()
+    
+    def cycle_selected_dryer_instance(self, widget):
+        """Cycle through dryer instance selection: ACE 0 -> ACE 1 -> ALL -> ACE 0..."""
+        if self.selected_dryer_instance == "ALL":
+            # Go to first instance
+            self.selected_dryer_instance = self.ace_instances[0]
+        elif self.selected_dryer_instance in self.ace_instances:
+            # Find current position and go to next
+            current_idx = self.ace_instances.index(self.selected_dryer_instance)
+            if current_idx < len(self.ace_instances) - 1:
+                # Go to next instance
+                self.selected_dryer_instance = self.ace_instances[current_idx + 1]
+            else:
+                # Wrapped around - go to ALL
+                self.selected_dryer_instance = "ALL"
+        else:
+            # Fallback to ALL if something is wrong
+            self.selected_dryer_instance = "ALL"
+        
+        # Update button label
+        if hasattr(self, '_dryer_selection_btn'):
+            new_label = self._get_selection_label()
+            self._dryer_selection_btn.set_label(new_label)
+        
+        # Update frame labels to show selection
+        self._update_dryer_frame_labels()
 
-    def stop_all_dryers(self, widget):
-        """Stop all ACE dryers"""
-        for instance_id in self.ace_instances:
-            instance_param = (
-                f" INSTANCE={instance_id}" if instance_id > 0 else ""
-            )
-            self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
-        self._screen.show_popup_message(
-            f"Stopping all {len(self.ace_instances)} dryers", 1
-        )
-
-    def toggle_current_dryer(self, widget):
-        """Toggle dryer heating for the current ACE instance only"""
-        instance_id = self.current_instance
-        dryer_status = self._get_dryer_status(instance_id)
-        current_status = dryer_status.get('status', 'unknown')
-
-        if current_status == 'drying':
-            # Stop the dryer
-            instance_param = (
-                f" INSTANCE={instance_id}" if instance_id > 0 else ""
-            )
-            self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
+    def start_selected_dryer(self, widget):
+        """Start dryer on selected ACE instance(s)"""
+        if self.selected_dryer_instance == "ALL":
+            # Start all dryers using their individual slider settings
+            for instance_id in self.ace_instances:
+                # Get slider values for this instance
+                if instance_id in self._dryer_controls:
+                    controls = self._dryer_controls[instance_id]
+                    temp = int(controls['temp_scale'].get_value())
+                    duration = int(controls['duration_scale'].get_value())
+                else:
+                    # Fallback to defaults if sliders not found
+                    temp = 45
+                    duration = 240
+                
+                instance_param = (
+                    f" INSTANCE={instance_id}" if instance_id > 0 else ""
+                )
+                self._send_gcode(
+                    f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
+                )
+            
+            # Query status immediately for instant feedback
+            for instance_id in self.ace_instances:
+                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+                self._send_gcode(f"ACE_GET_STATUS{instance_param}")
+            
             self._screen.show_popup_message(
-                f"Stopping dryer on ACE {instance_id}", 1
+                f"Starting all {len(self.ace_instances)} dryers", 1
             )
         else:
-            # Start the dryer with default settings
+            # Start single selected instance
+            instance_id = self.selected_dryer_instance
+            if instance_id in self._dryer_controls:
+                controls = self._dryer_controls[instance_id]
+                temp = int(controls['temp_scale'].get_value())
+                duration = int(controls['duration_scale'].get_value())
+            else:
+                temp = 45
+                duration = 240
+            
             instance_param = (
                 f" INSTANCE={instance_id}" if instance_id > 0 else ""
             )
             self._send_gcode(
-                f"ACE_START_DRYING{instance_param} TEMP=45 DURATION=240"
+                f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
             )
+            # Query status immediately for instant feedback
+            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+            self._send_gcode(f"ACE_GET_STATUS{instance_param}")
+            
             self._screen.show_popup_message(
-                f"Starting dryer on ACE {instance_id}\n45°C for 240 minutes", 2
+                f"Starting dryer on ACE {instance_id}\n{temp}°C for {duration} minutes", 2
+            )
+
+    def stop_selected_dryer(self, widget):
+        """Stop dryer on selected ACE instance(s)"""
+        if self.selected_dryer_instance == "ALL":
+            # Stop all dryers
+            for instance_id in self.ace_instances:
+                instance_param = (
+                    f" INSTANCE={instance_id}" if instance_id > 0 else ""
+                )
+                self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
+            
+            # Query status immediately for instant feedback
+            for instance_id in self.ace_instances:
+                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+                self._send_gcode(f"ACE_GET_STATUS{instance_param}")
+            
+            self._screen.show_popup_message(
+                f"Stopping all {len(self.ace_instances)} dryers", 1
+            )
+        else:
+            # Stop single selected instance
+            instance_id = self.selected_dryer_instance
+            instance_param = (
+                f" INSTANCE={instance_id}" if instance_id > 0 else ""
+            )
+            self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
+            # Query status immediately for instant feedback
+            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+            self._send_gcode(f"ACE_GET_STATUS{instance_param}")
+            
+            self._screen.show_popup_message(
+                f"Stopping dryer on ACE {instance_id}", 1
             )
 
     def show_slot_config_screen(self, instance_id, local_slot):
@@ -2267,6 +2487,12 @@ class Panel(ScreenPanel):
     def return_to_main_screen(self):
         """Recreate main screen after config"""
         self.current_view = "main"
+        
+        # Stop dryer refresh timer if active
+        if hasattr(self, '_dryer_refresh_timer') and self._dryer_refresh_timer:
+            GLib.source_remove(self._dryer_refresh_timer)
+            self._dryer_refresh_timer = None
+        
         # Clear all content
         for child in self.content.get_children():
             self.content.remove(child)

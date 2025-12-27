@@ -140,6 +140,118 @@ class TestCommandSmoke:
         ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
         assert mock_gcmd.respond_info.called
 
+    def test_cmd_ACE_GET_STATUS_includes_dryer_status(self, mock_gcmd, setup_mocks):
+        """Test that ACE_GET_STATUS response includes dryer_status field."""
+        import json
+        mock_gcmd.get_int = Mock(return_value=0)
+        
+        # Mock the ACE instance to return dryer_status in response
+        mock_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "temp": 45,
+                "dryer_status": {
+                    "status": "drying",
+                    "target_temp": 45,
+                    "duration": 240,
+                    "remain_time": 14000
+                }
+            }
+        }
+        
+        # Capture the callback function that will be called
+        captured_callback = None
+        def capture_callback(request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+        
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+        
+        # Execute the command
+        ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
+        
+        # Verify send_request was called
+        assert ACE_INSTANCES[0].send_request.called
+        assert captured_callback is not None
+        
+        # Execute the callback with our mock response
+        captured_callback(mock_response)
+        
+        # Verify respond_info was called with JSON containing dryer_status
+        assert mock_gcmd.respond_info.called
+        call_args = mock_gcmd.respond_info.call_args_list
+        
+        # Find the JSON response
+        json_response = None
+        for call in call_args:
+            arg = call[0][0]
+            if arg.startswith('// {'):
+                json_str = arg[3:]  # Remove '// ' prefix
+                json_response = json.loads(json_str)
+                break
+        
+        # Verify the JSON response contains all required fields
+        assert json_response is not None, "No JSON response found"
+        assert 'instance' in json_response
+        assert 'status' in json_response
+        assert 'temp' in json_response
+        assert 'dryer_status' in json_response, "dryer_status field is missing from response"
+        
+        # Verify dryer_status structure
+        dryer_status = json_response['dryer_status']
+        assert 'status' in dryer_status
+        assert 'target_temp' in dryer_status
+        assert 'duration' in dryer_status
+        assert 'remain_time' in dryer_status
+        
+        # Verify values match the mock
+        assert json_response['temp'] == 45
+        assert dryer_status['status'] == 'drying'
+        assert dryer_status['target_temp'] == 45
+        assert dryer_status['duration'] == 240
+        assert dryer_status['remain_time'] == 14000
+
+    def test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped(self, mock_gcmd, setup_mocks):
+        """Test that ACE_GET_STATUS includes empty dryer_status when dryer is stopped."""
+        import json
+        mock_gcmd.get_int = Mock(return_value=0)
+        
+        # Mock response with dryer stopped
+        mock_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "temp": 25,
+                "dryer_status": {}  # Empty when stopped
+            }
+        }
+        
+        captured_callback = None
+        def capture_callback(request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+        
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+        ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
+        
+        assert captured_callback is not None
+        captured_callback(mock_response)
+        
+        # Verify dryer_status field exists even when empty
+        call_args = mock_gcmd.respond_info.call_args_list
+        json_response = None
+        for call in call_args:
+            arg = call[0][0]
+            if arg.startswith('// {'):
+                json_str = arg[3:]
+                json_response = json.loads(json_str)
+                break
+        
+        assert json_response is not None
+        assert 'dryer_status' in json_response, "dryer_status field must be present even when empty"
+        assert isinstance(json_response['dryer_status'], dict)
+
     def test_cmd_ACE_RECONNECT_single(self, mock_gcmd, setup_mocks):
         """Test ACE_RECONNECT with specific instance."""
         mock_gcmd.get_int = Mock(return_value=0)

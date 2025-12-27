@@ -53,6 +53,13 @@ def load_config(config):
     register_all_commands(printer)
     logging.info("ACE: Registered all gcode commands")
 
+    # Register each ACE instance with the printer so KlipperScreen can access them
+    # Instance 0 is registered as "ace", others as "ace 1", "ace 2", etc.
+    for instance_num, instance in enumerate(ace_manager.instances):
+        instance_name = "ace" if instance_num == 0 else f"ace {instance_num}"
+        printer.add_object(instance_name, instance)
+        logging.info(f"ACE: Registered printer object '{instance_name}'")
+
     # Return the AceManager for Klipper
     return ace_manager
 

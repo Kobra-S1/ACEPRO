@@ -157,6 +157,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                         "instance": inst_num,
                         "status": result.get("status", "unknown"),
                         "temp": result.get("temp", 0),
+                        "dryer_status": result.get("dryer_status", {})
                     }
                     gcmd.respond_info(f"// {json.dumps(status_info)}")
                 else:
@@ -175,6 +176,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                             "instance": inst_num,
                             "status": result.get("status", "unknown"),
                             "temp": result.get("temp", 0),
+                            "dryer_status": result.get("dryer_status", {})
                         }
                         gcmd.respond_info(f"// {json.dumps(status_info)}")
                     else:

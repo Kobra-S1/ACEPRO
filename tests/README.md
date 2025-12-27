@@ -25,7 +25,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 
 | File | Tests | Description |
 |------|-------|-------------|
-| **test_commands.py** | 73 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
+| **test_commands.py** | 75 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
 | **test_manager.py** | 113 | AceManager core logic, sensor management, tool changes, state tracking |
 | **test_instance.py** | 25 | AceInstance initialization, configuration, serial communication |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
@@ -39,7 +39,44 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_set_and_save.py** | 15 | Persistent variable storage to saved_variables.cfg |
 | **test_toolchange_integration.py** | 7 | End-to-end tool change scenarios across multiple ACE units |
 
-**Total: 299 tests** across 8 test modules
+**Total: 301 tests** across 8 test modules
+
+## Critical Regression Tests
+
+### Dryer Status Field Validation
+
+Tests `test_cmd_ACE_GET_STATUS_includes_dryer_status` and `test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped` validate that the ACE_GET_STATUS command includes dryer status information in its JSON response.
+
+**Why this is critical:**
+- KlipperScreen dryer panel relies on these fields to display live temperature and remaining time
+- The `dryer_status` field was added to support real-time dryer monitoring
+- Without these fields, the UI will show zeros and incorrect status
+
+**Validated fields:**
+```json
+{
+  "instance": 0,
+  "status": "ready",
+  "temp": 45,  // Current dryer temperature (required for UI)
+  "dryer_status": {  // Required field for dryer panel
+    "status": "drying",  // Dryer state: "drying"/"stop"/"heater_err"
+    "target_temp": 45,  // Target temperature setting
+    "duration": 240,  // Total dry duration in minutes
+    "remain_time": 14000  // Remaining seconds (for countdown display)
+  }
+}
+```
+
+**What breaks without these tests:**
+- Future code changes might remove `dryer_status` from the response thinking it's unused
+- KlipperScreen dryer panel would show "stopped" and 0°C for all dryers
+- Users would lose visibility into dryer operation status
+
+**Test coverage:**
+- `test_cmd_ACE_GET_STATUS_includes_dryer_status`: Validates full structure when dryer is active
+- `test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped`: Validates field exists even when dryer is stopped
+
+These tests ensure the critical communication path between Klipper and KlipperScreen dryer UI remains functional.
 
 ## Running Tests
 
@@ -158,6 +195,8 @@ Tests for all 37 G-code commands:
 # Status and query commands
 test_cmd_ACE_GET_STATUS_single_instance
 test_cmd_ACE_GET_STATUS_all_instances
+test_cmd_ACE_GET_STATUS_includes_dryer_status  # CRITICAL: Validates dryer_status field
+test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped  # CRITICAL: Validates field exists when stopped
 test_cmd_ACE_GET_CURRENT_INDEX
 test_cmd_ACE_QUERY_SLOTS_all
 test_cmd_ACE_QUERY_SLOTS_single
