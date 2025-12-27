@@ -338,6 +338,9 @@ def cmd_ACE_SET_SLOT(gcmd):
             manager = ace_get_manager(ace.instance_num)
             manager._sync_inventory_to_persistent(ace.instance_num)
             gcmd.respond_info(f"Slot {idx} set to empty")
+            # Emit inventory update for KlipperScreen
+            response = {"instance": ace.instance_num, "slots": ace.inventory}
+            gcmd.respond_info(f"// {json.dumps(response)}")
             return
 
         color_str = gcmd.get("COLOR", None)
@@ -365,6 +368,9 @@ def cmd_ACE_SET_SLOT(gcmd):
         manager = ace_get_manager(ace.instance_num)
         manager._sync_inventory_to_persistent(ace.instance_num)
         gcmd.respond_info(f"Slot {idx}: color={color}, material={material}, temp={temp}")
+        # Emit inventory update for KlipperScreen
+        response = {"instance": ace.instance_num, "slots": ace.inventory}
+        gcmd.respond_info(f"// {json.dumps(response)}")
     except Exception as e:
         gcmd.respond_info(f"ACE_SET_SLOT error: {e}")
 

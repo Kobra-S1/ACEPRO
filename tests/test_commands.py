@@ -301,6 +301,51 @@ class TestCommandSmoke:
         # Check that error message mentions color format
         assert "COLOR" in call_args or "named color" in call_args.lower()
 
+    def test_cmd_ACE_SET_SLOT_emits_inventory_notification(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT emits inventory notification for KlipperScreen."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
+        mock_gcmd.get = Mock(side_effect=["RED", "PLA"])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        
+        # Verify respond_info was called at least twice (status + notification)
+        assert mock_gcmd.respond_info.call_count >= 2
+        
+        # Get all respond_info calls
+        calls = [str(call) for call in mock_gcmd.respond_info.call_args_list]
+        
+        # Verify one call contains JSON notification with instance and slots
+        notification_found = False
+        for call in calls:
+            if '// {"instance":' in call and '"slots":' in call:
+                notification_found = True
+                break
+        
+        assert notification_found, f"Inventory notification not found in calls: {calls}"
+
+    def test_cmd_ACE_SET_SLOT_empty_emits_notification(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT with EMPTY=1 also emits inventory notification."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 1])
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        
+        # Verify respond_info was called at least twice
+        assert mock_gcmd.respond_info.call_count >= 2
+        
+        # Get all respond_info calls
+        calls = [str(call) for call in mock_gcmd.respond_info.call_args_list]
+        
+        # Verify notification is emitted
+        notification_found = False
+        for call in calls:
+            if '// {"instance":' in call and '"slots":' in call:
+                notification_found = True
+                break
+        
+        assert notification_found, f"Inventory notification not found in calls: {calls}"
+
     def test_cmd_ACE_SAVE_INVENTORY(self, mock_gcmd, setup_mocks):
         """Test ACE_SAVE_INVENTORY."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})
