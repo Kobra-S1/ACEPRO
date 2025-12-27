@@ -58,7 +58,7 @@ The ACE Pro is a multi-material filament management system for Klipper-based 3D 
   - `ace_current_index`: Currently active tool (-1 = none)
   - `ace_endless_spool_enabled`: Endless spool active/inactive
   - `ace_global_enabled`: ACE system master enable
-- **Sensor Management**: Manages shared sensors (toolhead, RMS)
+- **Sensor Management**: Manages shared sensors (toolhead, RDM)
 - **Smart Operations**: `smart_unload()`, `smart_load()` with sensor-aware fallback
 - **Tool Change Orchestration**: `perform_tool_change()` coordinates unload/load across instances
 - **Runout Detection**: Creates `RunoutMonitor` to poll sensors (50ms interval) and raise events
@@ -76,7 +76,7 @@ The decorator sets `toolchange_in_progress=True` during execution and ensures it
 ```python
 # Core Operations
 smart_unload(tool_index)                    # Intelligent unload with fallback strategies
-smart_load()                                # Load all non-empty slots to RMS sensor
+smart_load()                                # Load all non-empty slots to RDM sensor
 perform_tool_change(current, target)        # Complete tool change sequence
 execute_coordinated_retraction(...)         # Synchronized ACE + extruder retraction
 
@@ -129,7 +129,7 @@ _feed_sync(slot, length, speed)              # Synchronous feed with blocking wa
 
 # Toolhead Operations
 _feed_filament_into_toolhead(tool)           # Load filament to nozzle (multi-stage)
-_feed_filament_to_verification_sensor(slot)  # Feed to RMS/toolhead sensor only
+_feed_filament_to_verification_sensor(slot)  # Feed to RDM/toolhead sensor only
 _smart_unload_slot(slot, length)             # Unload with sensor validation and retry
 rmd_triggered_unload_slot(...)               # RDM-triggered unload with coordinated retraction
 
@@ -460,7 +460,7 @@ ACE_STOP_RETRACT [T=<tool>|INSTANCE=<n> INDEX=<n>]
 ACE_SMART_UNLOAD [TOOL=<n>]                # Intelligent unload with fallback strategies
                                            # Tries current, then other slots, then cross-instance
 
-ACE_SMART_LOAD                             # Load all non-empty slots to RMS sensor
+ACE_SMART_LOAD                             # Load all non-empty slots to RDM sensor
 
 ACE_CHANGE_TOOL TOOL=<n>                   # Execute tool change T<n>
                                            # (internal: delegates to _ACE_CHANGE_TOOL_WRAPPER)
@@ -509,10 +509,11 @@ ACE_DISABLE_ENDLESS_SPOOL                  # Disable auto-swap
 
 ACE_ENDLESS_SPOOL_STATUS                   # Query endless spool configuration
 
-ACE_SET_ENDLESS_SPOOL_MODE MODE=exact|material
+ACE_SET_ENDLESS_SPOOL_MODE MODE=exact|material|next
                                            # Set match mode:
                                            # "exact": match material AND color (default)
                                            # "material": match material only
+                                           # "next": use next ready slot (ignore material/color)
 
 ACE_GET_ENDLESS_SPOOL_MODE                 # Query current match mode
 ```
@@ -550,7 +551,7 @@ _ACE_HANDLE_PRINT_END                      # Called at print end (cleanup sequen
 ACE_GET_CURRENT_INDEX                      # Query currently loaded tool index
 
 ACE_DEBUG_SENSORS                          # Print all sensor states
-                                           # (toolhead, RMS, path-free status)
+                                           # (toolhead, RDM, path-free status)
 
 ACE_DEBUG_STATE                            # Print manager & instance state
                                            # (tool mapping, filament position)
@@ -561,7 +562,7 @@ ACE_DEBUG INSTANCE=<n> METHOD=<name> [PARAMS=<json>]
 ACE_DEBUG_CHECK_SPOOL_READY TOOL=<n> [TIMEOUT=<sec>]
                                            # Test spool ready check with timeout
 
-ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0|1 RMS=0|1 or RESET=1
+ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0|1 RDM=0|1 or RESET=1
                                            # Inject sensor state (testing)
 
 ACE_SHOW_INSTANCE_CONFIG [INSTANCE=<n>]    # Display resolved config for instance(s)

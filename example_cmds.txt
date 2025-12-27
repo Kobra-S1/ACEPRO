@@ -41,8 +41,8 @@ ACE_STOP_RETRACT INSTANCE=0 INDEX=1        # Stop retract on instance 0, slot 1
 ACE_SMART_UNLOAD TOOL=0                    # Unload tool 0 (tries slot 0, others, cross-instance)
 ACE_SMART_UNLOAD                           # Unload current tool (defaults to current index)
 
-# Smart load - load all non-empty slots to RMS sensor
-ACE_SMART_LOAD                             # Load all slots to RMS sensor for verification
+# Smart load - load all non-empty slots to RDM sensor
+ACE_SMART_LOAD                             # Load all slots to RDM sensor for verification
 
 # Full unload - completely empty a slot
 ACE_FULL_UNLOAD TOOL=0                     # Full unload tool 0
@@ -166,7 +166,7 @@ ACE_RECONNECT INSTANCE=0                   # Reconnect instance 0 only
 # ========== DEBUG COMMANDS ==========
 
 # Print sensor states
-ACE_DEBUG_SENSORS                          # Show: toolhead sensor, RMS sensor, path free status
+ACE_DEBUG_SENSORS                          # Show: toolhead sensor, RDM sensor, path free status
 
 # Print manager/instance state
 ACE_DEBUG_STATE                            # Show: tool mapping, filament position, loaded tool
@@ -175,8 +175,8 @@ ACE_DEBUG_STATE                            # Show: tool mapping, filament positi
 ACE_DEBUG_CHECK_SPOOL_READY TOOL=0         # Test spool ready check for tool 0
 
 # Inject sensor state (testing)
-ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=1 RMS=0
-    # Simulate: toolhead sensor triggered, RMS clear
+ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=1 RDM=0
+    # Simulate: toolhead sensor triggered, RDM clear
 
 ACE_DEBUG_INJECT_SENSOR_STATE RESET=1      # Clear sensor injection, use real sensors
 
