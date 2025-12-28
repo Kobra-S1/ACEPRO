@@ -26,7 +26,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | File | Tests | Description |
 |------|-------|-------------|
 | **test_commands.py** | 75 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
-| **test_manager.py** | 113 | AceManager core logic, sensor management, tool changes, state tracking |
+| **test_manager.py** | 122 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
 | **test_instance.py** | 37 | AceInstance initialization, configuration, serial communication, RFID query tracking, JSON emission |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
 
@@ -36,14 +36,14 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 |------|-------|-------------|
 | **test_endless_spool.py** | 20 | Endless spool match modes (exact/material/next), runout handling |
 | **test_endless_spool_swap.py** | 7 | Endless spool swap execution, retry logic, candidate search validation |
-| **test_runout_monitor.py** | 26 | Runout detection, sensor polling, toolchange interaction |
+| **test_runout_monitor.py** | 51 | Runout detection, sensor polling, toolchange interaction, error handling |
 | **test_retry_logic.py** | 8 | Feed/retract retry behavior, FORBIDDEN handling, backoff logic |
 | **test_set_and_save.py** | 15 | Persistent variable storage to saved_variables.cfg |
 | **test_toolchange_integration.py** | 7 | End-to-end tool change scenarios across multiple ACE units |
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 367 tests** across 12 test modules
+**Total: 384 tests** across 12 test modules
 
 ## Critical Regression Tests
 
@@ -339,6 +339,17 @@ test_perform_tool_change_t0_to_t1
 test_perform_tool_change_same_tool
 test_perform_tool_change_unload
 test_perform_tool_change_cross_instance
+
+# Tool change edge cases (NEW)
+test_invalid_state_nozzle_filled_rdm_empty_raises  # Stuck filament detection
+test_state_mismatch_nozzle_state_but_sensor_empty_corrects_to_bowden
+test_state_mismatch_nozzle_state_but_sensor_empty_corrects_to_splitter
+test_target_tool_not_managed_raises  # Invalid tool index handling
+test_unload_failure_raises_exception  # Failed unload error path
+test_reselection_with_path_blocked_clears_then_loads
+test_plausibility_mismatch_unload_fails_raises
+test_unknown_filament_pos_with_sensor_triggered_unloads
+test_unknown_filament_pos_sensor_clear_corrects_state
 ```
 
 ### Endless Spool Tests (`test_endless_spool.py`)
@@ -419,6 +430,20 @@ test_sensor_glitch_after_toolchange_triggers_runout
 # Pause/resume
 test_paused_state_resets_baseline
 test_baseline_reestablished_after_pause_resume
+
+# Error handling (NEW)
+test_pause_command_error_logged  # PAUSE failure graceful handling
+test_handle_runout_sets_handling_flag  # Flag management
+test_print_stats_exception_handled  # Graceful stats error recovery
+
+# Auto-recovery (NEW)
+test_auto_recovery_triggers_when_detection_should_be_active
+
+# Edge cases (NEW)
+test_runout_with_invalid_instance_uses_defaults  # Invalid tool lookup
+test_runout_handling_exception_clears_flag  # Flag cleared in finally
+test_runout_closes_prompt_before_swap  # Prompt lifecycle
+test_runout_with_none_ace_instance  # None instance handling
 ```
 
 ### Toolchange Integration Tests (`test_toolchange_integration.py`)

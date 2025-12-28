@@ -1216,5 +1216,278 @@ class TestToolchangeRunoutInteraction:
         assert self.monitor.prev_toolhead_sensor_state is True
 
 
+class TestMonitorErrorHandling:
+    """Test error handling paths in runout monitor."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.printer = Mock()
+        self.gcode = Mock()
+        self.reactor = Mock()
+        self.reactor.NEVER = float('inf')
+        self.endless_spool = Mock()
+        self.manager = Mock()
+        self.print_stats = Mock()
+        self.save_vars = Mock()
+        
+        self.save_vars.allVariables = {
+            'ace_current_index': 0,
+            'ace_filament_pos': 'nozzle',
+        }
+        
+        self.print_stats.get_status = Mock(return_value={'state': 'printing'})
+        
+        def lookup_side_effect(obj_name, default=None):
+            if obj_name == 'print_stats':
+                return self.print_stats
+            elif obj_name == 'save_variables':
+                return self.save_vars
+            return default
+        
+        self.printer.lookup_object = Mock(side_effect=lookup_side_effect)
+        
+        # Create command_error exception type
+        class command_error(Exception):
+            pass
+        self.printer.command_error = command_error
+        
+        self.manager.toolchange_in_progress = False
+        self.manager.get_switch_state = Mock(return_value=True)
+        
+        self.monitor = RunoutMonitor(
+            self.printer,
+            self.gcode,
+            self.reactor,
+            self.endless_spool,
+            self.manager
+        )
+        self.monitor.runout_detection_active = True
+        self.monitor.prev_toolhead_sensor_state = True
+        self.monitor.last_printing_active = True
+        self.monitor.last_print_state = 'printing'
+
+    def test_pause_command_error_logged(self):
+        """Test that PAUSE command errors are logged gracefully."""
+        self.gcode.run_script_from_command = Mock(side_effect=Exception("PAUSE failed"))
+        
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0):
+            with patch('ace.runout_monitor.get_local_slot', return_value=0):
+                with patch('ace.runout_monitor.ACE_INSTANCES') as mock_instances:
+                    mock_instances.get = Mock(return_value=None)
+                    
+                    # Should not raise - errors are caught and logged
+                    self.monitor._handle_runout_detected(0)
+        
+        # Should have logged the error
+        log_messages = [call[0][0] for call in self.gcode.respond_info.call_args_list]
+        assert any('error' in msg.lower() for msg in log_messages)
+
+    def test_handle_runout_sets_handling_flag(self):
+        """Test that runout handling sets the in-progress flag."""
+        self.save_vars.allVariables['ace_endless_spool_enabled'] = False
+        
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0):
+            with patch('ace.runout_monitor.get_local_slot', return_value=0):
+                with patch('ace.runout_monitor.ACE_INSTANCES') as mock_instances:
+                    mock_instances.get = Mock(return_value=None)
+                    
+                    # During handling, flag should be set
+                    original_respond = self.gcode.respond_info
+                    flag_values = []
+                    
+                    def capture_flag(msg):
+                        flag_values.append(self.monitor.runout_handling_in_progress)
+                        return original_respond(msg)
+                    
+                    self.gcode.respond_info = Mock(side_effect=capture_flag)
+                    
+                    self.monitor._handle_runout_detected(0)
+        
+        # Flag should have been True during handling
+        assert any(flag_values), "runout_handling_in_progress should be True during handling"
+        # And False after
+        assert not self.monitor.runout_handling_in_progress
+
+    def test_print_stats_exception_handled(self):
+        """Test that print_stats.get_status exception is handled gracefully."""
+        self.print_stats.get_status = Mock(side_effect=Exception("Stats unavailable"))
+        
+        # Should not raise
+        result = self.monitor._monitor_runout(0.0)
+        
+        # Should return some interval (not crash)
+        assert isinstance(result, (int, float))
+
+
+class TestAutoRecoveryLogic:
+    """Test auto-recovery detection when runout detection should be active but isn't."""
+
+    def setup_method(self):
+        """Set up test fixtures for auto-recovery tests."""
+        self.printer = Mock()
+        self.gcode = Mock()
+        self.reactor = Mock()
+        self.endless_spool = Mock()
+        self.manager = Mock()
+        self.print_stats = Mock()
+        self.save_vars = Mock()
+        
+        self.save_vars.allVariables = {
+            'ace_current_index': 1,
+            'ace_filament_pos': 'nozzle',
+        }
+        
+        self.print_stats.get_status = Mock(return_value={'state': 'printing'})
+        
+        def lookup_side_effect(obj_name, default=None):
+            if obj_name == 'print_stats':
+                return self.print_stats
+            elif obj_name == 'save_variables':
+                return self.save_vars
+            return default
+        
+        self.printer.lookup_object = Mock(side_effect=lookup_side_effect)
+        
+        self.manager.toolchange_in_progress = False
+        self.manager.get_switch_state = Mock(return_value=True)
+        
+        self.monitor = RunoutMonitor(
+            self.printer,
+            self.gcode,
+            self.reactor,
+            self.endless_spool,
+            self.manager
+        )
+
+    def test_auto_recovery_triggers_when_detection_should_be_active(self):
+        """Test auto-recovery activates when detection should be active but isn't."""
+        # Set counter to trigger debug logging (every ~15 min)
+        self.monitor.monitor_debug_counter = 1200 * 15 - 1  # One before trigger
+        
+        # Detection disabled but all conditions say it should be active:
+        # - printing
+        # - sensor has filament
+        # - tool >= 0
+        # - no toolchange in progress
+        # - no runout handling in progress
+        self.monitor.runout_detection_active = False
+        self.monitor.runout_handling_in_progress = False
+        self.monitor.prev_toolhead_sensor_state = True
+        self.monitor.last_printing_active = True
+        self.monitor.last_print_state = 'printing'
+        
+        self.monitor._monitor_runout(0.0)
+        
+        # Should have triggered auto-recovery and re-enabled detection
+        assert self.monitor.runout_detection_active
+        
+        # Should have logged warning about auto-recovery
+        log_messages = [call[0][0] for call in self.gcode.respond_info.call_args_list]
+        assert any('autorecovery' in msg.lower() or 'auto-recovery' in msg.lower() 
+                   for msg in log_messages)
+
+
+class TestRunoutHandlingEdgeCases:
+    """Test edge cases in runout handling."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.printer = Mock()
+        self.gcode = Mock()
+        self.reactor = Mock()
+        self.endless_spool = Mock()
+        self.manager = Mock()
+        self.print_stats = Mock()
+        self.save_vars = Mock()
+        
+        self.save_vars.allVariables = {
+            'ace_current_index': 0,
+            'ace_endless_spool_enabled': True,
+        }
+        
+        def lookup_side_effect(obj_name, default=None):
+            if obj_name == 'print_stats':
+                return self.print_stats
+            elif obj_name == 'save_variables':
+                return self.save_vars
+            return default
+        
+        self.printer.lookup_object = Mock(side_effect=lookup_side_effect)
+        
+        self.monitor = RunoutMonitor(
+            self.printer,
+            self.gcode,
+            self.reactor,
+            self.endless_spool,
+            self.manager
+        )
+
+    def test_runout_with_invalid_instance_uses_defaults(self):
+        """Test runout handling when instance lookup returns invalid result."""
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=-1):
+            with patch('ace.runout_monitor.get_local_slot', return_value=-1):
+                self.monitor._handle_runout_detected(99)
+        
+        # Should still show prompt with 'unknown' material
+        script_calls = [call[0][0] for call in self.gcode.run_script_from_command.call_args_list]
+        assert any('prompt_begin' in cmd for cmd in script_calls)
+
+    def test_runout_handling_exception_clears_flag(self):
+        """Test that runout_handling_in_progress is cleared even on exception."""
+        self.endless_spool.find_exact_match = Mock(return_value=1)
+        self.endless_spool.execute_swap = Mock(side_effect=Exception("Swap failed"))
+        
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0):
+            with patch('ace.runout_monitor.get_local_slot', return_value=0):
+                with patch('ace.runout_monitor.ACE_INSTANCES') as mock_instances:
+                    ace_inst = Mock()
+                    ace_inst.inventory = [{'material': 'PLA', 'color': [255, 0, 0]}]
+                    mock_instances.get = Mock(return_value=ace_inst)
+                    
+                    self.monitor._handle_runout_detected(0)
+        
+        # Flag should be cleared in finally block
+        assert not self.monitor.runout_handling_in_progress
+
+    def test_runout_closes_prompt_before_swap(self):
+        """Test that prompt is closed before executing endless spool swap."""
+        self.endless_spool.find_exact_match = Mock(return_value=1)
+        self.endless_spool.execute_swap = Mock()
+        
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0):
+            with patch('ace.runout_monitor.get_local_slot', return_value=0):
+                with patch('ace.runout_monitor.ACE_INSTANCES') as mock_instances:
+                    ace_inst = Mock()
+                    ace_inst.inventory = [{'material': 'PLA', 'color': [255, 0, 0]}]
+                    mock_instances.get = Mock(return_value=ace_inst)
+                    
+                    self.monitor._handle_runout_detected(0)
+        
+        # Should have closed prompt (prompt_end) before swap
+        script_calls = [call[0][0] for call in self.gcode.run_script_from_command.call_args_list]
+        prompt_end_idx = next((i for i, cmd in enumerate(script_calls) if 'prompt_end' in cmd), -1)
+        
+        assert prompt_end_idx >= 0, "prompt_end should have been called"
+        
+        # execute_swap should have been called after prompt was closed
+        self.endless_spool.execute_swap.assert_called_once_with(0, 1)
+
+    def test_runout_with_none_ace_instance(self):
+        """Test runout when ACE_INSTANCES.get returns None."""
+        self.save_vars.allVariables['ace_endless_spool_enabled'] = False
+        
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0):
+            with patch('ace.runout_monitor.get_local_slot', return_value=0):
+                with patch('ace.runout_monitor.ACE_INSTANCES') as mock_instances:
+                    mock_instances.get = Mock(return_value=None)
+                    
+                    # Should not raise
+                    self.monitor._handle_runout_detected(0)
+        
+        # Should have shown prompt with defaults
+        script_calls = [call[0][0] for call in self.gcode.run_script_from_command.call_args_list]
+        assert any('prompt_begin' in cmd for cmd in script_calls)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

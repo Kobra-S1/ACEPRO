@@ -1434,6 +1434,205 @@ class TestPerformToolChange(unittest.TestCase):
             # Should be reset to false after completion
             self.assertFalse(manager.toolchange_in_progress)
 
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_invalid_state_nozzle_filled_rdm_empty_raises(self, mock_endless_spool, mock_ace_instance):
+        """Test invalid state: filament at nozzle but RDM empty (broken filament path)."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        # Toolhead has filament, but RDM is empty - indicates broken filament!
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
+        # Mock has_rdm_sensor to return True (sensors dict isn't populated without _handle_ready)
+        manager.has_rdm_sensor = Mock(return_value=True)
+        
+        with self.assertRaises(Exception) as context:
+            manager.perform_tool_change(current_tool=1, target_tool=1)
+        
+        self.assertIn("Invalid filament state", str(context.exception))
+        self.assertIn("RDM sensor is empty", str(context.exception))
+        self.assertIn("manual intervention", str(context.exception))
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_state_mismatch_nozzle_state_but_sensor_empty_corrects_to_bowden(self, mock_endless_spool, mock_ace_instance):
+        """Test state correction: state says nozzle but sensor is empty, no RDM filament."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        # Both sensors empty - state is wrong, should correct to bowden
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {1: {'status': 'ready', 'temp': 200}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 1)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+            
+            result = manager.perform_tool_change(current_tool=1, target_tool=1)
+            
+            # State should have been corrected to bowden (no RDM filament)
+            # Then proceeded with load
+            self.assertIn("1", result)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_state_mismatch_nozzle_state_but_sensor_empty_corrects_to_splitter(self, mock_endless_spool, mock_ace_instance):
+        """Test state correction: state says nozzle but sensor empty, RDM has filament."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        # Toolhead empty but RDM has filament - correct to splitter
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: True}
+        
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {1: {'status': 'ready', 'temp': 200}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 1)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+            
+            result = manager.perform_tool_change(current_tool=1, target_tool=1)
+            
+            # Should have corrected state and continued with load
+            self.assertIn("1", result)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_target_tool_not_managed_raises(self, mock_endless_spool, mock_ace_instance):
+        """Test error when target tool is not managed by any ACE instance."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+        
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (None, -1)  # Tool not managed
+            
+            with self.assertRaises(Exception) as context:
+                manager.perform_tool_change(current_tool=-1, target_tool=99)
+            
+            self.assertIn("not managed", str(context.exception))
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_unload_failure_raises_exception(self, mock_endless_spool, mock_ace_instance):
+        """Test exception raised when unload fails."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        manager.smart_unload = Mock(return_value=False)  # Unload fails!
+        
+        with self.assertRaises(Exception) as context:
+            manager.perform_tool_change(current_tool=1, target_tool=2)
+        
+        self.assertIn("Failed to unload", str(context.exception))
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_reselection_with_path_blocked_clears_then_loads(self, mock_endless_spool, mock_ace_instance):
+        """Test reselection when path is blocked triggers smart_unload first."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
+        # Sensors clear so we don't hit plausibility check, but is_filament_path_free returns False
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        
+        # Path is blocked (sensor override says clear, but is_filament_path_free says blocked)
+        # Need to make is_filament_path_free return False first, then True after unload
+        call_count = [0]
+        def path_free_side_effect():
+            call_count[0] += 1
+            return call_count[0] > 1  # First call blocked, subsequent calls clear
+        
+        manager.is_filament_path_free = Mock(side_effect=path_free_side_effect)
+        manager.smart_unload = Mock(return_value=True)
+        
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {1: {'status': 'ready', 'temp': 0}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 1)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+            
+            result = manager.perform_tool_change(current_tool=1, target_tool=1)
+            
+            # Should have attempted smart_unload to clear path
+            manager.smart_unload.assert_called()
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_plausibility_mismatch_unload_fails_raises(self, mock_endless_spool, mock_ace_instance):
+        """Test plausibility check failure when smart_unload fails."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
+        # Sensors show filament but state says splitter - plausibility mismatch
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
+        manager.smart_unload = Mock(return_value=False)  # Unload fails!
+        
+        with self.assertRaises(Exception) as context:
+            manager.perform_tool_change(current_tool=-1, target_tool=1)
+        
+        self.assertIn("Failed to clear filament path", str(context.exception))
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_unknown_filament_pos_with_sensor_triggered_unloads(self, mock_endless_spool, mock_ace_instance):
+        """Test handling of unknown filament_pos when sensor is triggered."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = 'unknown_garbage'  # Invalid state
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}  # Sensor triggered
+        manager.smart_unload = Mock(return_value=True)
+        
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {2: {'status': 'ready', 'temp': 0}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 2)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+            
+            result = manager.perform_tool_change(current_tool=1, target_tool=2)
+            
+            # Should have called smart_unload for unknown state with triggered sensor
+            manager.smart_unload.assert_called()
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_unknown_filament_pos_sensor_clear_corrects_state(self, mock_endless_spool, mock_ace_instance):
+        """Test handling of unknown filament_pos when sensor is clear - corrects state."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = 'garbage_state'  # Invalid state
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}  # Sensor clear
+        
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {2: {'status': 'ready', 'temp': 0}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 2)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+            
+            result = manager.perform_tool_change(current_tool=1, target_tool=2)
+            
+            # Should have completed without unload (sensor clear = no filament)
+            self.assertIn("2", result)
+
 
 class TestConfigForTool(unittest.TestCase):
     """Test _get_config_for_tool method and error handling."""
