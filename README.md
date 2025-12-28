@@ -545,6 +545,14 @@ ACE_QUERY_SLOTS INSTANCE=0
 # ]
 ```
 
+### Empty Slot Data Retention
+
+When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver:
+- **Preserves**: `color`, `material`, `temp` - allows auto-restore if the same spool is reinserted
+- **Clears**: `rfid` flag and all RFID-specific fields (`extruder_temp`, `hotbed_temp`, `diameter`, `sku`, `brand`, etc.)
+
+This means if you remove and reinsert a spool, the slot automatically restores to `ready` with its previous color/material/temp settings.
+
 ## 🔄 Endless Spool Feature
 
 Automatically switches to a matching spool when filament runs out, enabling continuous multi-day prints.

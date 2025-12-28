@@ -215,7 +215,8 @@ find_exact_match(current_tool)      # Search for a match across all slots (mode-
 execute_swap(from_tool, to_tool)    # Execute automatic tool swap with fallback
                                                       # Coordinates:
                                                       # - Pause print (if not already paused)
-                                                      # - Mark old slot empty
+                                                      # - Mark old slot empty (status="empty", preserves
+                                                      #   color/material/temp, clears RFID fields)
                                                       # - Execute tool change (skip unload)
                                                       # - 1.5x purge on new tool when endless spool
                                                       # - Resume print automatically
@@ -706,7 +707,7 @@ def ace_get_instance_and_slot(gcmd):
 8b. If MATCH Found:
    - Close prompt automatically
    - EndlessSpool.execute_swap(from_tool, to_tool)
-   - Mark old slot empty (status="empty")
+   - Mark old slot empty (status="empty", preserves color/material/temp)
    - Execute tool change with is_endless_spool=True
    - Skip unload (already empty), perform 1.5x purge
    - Resume print automatically
@@ -749,6 +750,50 @@ _feed_assist_index: int             # Current feed assist slot (-1 = none)
 _info: Dict                         # ACE hardware status
 serial_mgr: AceSerialManager        # Communication handler
 ```
+
+### Inventory Slot Structure
+
+Each slot in the inventory contains:
+
+```python
+{
+    "status": str,      # "ready" | "empty" - hardware state
+    "color": List[int], # [R, G, B] - preserved when empty
+    "material": str,    # e.g. "PLA" - preserved when empty
+    "temp": int,        # Print temperature - preserved when empty
+    "rfid": bool,       # True if data came from RFID tag - cleared when empty
+    
+    # Optional RFID fields (cleared when slot becomes empty):
+    "extruder_temp": Dict,  # {"min": int, "max": int}
+    "hotbed_temp": Dict,    # {"min": int, "max": int}
+    "diameter": float,      # Filament diameter in mm
+    "sku": str,             # Spool SKU
+    "brand": str,           # Brand name
+    "total": int,           # Total spool length (mm)
+    "current": int,         # Remaining length (mm)
+}
+```
+
+### Slot Empty Transition Behavior
+
+When a slot transitions from `ready` to `empty` (runout, manual EMPTY=1, etc.):
+
+| Field | Behavior | Reason |
+|-------|----------|--------|
+| `status` | Set to `"empty"` | Hardware reports no filament |
+| `color` | **Preserved** | Allows auto-restore if same spool reinserted |
+| `material` | **Preserved** | Allows auto-restore if same spool reinserted |
+| `temp` | **Preserved** | Allows auto-restore if same spool reinserted |
+| `rfid` | Set to `False` | No RFID tag present |
+| `extruder_temp` | **Cleared** | RFID data no longer valid |
+| `hotbed_temp` | **Cleared** | RFID data no longer valid |
+| `diameter` | **Cleared** | RFID data no longer valid |
+| `sku`, `brand`, etc. | **Cleared** | RFID data no longer valid |
+
+**Rationale**: Core metadata (color, material, temp) is preserved so that if the same
+spool is reinserted, the slot auto-restores to `ready` with its previous settings.
+RFID-specific fields are cleared because they only apply when an RFID-tagged spool
+is physically present.
 
 
 ## Configuration Example
