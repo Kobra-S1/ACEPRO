@@ -119,13 +119,27 @@ class AceSerialManager:
         Parse USB location string into tuple for natural sorting.
 
         Examples:
-            "1-1.4.3:1.0" → (1, 1, 4, 3, 1, 0)
-            "acm.2" → (2,)
+            "1-1.4.3:1.0" → (1, 1, 4, 3)
+            "acm.2" → (999998, 2)
+        
+        ACM fallback locations sort after USB locations but before
+        unrecognized devices (999999).
         """
         if not location_str:
             return (999999,)
 
-        location_str = str(location_str).split(':')[0]
+        location_str = str(location_str)
+        
+        # Handle ACM fallback format (e.g., "acm.2")
+        if location_str.startswith('acm.'):
+            try:
+                acm_num = int(location_str[4:])
+                return (999998, acm_num)  # Sort after USB, before unknown
+            except ValueError:
+                return (999999,)
+        
+        # Strip interface suffix (e.g., ":1.0")
+        location_str = location_str.split(':')[0]
         parts = location_str.replace('-', '.').split('.')
 
         try:

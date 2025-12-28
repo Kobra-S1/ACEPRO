@@ -29,6 +29,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_manager.py** | 122 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
 | **test_instance.py** | 37 | AceInstance initialization, configuration, serial communication, RFID query tracking, JSON emission |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
+| **test_serial_manager.py** | 34 | USB location parsing, CRC calculation, frame parsing, status change detection |
 
 ### Feature-Specific Tests
 
@@ -43,7 +44,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 384 tests** across 12 test modules
+**Total: 418 tests** across 13 test modules
 
 ## Critical Regression Tests
 
@@ -527,6 +528,60 @@ test_config_accepts_min
 test_config_accepts_max
 test_config_invalid_value_defaults_to_average
 ```
+
+### Serial Manager Tests (`test_serial_manager.py`)
+
+Low-level serial protocol and pure logic functions:
+
+```python
+# USB location parsing
+test_parse_simple_location              # "1-1.4" → (1, 1, 4)
+test_parse_complex_location_with_colon  # "1-1.4.3:1.0" → (1, 1, 4, 3)
+test_parse_acm_fallback                 # "acm.2" → (999998, 2)
+test_parse_acm_fallback_zero            # "acm.0" → (999998, 0)
+test_acm_sorts_after_usb_before_unknown # USB < ACM < unknown
+test_parse_empty_string_returns_high_value
+test_parse_none_returns_high_value
+test_parse_invalid_location_returns_high_value
+test_sorting_order_is_correct           # Multi-device sort validation
+
+# CRC calculation
+test_crc_empty_buffer                   # Initial value 0xFFFF
+test_crc_deterministic                  # Same input → same CRC
+test_crc_different_for_different_input  # Different payloads differ
+test_crc_is_16bit                       # Result fits in 16 bits
+
+# Frame parsing
+test_parse_valid_frame                  # Valid frame decoded
+test_parse_multiple_frames              # Multiple frames in buffer
+test_incomplete_frame_stays_in_buffer   # Partial frame preserved
+test_invalid_crc_rejected               # Bad CRC discarded
+test_resync_on_junk_data                # Recovers after junk bytes
+test_invalid_terminator_resyncs         # Bad terminator → resync
+
+# Status change detection
+test_detects_status_change              # Status transitions logged
+test_no_log_when_status_unchanged       # No noise on same state
+test_detects_slot_status_change         # Per-slot tracking
+test_detects_dryer_status_change        # Dryer state monitoring
+test_detects_significant_temp_change    # ≥5°C temp changes logged
+test_ignores_small_temp_change          # <5°C ignored
+test_handles_missing_result             # Graceful error response
+test_handles_empty_response             # None/empty handled
+
+# Queue management
+test_high_priority_dequeued_first       # HP before normal
+test_clear_queues_empties_all           # Clear works completely
+test_has_pending_requests_detects_queued
+test_has_pending_requests_detects_inflight
+
+# Response dispatch
+test_dispatch_returns_callback_for_known_id
+test_dispatch_returns_none_for_unsolicited
+test_dispatch_handles_missing_id
+```
+
+**Bug fixed**: ACM fallback locations now sort correctly as `(999998, n)` instead of incorrectly returning `(999999,)` for all ACM devices.
 
 ## Development Workflow
 
