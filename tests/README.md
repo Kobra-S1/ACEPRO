@@ -27,7 +27,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 |------|-------|-------------|
 | **test_commands.py** | 75 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
 | **test_manager.py** | 113 | AceManager core logic, sensor management, tool changes, state tracking |
-| **test_instance.py** | 25 | AceInstance initialization, configuration, serial communication |
+| **test_instance.py** | 35 | AceInstance initialization, configuration, serial communication, RFID query tracking |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
 
 ### Feature-Specific Tests
@@ -41,7 +41,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 340 tests** across 10 test modules
+**Total: 350 tests** across 10 test modules
 
 ## Critical Regression Tests
 
@@ -79,6 +79,51 @@ Tests `test_cmd_ACE_GET_STATUS_includes_dryer_status` and `test_cmd_ACE_GET_STAT
 - `test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped`: Validates field exists even when dryer is stopped
 
 These tests ensure the critical communication path between Klipper and KlipperScreen dryer UI remains functional.
+
+### RFID Query Tracking Tests
+
+Tests in `TestRfidQueryTracking` class (`test_instance.py`) validate that RFID data queries are sent exactly once per spool insertion, preventing console spam while ensuring data is always fetched when needed.
+
+**Why this is critical:**
+- ACE heartbeat runs at 1Hz - without guards, RFID queries would flood the console every second
+- Async callbacks complete after next heartbeat starts - need to track in-flight queries
+- Failed queries must not cause infinite retry loops
+- Spool removal/reinsertion must allow fresh queries
+
+**Problem solved:**
+```
+# Without tracking (BAD - floods console):
+ACE[0]: Slot 0 querying full RFID data...  # Every heartbeat!
+ACE[0]: Slot 1 querying full RFID data...
+ACE[0]: Slot 2 querying full RFID data...
+ACE[0]: Slot 3 querying full RFID data...
+# Repeats forever...
+
+# With tracking (GOOD - one query per spool):
+ACE[0]: Slot 0 querying full RFID data...  # Once at startup
+ACE[0]: Slot 0 RFID full data -> sku=..., temp=215°C
+# No more queries until spool is removed and reinserted
+```
+
+**Test coverage (10 tests):**
+
+| Test | What it proves |
+|------|----------------|
+| `test_init_creates_empty_tracking_sets` | Both tracking sets start empty |
+| `test_rfid_query_only_sent_once_per_slot` | First heartbeat triggers query, subsequent don't spam |
+| `test_query_not_sent_when_already_pending` | No duplicate queries while one is in-flight |
+| `test_empty_slot_clears_query_tracking` | Removing spool clears both tracking sets |
+| `test_reinserted_spool_triggers_new_query` | After empty→ready, query is allowed again |
+| `test_rfid_query_not_blocked_after_callback_completes` | System doesn't get stuck after success |
+| `test_rfid_query_not_blocked_after_failed_callback` | System doesn't get stuck after failure |
+| `test_query_skipped_when_already_has_rfid_data` | No unnecessary queries if data present |
+| `test_multiple_slots_tracked_independently` | Slot 0 tracking doesn't affect slot 1 |
+| `test_query_rfid_full_data_guards_prevent_duplicate` | Direct test of pending guard |
+
+**What breaks without these tests:**
+- Code changes might remove tracking sets thinking they're unused → console spam returns
+- Changes to callback logic might leave pending flag set → queries never happen
+- Changes to empty slot handling might not clear flags → stale data on spool swap
 
 ## Running Tests
 

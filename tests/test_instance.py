@@ -1218,5 +1218,500 @@ class TestGetStatus(unittest.TestCase):
         self.assertEqual(len(status['slots']), SLOTS_PER_ACE)
 
 
+class TestRfidQueryTracking(unittest.TestCase):
+    """
+    Test RFID query tracking to prevent spam and ensure proper query lifecycle.
+    
+    These tests verify that:
+    1. RFID queries only happen when needed (not every heartbeat)
+    2. Queries don't get stuck and never happen again when they should
+    3. Query tracking is properly cleared when slots become empty
+    """
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+        
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_printer.lookup_object.side_effect = self._mock_lookup_object
+        self.mock_reactor.monotonic.return_value = 0.0
+        
+        self.variables = {}
+        self.mock_save_vars.allVariables = self.variables
+        
+        self.ace_config = {
+            'baud': 115200,
+            'timeout_multiplier': 2.0,
+            'filament_runout_sensor_name_rdm': 'return_module',
+            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'feed_speed': 100,
+            'retract_speed': 100,
+            'total_max_feeding_length': 1000,
+            'parkposition_to_toolhead_length': 500,
+            'toolchange_load_length': 480,
+            'parkposition_to_rdm_length': 350,
+            'incremental_feeding_length': 10,
+            'incremental_feeding_speed': 50,
+            'extruder_feeding_length': 50,
+            'extruder_feeding_speed': 5,
+            'toolhead_slow_loading_speed': 10,
+            'heartbeat_interval': 1.0,
+            'max_dryer_temperature': 70,
+            'toolhead_full_purge_length': 100,
+            'rfid_inventory_sync_enabled': True,
+            'rfid_temp_mode': 'average',
+        }
+
+    def _mock_lookup_object(self, name, default=None):
+        """Mock printer lookup_object."""
+        if name == 'gcode':
+            return self.mock_gcode
+        elif name == 'save_variables':
+            return self.mock_save_vars
+        return default
+
+    @patch('ace.instance.AceSerialManager')
+    def test_rfid_query_only_sent_once_per_slot(self, mock_serial_mgr_class):
+        """
+        Verify RFID query is sent only once, not on every heartbeat.
+        
+        This tests the core anti-spam behavior: when a slot becomes ready with
+        RFID data, we should query get_filament_info exactly once, not repeatedly.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        # Initial state: slot 0 is empty
+        instance.inventory[0]['status'] = 'empty'
+        
+        # Capture send_request calls
+        request_calls = []
+        def capture_request(request, callback):
+            request_calls.append(request)
+        instance.send_request = capture_request
+        
+        # First status update: slot becomes ready with RFID
+        response = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'ready',
+                    'rfid': 2,
+                    'type': 'PLA',
+                    'color': [255, 0, 0],
+                }]
+            }
+        }
+        
+        instance._status_update_callback(response)
+        
+        # Should have sent exactly one query
+        rfid_queries = [r for r in request_calls if r.get('method') == 'get_filament_info']
+        self.assertEqual(len(rfid_queries), 1, "Should send exactly one RFID query")
+        self.assertEqual(rfid_queries[0]['params']['index'], 0)
+        
+        # Slot should be marked as attempted
+        self.assertIn(0, instance._rfid_query_attempted)
+        self.assertIn(0, instance._pending_rfid_queries)
+        
+        # Simulate multiple additional heartbeats (same status)
+        for _ in range(5):
+            instance._status_update_callback(response)
+        
+        # Should still have only one query (not 6)
+        rfid_queries = [r for r in request_calls if r.get('method') == 'get_filament_info']
+        self.assertEqual(len(rfid_queries), 1, "Should NOT re-query on subsequent heartbeats")
+
+    @patch('ace.instance.AceSerialManager')
+    def test_rfid_query_not_blocked_after_callback_completes(self, mock_serial_mgr_class):
+        """
+        Verify pending flag is cleared when callback completes.
+        
+        This tests that the _pending_rfid_queries set is properly managed.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        captured_callback = [None]
+        def capture_request(request, callback):
+            if request.get('method') == 'get_filament_info':
+                captured_callback[0] = callback
+        instance.send_request = capture_request
+        
+        # Trigger RFID query
+        instance.inventory[0]['status'] = 'empty'
+        response = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'ready',
+                    'rfid': 2,
+                    'type': 'PLA',
+                    'color': [255, 0, 0],
+                }]
+            }
+        }
+        instance._status_update_callback(response)
+        
+        # Should be pending
+        self.assertIn(0, instance._pending_rfid_queries)
+        
+        # Simulate callback completion (successful response)
+        if captured_callback[0]:
+            captured_callback[0]({
+                'code': 0,
+                'result': {
+                    'type': 'PLA',
+                    'extruder_temp': {'min': 190, 'max': 220},
+                    'hotbed_temp': {'min': 50, 'max': 60},
+                }
+            })
+        
+        # Pending should be cleared, but attempted still set
+        self.assertNotIn(0, instance._pending_rfid_queries)
+        self.assertIn(0, instance._rfid_query_attempted)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_rfid_query_not_blocked_after_failed_callback(self, mock_serial_mgr_class):
+        """
+        Verify pending flag is cleared even when query fails.
+        
+        This tests that failed queries don't leave the pending flag stuck.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        captured_callback = [None]
+        def capture_request(request, callback):
+            if request.get('method') == 'get_filament_info':
+                captured_callback[0] = callback
+        instance.send_request = capture_request
+        
+        # Trigger RFID query
+        instance.inventory[0]['status'] = 'empty'
+        response = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'ready',
+                    'rfid': 2,
+                    'type': 'PLA',
+                    'color': [255, 0, 0],
+                }]
+            }
+        }
+        instance._status_update_callback(response)
+        
+        self.assertIn(0, instance._pending_rfid_queries)
+        
+        # Simulate failed callback (no response)
+        if captured_callback[0]:
+            captured_callback[0](None)  # No response
+        
+        # Pending should be cleared
+        self.assertNotIn(0, instance._pending_rfid_queries)
+        # But attempted stays set to prevent retry spam
+        self.assertIn(0, instance._rfid_query_attempted)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_empty_slot_clears_query_tracking(self, mock_serial_mgr_class):
+        """
+        Verify query tracking is cleared when slot becomes empty.
+        
+        This is critical: when a spool is removed, we must clear the tracking
+        so that reinserting a spool will trigger a new query.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        # Setup: slot has been queried previously
+        instance.inventory[0]['status'] = 'ready'
+        instance._rfid_query_attempted.add(0)
+        instance._pending_rfid_queries.add(0)  # Simulating stuck state
+        
+        # Slot becomes empty (spool removed)
+        response = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'empty',
+                    'rfid': 0,
+                }]
+            }
+        }
+        instance._status_update_callback(response)
+        
+        # Both tracking sets should be cleared for this slot
+        self.assertNotIn(0, instance._rfid_query_attempted)
+        self.assertNotIn(0, instance._pending_rfid_queries)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_reinserted_spool_triggers_new_query(self, mock_serial_mgr_class):
+        """
+        Verify reinserting a spool after removal triggers a new RFID query.
+        
+        This tests the full lifecycle: ready -> empty -> ready should query again.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        request_calls = []
+        def capture_request(request, callback):
+            request_calls.append(request)
+            # Simulate immediate callback completion
+            if request.get('method') == 'get_filament_info':
+                callback({
+                    'code': 0,
+                    'result': {
+                        'type': 'PLA',
+                        'extruder_temp': {'min': 190, 'max': 220},
+                        'hotbed_temp': {'min': 50, 'max': 60},
+                    }
+                })
+        instance.send_request = capture_request
+        
+        # Step 1: Slot becomes ready with RFID (first insertion)
+        instance.inventory[0]['status'] = 'empty'
+        response_ready = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'ready',
+                    'rfid': 2,
+                    'type': 'PLA',
+                    'color': [255, 0, 0],
+                }]
+            }
+        }
+        instance._status_update_callback(response_ready)
+        
+        first_query_count = len([r for r in request_calls if r.get('method') == 'get_filament_info'])
+        self.assertEqual(first_query_count, 1, "First insertion should query")
+        
+        # Step 2: Slot becomes empty (spool removed)
+        response_empty = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'empty',
+                    'rfid': 0,
+                }]
+            }
+        }
+        instance._status_update_callback(response_empty)
+        
+        # Tracking should be cleared
+        self.assertNotIn(0, instance._rfid_query_attempted)
+        
+        # Step 3: Slot becomes ready again (spool reinserted)
+        instance._status_update_callback(response_ready)
+        
+        second_query_count = len([r for r in request_calls if r.get('method') == 'get_filament_info'])
+        self.assertEqual(second_query_count, 2, "Reinsertion should trigger a new query")
+
+    @patch('ace.instance.AceSerialManager')
+    def test_multiple_slots_tracked_independently(self, mock_serial_mgr_class):
+        """
+        Verify each slot's query tracking is independent.
+        
+        Slot 0 being queried should not affect slot 1, and vice versa.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        request_calls = []
+        def capture_request(request, callback):
+            request_calls.append(request)
+        instance.send_request = capture_request
+        
+        # Both slots start empty
+        instance.inventory[0]['status'] = 'empty'
+        instance.inventory[1]['status'] = 'empty'
+        
+        # Slot 0 becomes ready
+        response_slot0 = {
+            'result': {
+                'slots': [
+                    {'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'PLA', 'color': [255, 0, 0]},
+                    {'index': 1, 'status': 'empty', 'rfid': 0},
+                ]
+            }
+        }
+        instance._status_update_callback(response_slot0)
+        
+        # Only slot 0 should be in tracking
+        self.assertIn(0, instance._rfid_query_attempted)
+        self.assertNotIn(1, instance._rfid_query_attempted)
+        
+        queries_after_slot0 = len([r for r in request_calls if r.get('method') == 'get_filament_info'])
+        self.assertEqual(queries_after_slot0, 1)
+        
+        # Now slot 1 becomes ready too
+        response_both = {
+            'result': {
+                'slots': [
+                    {'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'PLA', 'color': [255, 0, 0]},
+                    {'index': 1, 'status': 'ready', 'rfid': 2, 'type': 'PETG', 'color': [0, 255, 0]},
+                ]
+            }
+        }
+        instance._status_update_callback(response_both)
+        
+        # Both should be in tracking now
+        self.assertIn(0, instance._rfid_query_attempted)
+        self.assertIn(1, instance._rfid_query_attempted)
+        
+        # Should have 2 total queries (one for each slot)
+        queries_after_both = len([r for r in request_calls if r.get('method') == 'get_filament_info'])
+        self.assertEqual(queries_after_both, 2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_query_not_sent_when_already_pending(self, mock_serial_mgr_class):
+        """
+        Verify no duplicate queries while one is still in-flight.
+        
+        If callback hasn't completed yet, subsequent heartbeats should not
+        trigger additional queries.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        request_calls = []
+        def capture_request(request, callback):
+            # Don't call callback - simulate in-flight query
+            request_calls.append(request)
+        instance.send_request = capture_request
+        
+        instance.inventory[0]['status'] = 'empty'
+        
+        response = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'ready',
+                    'rfid': 2,
+                    'type': 'PLA',
+                    'color': [255, 0, 0],
+                }]
+            }
+        }
+        
+        # First update triggers query
+        instance._status_update_callback(response)
+        
+        # Query is pending
+        self.assertIn(0, instance._pending_rfid_queries)
+        
+        # Multiple heartbeats while query is pending
+        for _ in range(10):
+            instance._status_update_callback(response)
+        
+        # Should still be only 1 query
+        rfid_queries = [r for r in request_calls if r.get('method') == 'get_filament_info']
+        self.assertEqual(len(rfid_queries), 1, "No duplicate queries while pending")
+
+    @patch('ace.instance.AceSerialManager')
+    def test_query_skipped_when_already_has_rfid_data(self, mock_serial_mgr_class):
+        """
+        Verify no query when inventory already has full RFID data.
+        
+        If extruder_temp and hotbed_temp are already present, don't re-query.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        request_calls = []
+        def capture_request(request, callback):
+            request_calls.append(request)
+        instance.send_request = capture_request
+        
+        # Setup: slot already has full RFID data from previous query
+        instance.inventory[0].update({
+            'status': 'ready',
+            'material': 'PLA',
+            'color': [255, 0, 0],
+            'rfid': True,
+            'extruder_temp': {'min': 190, 'max': 220},
+            'hotbed_temp': {'min': 50, 'max': 60},
+        })
+        
+        # Same status comes in again (no changes)
+        response = {
+            'result': {
+                'slots': [{
+                    'index': 0,
+                    'status': 'ready',
+                    'rfid': 2,
+                    'type': 'PLA',
+                    'color': [255, 0, 0],
+                }]
+            }
+        }
+        
+        instance._status_update_callback(response)
+        
+        # Should not query - data already present
+        rfid_queries = [r for r in request_calls if r.get('method') == 'get_filament_info']
+        self.assertEqual(len(rfid_queries), 0, "No query when data already exists")
+
+    @patch('ace.instance.AceSerialManager')
+    def test_init_creates_empty_tracking_sets(self, mock_serial_mgr_class):
+        """Verify instance initialization creates empty tracking sets."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        
+        self.assertIsInstance(instance._pending_rfid_queries, set)
+        self.assertIsInstance(instance._rfid_query_attempted, set)
+        self.assertEqual(len(instance._pending_rfid_queries), 0)
+        self.assertEqual(len(instance._rfid_query_attempted), 0)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_query_rfid_full_data_guards_prevent_duplicate(self, mock_serial_mgr_class):
+        """
+        Test _query_rfid_full_data directly to verify pending guard works.
+        
+        Note: _query_rfid_full_data only checks _pending_rfid_queries.
+        The _rfid_query_attempted check happens in _status_update_callback
+        BEFORE calling _query_rfid_full_data.
+        """
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        request_calls = []
+        def capture_request(request, callback):
+            request_calls.append(request)
+        instance.send_request = capture_request
+        
+        # First call should work
+        instance._query_rfid_full_data(0)
+        self.assertEqual(len(request_calls), 1)
+        self.assertIn(0, instance._pending_rfid_queries)
+        self.assertIn(0, instance._rfid_query_attempted)
+        
+        # Second call should be blocked (pending check in _query_rfid_full_data)
+        instance._query_rfid_full_data(0)
+        self.assertEqual(len(request_calls), 1, "Blocked by pending check")
+        
+        # Clear pending - query allowed again (attempted is only checked at call site)
+        # This tests that the pending guard works correctly
+        instance._pending_rfid_queries.discard(0)
+        instance._query_rfid_full_data(0)
+        self.assertEqual(len(request_calls), 2, "Query allowed after clearing pending")
+        
+        # Verify pending is set again after new query
+        self.assertIn(0, instance._pending_rfid_queries)
+
+
 if __name__ == '__main__':
     unittest.main()

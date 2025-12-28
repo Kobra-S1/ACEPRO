@@ -61,6 +61,7 @@ class AceInstance:
         self.variables = {}
         self.SLOT_COUNT = SLOTS_PER_ACE
         self.instance_num = instance_num
+        self.ace_config = ace_config  # Store for later access (e.g., rfid_temp_mode)
         self.baud = ace_config["baud"]
         self.printer = printer
         self.reactor = printer.get_reactor()
@@ -94,6 +95,8 @@ class AceInstance:
         self._dryer_active = False
         self._dryer_temperature = 0
         self._dryer_duration = 0
+        self._pending_rfid_queries = set()  # Track slots with in-flight RFID queries
+        self._rfid_query_attempted = set()  # Track slots where RFID query was already attempted
 
         self.status_debug_logging = bool(ace_config.get("status_debug_logging", False))
 
@@ -1079,7 +1082,16 @@ class AceInstance:
         - icon_type
         - diameter, total, current
         """
+        # Prevent duplicate queries while one is in-flight
+        if slot_idx in self._pending_rfid_queries:
+            return
+        self._pending_rfid_queries.add(slot_idx)
+        self._rfid_query_attempted.add(slot_idx)  # Mark as attempted (cleared when slot becomes empty)
+        
         def rfid_callback(response):
+            # Always clear pending flag when callback completes
+            self._pending_rfid_queries.discard(slot_idx)
+            
             if response and response.get("code") == 0 and "result" in response:
                 result = response["result"]
                 
@@ -1238,6 +1250,9 @@ class AceInstance:
                         # Clear all optional RFID fields
                         for key in ["sku", "brand", "icon_type", "rgba", "extruder_temp", "hotbed_temp", "diameter", "total", "current"]:
                             self.inventory[idx].pop(key, None)
+                        # Clear query tracking so we'll query again when spool is reinserted
+                        self._rfid_query_attempted.discard(idx)
+                        self._pending_rfid_queries.discard(idx)
 
                     # If RFID provided full data while becoming ready, sync it to inventory
                     elif new_status == "ready":
@@ -1259,14 +1274,20 @@ class AceInstance:
                                     "extruder_temp" not in self.inventory[idx] or
                                     "hotbed_temp" not in self.inventory[idx]
                                 )
+                                
+                                # Skip if query is already in-flight or was already attempted
+                                # (only retry when slot becomes empty then ready again)
+                                already_queried = idx in self._rfid_query_attempted
+                                query_pending = idx in self._pending_rfid_queries
 
                                 # Treat as a change if any field differs, rfid flag was previously false,
                                 # OR we're missing full RFID data that should be queried
+                                # BUT skip re-query if one is already in-flight or was already attempted
                                 is_changed = (
                                     material != saved_material or
                                     incoming_color != saved_color[:3] or
                                     not saved_rfid or
-                                    missing_rfid_data
+                                    (missing_rfid_data and not query_pending and not already_queried)
                                 )
 
                                 if is_changed:
