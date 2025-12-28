@@ -25,7 +25,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 
 | File | Tests | Description |
 |------|-------|-------------|
-| **test_commands.py** | 75 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
+| **test_commands.py** | 88 | All G-code command handlers, instance/slot resolution, parameter validation |
 | **test_manager.py** | 122 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
 | **test_instance.py** | 37 | AceInstance initialization, configuration, serial communication, RFID query tracking, JSON emission |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
@@ -44,7 +44,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 418 tests** across 13 test modules
+**Total: 430 tests** across 13 test modules
 
 ## Critical Regression Tests
 
@@ -278,8 +278,22 @@ test_cmd_ACE_SET_SLOT_rgb_fallback_still_works
 test_cmd_ACE_SET_SLOT_invalid_named_color
 test_cmd_ACE_SET_SLOT_emits_inventory_notification
 test_cmd_ACE_SET_SLOT_empty_emits_notification
+test_cmd_ACE_SET_SLOT_rgb_values_not_validated  # Documents current behavior
+test_cmd_ACE_SET_SLOT_rgb_with_whitespace
+test_cmd_ACE_SET_SLOT_rgb_wrong_count
 test_cmd_ACE_SAVE_INVENTORY
 test_cmd_ACE_RESET_PERSISTENT_INVENTORY
+
+# Instance/slot resolution (ace_get_instance_and_slot)
+test_with_t_param_returns_instance_and_slot  # T=2 → instance 0, slot 2
+test_with_t_param_tool_0                      # T=0 → slot 0
+test_with_t_param_tool_3                      # T=3 → slot 3 (last on instance 0)
+test_with_instance_and_index_params           # INSTANCE=0 INDEX=2
+test_raises_error_when_neither_provided
+test_raises_error_for_instance_only           # INSTANCE without INDEX
+test_raises_error_for_index_only              # INDEX without INSTANCE
+test_t_param_unmanaged_tool_raises_error      # T=99 → error
+test_t_param_takes_priority_over_instance_index
 
 # Endless spool
 test_cmd_ACE_ENABLE_ENDLESS_SPOOL

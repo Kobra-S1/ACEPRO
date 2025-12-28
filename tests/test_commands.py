@@ -458,6 +458,46 @@ class TestCommandSmoke:
         
         assert notification_found, f"Inventory notification not found in calls: {calls}"
 
+    def test_cmd_ACE_SET_SLOT_rgb_values_clamped_to_valid_range(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT clamps out-of-range RGB values to 0-255."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
+        mock_gcmd.get = Mock(side_effect=["500,0,-10", "PLA"])  # Invalid values
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        
+        # Values should be clamped: 500→255, 0→0, -10→0
+        assert ACE_INSTANCES[0].inventory[0]["color"] == [255, 0, 0]
+
+    def test_cmd_ACE_SET_SLOT_rgb_with_whitespace(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT RGB parsing handles whitespace."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
+        mock_gcmd.get = Mock(side_effect=["128, 64, 192", "PLA"])  # Spaces in RGB
+        
+        # Current behavior: spaces may cause parsing failure
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        
+        # The int() conversion should handle leading/trailing spaces
+        assert ACE_INSTANCES[0].inventory[0]["color"] == [128, 64, 192]
+
+    def test_cmd_ACE_SET_SLOT_rgb_wrong_count(self, mock_gcmd, setup_mocks):
+        """Test ACE_SET_SLOT rejects RGB with wrong number of values."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
+        mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
+        mock_gcmd.get = Mock(side_effect=["128,64", "PLA"])  # Only 2 values
+        
+        def error_func(msg):
+            raise Exception(msg)
+        mock_gcmd.error = error_func
+        
+        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
+        
+        # Should have reported an error
+        assert mock_gcmd.respond_info.called
+        call_args = str(mock_gcmd.respond_info.call_args)
+        assert "COLOR" in call_args or "error" in call_args.lower()
+
     def test_cmd_ACE_SAVE_INVENTORY(self, mock_gcmd, setup_mocks):
         """Test ACE_SAVE_INVENTORY."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})
@@ -907,3 +947,91 @@ class TestAceGetInstance:
         
         with pytest.raises(Exception, match="No ACE instances configured"):
             ace.commands.ace_get_instance(mock_gcmd)
+
+
+class TestAceGetInstanceAndSlot:
+    """Test ace_get_instance_and_slot parameter resolution."""
+
+    def test_with_t_param_returns_instance_and_slot(self, mock_gcmd, setup_mocks):
+        """Test T= parameter correctly maps to instance and local slot."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"T": "2"})
+        mock_gcmd.get_int = Mock(return_value=2)
+        
+        ace_instance, slot = ace.commands.ace_get_instance_and_slot(mock_gcmd)
+        
+        assert ace_instance == ACE_INSTANCES[0]
+        assert slot == 2  # T2 on instance 0 is local slot 2
+
+    def test_with_t_param_tool_0(self, mock_gcmd, setup_mocks):
+        """Test T=0 returns instance 0 and slot 0."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"T": "0"})
+        mock_gcmd.get_int = Mock(return_value=0)
+        
+        ace_instance, slot = ace.commands.ace_get_instance_and_slot(mock_gcmd)
+        
+        assert ace_instance == ACE_INSTANCES[0]
+        assert slot == 0
+
+    def test_with_t_param_tool_3(self, mock_gcmd, setup_mocks):
+        """Test T=3 returns instance 0 and slot 3 (last slot on first instance)."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"T": "3"})
+        mock_gcmd.get_int = Mock(return_value=3)
+        
+        ace_instance, slot = ace.commands.ace_get_instance_and_slot(mock_gcmd)
+        
+        assert ace_instance == ACE_INSTANCES[0]
+        assert slot == 3
+
+    def test_with_instance_and_index_params(self, mock_gcmd, setup_mocks):
+        """Test INSTANCE= + INDEX= parameters work correctly."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": "0", "INDEX": "2"})
+        mock_gcmd.get_int = Mock(side_effect=[0, 2])
+        
+        ace_instance, slot = ace.commands.ace_get_instance_and_slot(mock_gcmd)
+        
+        assert ace_instance == ACE_INSTANCES[0]
+        assert slot == 2
+
+    def test_raises_error_when_neither_provided(self, mock_gcmd, setup_mocks):
+        """Test error when neither T= nor INSTANCE=+INDEX= provided."""
+        mock_gcmd.get_command_parameters = Mock(return_value={})
+        mock_gcmd.error = Mock(side_effect=lambda msg: Exception(msg))
+        
+        with pytest.raises(Exception, match="Must specify either T="):
+            ace.commands.ace_get_instance_and_slot(mock_gcmd)
+
+    def test_raises_error_for_instance_only(self, mock_gcmd, setup_mocks):
+        """Test error when only INSTANCE= provided without INDEX=."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": "0"})
+        mock_gcmd.error = Mock(side_effect=lambda msg: Exception(msg))
+        
+        with pytest.raises(Exception, match="Must specify either T="):
+            ace.commands.ace_get_instance_and_slot(mock_gcmd)
+
+    def test_raises_error_for_index_only(self, mock_gcmd, setup_mocks):
+        """Test error when only INDEX= provided without INSTANCE=."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INDEX": "2"})
+        mock_gcmd.error = Mock(side_effect=lambda msg: Exception(msg))
+        
+        with pytest.raises(Exception, match="Must specify either T="):
+            ace.commands.ace_get_instance_and_slot(mock_gcmd)
+
+    def test_t_param_unmanaged_tool_raises_error(self, mock_gcmd, setup_mocks):
+        """Test T= parameter with unmanaged tool number raises error."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"T": "99"})
+        mock_gcmd.get_int = Mock(return_value=99)
+        mock_gcmd.error = Mock(side_effect=lambda msg: Exception(msg))
+        
+        with pytest.raises(Exception, match="No ACE instance manages tool"):
+            ace.commands.ace_get_instance_and_slot(mock_gcmd)
+
+    def test_t_param_takes_priority_over_instance_index(self, mock_gcmd, setup_mocks):
+        """Test T= parameter is checked before INSTANCE=+INDEX=."""
+        # If T is in params, INSTANCE+INDEX should be ignored
+        mock_gcmd.get_command_parameters = Mock(return_value={"T": "1", "INSTANCE": "0", "INDEX": "3"})
+        mock_gcmd.get_int = Mock(return_value=1)
+        
+        ace_instance, slot = ace.commands.ace_get_instance_and_slot(mock_gcmd)
+        
+        # Should use T=1 -> slot 1, not INDEX=3
+        assert slot == 1

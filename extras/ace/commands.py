@@ -562,6 +562,8 @@ def cmd_ACE_SET_SLOT(gcmd):
                 color = [int(x) for x in color_str.split(",")]
                 if len(color) != 3:
                     raise ValueError()
+                # Clamp RGB values to valid 0-255 range
+                color = [max(0, min(255, c)) for c in color]
             except (ValueError, AttributeError):
                 raise gcmd.error(
                     f"COLOR must be a named color ({', '.join(COLOR_NAMES.keys())}) or R,G,B format"
