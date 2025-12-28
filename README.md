@@ -508,7 +508,7 @@ The ACE Pro switch in Mainsail (Miscellaneous section) enables or disables the s
 
 Track filament materials, colors, and temperatures for intelligent toolchanges and endless spool.
 
-**RFID handling:** When a slot transitions to `ready` and ACE reports `rfid=2` with non-empty material and color, the driver copies that material/color into the slot inventory, persists it, and emits a `// {"instance":..., "slots":...}` notify line. KlipperScreen listens for those notify lines and refreshes immediately, so the panel updates without pressing Refresh. RFID sync can be toggled with `ACE_ENABLE_RFID_SYNC` / `ACE_DISABLE_RFID_SYNC` (per-instance or all). Black RFID tag colors (0,0,0) are accepted and overwrite manual values; when RFID sync is enabled and a slot has an RFID spool, the KlipperScreen config dialog locks manual material/color changes.
+**RFID handling:** When a slot transitions to `ready` and ACE reports `rfid=2` with non-empty material and color, the driver copies that material/color into the slot inventory and automatically sets temperature based on material type (e.g., PLA→200°C, PLA High Speed→215°C, ABS→240°C), persists it, and emits a `// {"instance":..., "slots":...}` notify line. KlipperScreen listens for those notify lines and refreshes immediately, so the panel updates without pressing Refresh. RFID sync can be toggled with `ACE_ENABLE_RFID_SYNC` / `ACE_DISABLE_RFID_SYNC` (per-instance or all). Black RFID tag colors (0,0,0) are accepted and overwrite manual values; when RFID sync is enabled and a slot has an RFID spool, the KlipperScreen config dialog locks manual material/color changes.
 
 For detailed inventory examples, see [example_cmds.txt](example_cmds.txt#inventory-management).
 

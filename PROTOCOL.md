@@ -130,21 +130,28 @@ Response data:
 Response params:
 
 - index: Filament slot number
-- sku: "ABCDEF-01"
-- brand: "FakeBrand"
-- type: "PLA", "PLA+", "TPU", "ABS", "PETG", etc
-- color: [0, 0, 0] (Red, green, blue decimal values 0-255)
+- sku: "AHHSBK-103" (Anycubic SKU code)
+- brand: "AC" (Brand abbreviation, e.g., "AC" for Anycubic)
+- type: "PLA", "PLA+", "PLA High Speed", "TPU", "ABS", "PETG", etc
+- color: [R, G, B] (RGB color - decimal values 0-255, legacy field)
+- colors: [[R, G, B, A]] (Array of RGBA colors - decimal 0-255 with alpha channel)
+- icon_type: 0 (Icon type indicator, purpose unknown)
 - rfid: 0 (Information not found), 1 (Failed to identify), 2 (Identified), 3 (Identifying)
 - extruder_temp: Dictionary of temperature data
 - hotbed_temp: Dictionary of temperature data
 - diameter: 1.75 (Filament diameter in millimeters)
-- total: 330
-- current: 0
+- total: 330 (Total spool weight/length, units unknown)
+- current: 0 (Current usage, units unknown)
 
 Temperature data dictionary:
 
 - min: Temperature in Celsius, integer
 - max: Temperature in Celsius, integer
+
+Note: Klipper's ACE driver uses a built-in material-to-temperature mapping table
+for efficiency (e.g., PLA→200°C, PLA High Speed→215°C, ABS→240°C). When RFID material
+is detected, temperature is automatically set from this mapping rather than querying
+the RFID tag's extruder_temp values.
 
 get_status
 ----------

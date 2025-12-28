@@ -28,6 +28,25 @@ class AceInstance:
     DEFAULT_MATERIAL = "PLA"
     DEFAULT_COLOR = [255, 255, 255]
     DEFAULT_TEMP = 200
+    
+    # Material temperature defaults (from RFID tags)
+    MATERIAL_TEMPS = {
+        "PLA": 200,
+        "PLA+": 210,
+        "PLA Glow": 210,
+        "PLA High Speed": 215,
+        "PLA Marble": 205,
+        "PLA Matte": 205,
+        "PLA SE": 210,
+        "PLA Silk": 215,
+        "ABS": 240,
+        "ASA": 245,
+        "PETG": 235,
+        "TPU": 210,
+        "PVA": 185,
+        "HIPS": 230,
+        "PC": 260,
+    }
 
     def __init__(self, instance_num, ace_config, printer, ace_enabled=True):
         """
@@ -1049,6 +1068,118 @@ class AceInstance:
                 pass
             raise
 
+    def _query_rfid_full_data(self, slot_idx):
+        """
+        Query full RFID tag data via get_filament_info.
+        
+        This gets the complete RFID data including:
+        - extruder_temp: {min, max}
+        - hotbed_temp: {min, max}
+        - colors (RGBA array)
+        - icon_type
+        - diameter, total, current
+        """
+        def rfid_callback(response):
+            if response and response.get("code") == 0 and "result" in response:
+                result = response["result"]
+                
+                # Extract all RFID fields
+                sku = result.get("sku", "")
+                brand = result.get("brand", "")
+                material = result.get("type", "")
+                icon_type = result.get("icon_type")
+                rgba = result.get("colors")  # [[R, G, B, A]]
+                extruder_temp = result.get("extruder_temp", {})
+                hotbed_temp = result.get("hotbed_temp", {})
+                diameter = result.get("diameter")
+                total = result.get("total")
+                current = result.get("current")
+                
+                # Calculate temperature from RFID (use average of min/max)
+                temp_min = extruder_temp.get("min", 0)
+                temp_max = extruder_temp.get("max", 0)
+                if temp_min > 0 and temp_max > 0:
+                    rfid_temp = (temp_min + temp_max) // 2
+                elif temp_max > 0:
+                    rfid_temp = temp_max
+                elif temp_min > 0:
+                    rfid_temp = temp_min
+                else:
+                    rfid_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
+                
+                # Update inventory with full RFID data
+                if 0 <= slot_idx < self.SLOT_COUNT:
+                    inv = self.inventory[slot_idx]
+                    
+                    # Update temperature from RFID
+                    old_temp = inv.get("temp", 0)
+                    if rfid_temp != old_temp:
+                        inv["temp"] = rfid_temp
+                    
+                    # Store all RFID metadata
+                    if sku:
+                        inv["sku"] = sku
+                    if brand:
+                        inv["brand"] = brand
+                    if icon_type is not None:
+                        inv["icon_type"] = icon_type
+                    if rgba:
+                        inv["rgba"] = rgba
+                    if extruder_temp:
+                        inv["extruder_temp"] = extruder_temp
+                    if hotbed_temp:
+                        inv["hotbed_temp"] = hotbed_temp
+                    if diameter is not None:
+                        inv["diameter"] = diameter
+                    if total is not None:
+                        inv["total"] = total
+                    if current is not None:
+                        inv["current"] = current
+                    
+                    # Log the full RFID data
+                    self.gcode.respond_info(
+                        f"ACE[{self.instance_num}]: Slot {slot_idx} RFID full data -> "
+                        f"sku={sku}, temp={rfid_temp}°C (min={temp_min}, max={temp_max}), "
+                        f"hotbed={hotbed_temp}, brand={brand}"
+                    )
+                    
+                    # Sync to persistent storage
+                    if self.manager:
+                        self.manager._sync_inventory_to_persistent(self.instance_num)
+                    
+                    # Emit JSON update for UI
+                    self._emit_inventory_update()
+            else:
+                msg = response.get("msg", "Unknown") if response else "No response"
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: get_filament_info failed for slot {slot_idx}: {msg}"
+                )
+        
+        request = {"method": "get_filament_info", "params": {"index": slot_idx}}
+        self.send_request(request, rfid_callback)
+
+    def _emit_inventory_update(self):
+        """Emit JSON inventory update for KlipperScreen."""
+        try:
+            slots_out = []
+            for i in range(self.SLOT_COUNT):
+                inv = self.inventory[i]
+                slot_data = {
+                    "status": inv.get("status"),
+                    "color": inv.get("color"),
+                    "material": inv.get("material"),
+                    "temp": inv.get("temp"),
+                    "rfid": inv.get("rfid", False),
+                }
+                # Include optional RFID metadata fields if present
+                for key in ["sku", "brand", "icon_type", "rgba", "extruder_temp", "hotbed_temp", "diameter", "total", "current"]:
+                    if key in inv:
+                        slot_data[key] = inv[key]
+                slots_out.append(slot_data)
+            self.gcode.respond_info("// " + json.dumps({"instance": self.instance_num, "slots": slots_out}))
+        except Exception:
+            pass
+
     def _status_update_callback(self, response):
         """Handle status updates from ACE hardware."""
         if response and "result" in response:
@@ -1094,9 +1225,12 @@ class AceInstance:
                                 f"(was: material={saved_material})"
                             )
 
-                    # If slot is empty, clear RFID marker
+                    # If slot is empty, clear RFID marker and metadata
                     if new_status == "empty":
                         updated_rfid = False
+                        # Clear all optional RFID fields
+                        for key in ["sku", "brand", "icon_type", "rgba", "extruder_temp", "hotbed_temp", "diameter", "total", "current"]:
+                            self.inventory[idx].pop(key, None)
 
                     # If RFID provided full data while becoming ready, sync it to inventory
                     elif new_status == "ready":
@@ -1113,21 +1247,45 @@ class AceInstance:
                             if rfid_state == 2 and material and color_valid:
                                 incoming_color = color_list[:3]
 
-                                # Only treat as a change if any field differs or rfid flag was previously false
+                                # Check if we're missing full RFID data (need to query get_filament_info)
+                                missing_rfid_data = (
+                                    "extruder_temp" not in self.inventory[idx] or
+                                    "hotbed_temp" not in self.inventory[idx]
+                                )
+
+                                # Treat as a change if any field differs, rfid flag was previously false,
+                                # OR we're missing full RFID data that should be queried
                                 is_changed = (
                                     material != saved_material or
                                     incoming_color != saved_color[:3] or
-                                    not saved_rfid
+                                    not saved_rfid or
+                                    missing_rfid_data
                                 )
 
                                 if is_changed:
                                     updated_material = material
                                     updated_color = incoming_color
                                     updated_rfid = True
+                                    
+                                    # Query full RFID data via get_filament_info to get temperatures
+                                    self._query_rfid_full_data(idx)
+                                    
+                                    # For now, use material lookup for temp (will be updated by callback)
+                                    updated_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
+                                    
+                                    # Capture basic RFID metadata from status (sku/brand available in get_status)
                                     sku = slot.get("sku", "")
+                                    brand = slot.get("brand", "")
+                                    
+                                    # Store basic fields in inventory (full data comes from callback)
+                                    if sku:
+                                        self.inventory[idx]["sku"] = sku
+                                    if brand:
+                                        self.inventory[idx]["brand"] = brand
+                                    
                                     self.gcode.respond_info(
-                                        f"ACE[{self.instance_num}]: Slot {idx} RFID sync -> "
-                                        f"material={updated_material}, color={updated_color}, sku={sku or 'n/a'}"
+                                        f"ACE[{self.instance_num}]: Slot {idx} RFID detected -> "
+                                        f"material={updated_material}, color={updated_color}, querying full RFID data..."
                                     )
                                     inventory_changed = True
                                 else:
@@ -1181,22 +1339,8 @@ class AceInstance:
             if self.manager:
                 self.manager._sync_inventory_to_persistent(self.instance_num)
 
-            # Emit a JSON-like notify line so KlipperScreen UI can parse and
-            # immediately refresh the panel without manual 'Refresh All'.
-            try:
-                slots_out = []
-                for i in range(self.SLOT_COUNT):
-                    inv = self.inventory[i]
-                    slots_out.append({
-                        "status": inv.get("status"),
-                        "color": inv.get("color"),
-                        "material": inv.get("material"),
-                        "temp": inv.get("temp"),
-                        "rfid": inv.get("rfid", False),
-                    })
-                self.gcode.respond_info("// " + json.dumps({"instance": self.instance_num, "slots": slots_out}))
-            except Exception:
-                pass
+            # Emit inventory update for KlipperScreen
+            self._emit_inventory_update()
 
             # Restore feed assist if it was active before filament loading
             # (ACE hardware disables feed assist when loading filament on any slot)

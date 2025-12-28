@@ -147,7 +147,7 @@ def cmd_ACE_GET_STATUS(gcmd):
         instance_num = gcmd.get_int("INSTANCE", None)
         verbose = gcmd.get_int("VERBOSE", 0)
 
-        def format_verbose_status(result, inst_num):
+        def format_verbose_status(result, inst_num, ace_instance=None):
             """Format all status information in a readable, grouped format."""
             lines = []
             lines.append(f"=== ACE Instance {inst_num} Status ===")
@@ -216,6 +216,13 @@ def cmd_ACE_GET_STATUS(gcmd):
                     slot_handled = set()
                     slot_parts = []
                     
+                    # Get slot index for inventory lookup
+                    slot_idx = slot.get('index')
+                    inv_data = {}
+                    if ace_instance is not None and slot_idx is not None:
+                        if 0 <= slot_idx < len(ace_instance.inventory):
+                            inv_data = ace_instance.inventory[slot_idx]
+                    
                     # Known slot fields in preferred order
                     if 'index' in slot:
                         idx = slot['index']
@@ -264,6 +271,34 @@ def cmd_ACE_GET_STATUS(gcmd):
                                 slot_parts.append(f"colors={len(colors)}_colors")
                         slot_handled.add('colors')
                     
+                    # Add RFID temperature data from inventory (if available)
+                    if inv_data:
+                        extruder_temp = inv_data.get('extruder_temp')
+                        if extruder_temp and isinstance(extruder_temp, dict):
+                            t_min = extruder_temp.get('min', 0)
+                            t_max = extruder_temp.get('max', 0)
+                            if t_min > 0 or t_max > 0:
+                                slot_parts.append(f"extruder_temp={t_min}-{t_max}°C")
+                        
+                        hotbed_temp = inv_data.get('hotbed_temp')
+                        if hotbed_temp and isinstance(hotbed_temp, dict):
+                            b_min = hotbed_temp.get('min', 0)
+                            b_max = hotbed_temp.get('max', 0)
+                            if b_min > 0 or b_max > 0:
+                                slot_parts.append(f"hotbed_temp={b_min}-{b_max}°C")
+                        
+                        diameter = inv_data.get('diameter')
+                        if diameter is not None and diameter > 0:
+                            slot_parts.append(f"diameter={diameter}mm")
+                        
+                        total = inv_data.get('total')
+                        current = inv_data.get('current')
+                        if total is not None and total > 0:
+                            if current is not None:
+                                slot_parts.append(f"spool={current}/{total}m")
+                            else:
+                                slot_parts.append(f"spool_total={total}m")
+                    
                     # Any unknown slot fields
                     for key, value in slot.items():
                         if key not in slot_handled:
@@ -301,15 +336,17 @@ def cmd_ACE_GET_STATUS(gcmd):
                     
                     if verbose:
                         # Verbose output: all information nicely formatted
-                        formatted = format_verbose_status(result, inst_num)
+                        formatted = format_verbose_status(result, inst_num, ace)
                         gcmd.respond_info(formatted)
                     else:
                         # Standard output: compact JSON
+                        # Check both 'dryer_status' and 'dryer' for backward compatibility
+                        dryer_data = result.get("dryer_status") or result.get("dryer", {})
                         status_info = {
                             "instance": inst_num,
                             "status": result.get("status", "unknown"),
                             "temp": result.get("temp", 0),
-                            "dryer_status": result.get("dryer", {})
+                            "dryer_status": dryer_data
                         }
                         gcmd.respond_info(f"// {json.dumps(status_info)}")
                 else:
@@ -330,15 +367,17 @@ def cmd_ACE_GET_STATUS(gcmd):
                         
                         if verbose:
                             # Verbose output: all information nicely formatted
-                            formatted = format_verbose_status(result, inst_num)
+                            formatted = format_verbose_status(result, inst_num, ace)
                             gcmd.respond_info(formatted + "\n")
                         else:
                             # Standard output: compact JSON
+                            # Check both 'dryer_status' and 'dryer' for backward compatibility
+                            dryer_data = result.get("dryer_status") or result.get("dryer", {})
                             status_info = {
                                 "instance": inst_num,
                                 "status": result.get("status", "unknown"),
                                 "temp": result.get("temp", 0),
-                                "dryer_status": result.get("dryer", {})
+                                "dryer_status": dryer_data
                             }
                             gcmd.respond_info(f"// {json.dumps(status_info)}")
                     else:
