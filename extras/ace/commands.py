@@ -142,9 +142,154 @@ def safe_gcode_command(func):
 
 
 def cmd_ACE_GET_STATUS(gcmd):
-    """Query ACE status. INSTANCE= or TOOL= (omit to query all instances)."""
+    """Query ACE status. INSTANCE= or TOOL= (omit to query all instances). VERBOSE=1 for detailed output."""
     try:
         instance_num = gcmd.get_int("INSTANCE", None)
+        verbose = gcmd.get_int("VERBOSE", 0)
+
+        def format_verbose_status(result, inst_num):
+            """Format all status information in a readable, grouped format."""
+            lines = []
+            lines.append(f"=== ACE Instance {inst_num} Status ===")
+            
+            # Track which keys we've explicitly handled
+            handled_keys = set()
+            
+            # Main status and temperature
+            lines.append(f"Status: {result.get('status', 'unknown')}")
+            handled_keys.add('status')
+            lines.append(f"Current Temperature: {result.get('temp', 0)}°C")
+            handled_keys.add('temp')
+            
+            # Dryer status (all on one line) - check both 'dryer' and 'dryer_status'
+            dryer = result.get('dryer_status') or result.get('dryer', {})
+            if dryer:
+                handled_keys.add('dryer_status')
+                handled_keys.add('dryer')
+                dryer_parts = []
+                dryer_handled = set()
+                
+                # Known dryer fields
+                if 'status' in dryer:
+                    dryer_parts.append(f"status={dryer['status']}")
+                    dryer_handled.add('status')
+                if 'target_temp' in dryer:
+                    dryer_parts.append(f"target_temp={dryer['target_temp']}°C")
+                    dryer_handled.add('target_temp')
+                if 'duration' in dryer:
+                    dryer_parts.append(f"duration={dryer['duration']}min")
+                    dryer_handled.add('duration')
+                if 'remain_time' in dryer:
+                    dryer_parts.append(f"remain_time={dryer['remain_time']}min")
+                    dryer_handled.add('remain_time')
+                
+                # Any unknown dryer fields
+                for key, value in dryer.items():
+                    if key not in dryer_handled:
+                        dryer_parts.append(f"{key}={value}")
+                
+                dryer_line = f"Dryer: {', '.join(dryer_parts)}"
+                lines.append(dryer_line)
+            
+            # RFID and fan status
+            if 'enable_rfid' in result:
+                lines.append(f"RFID Enabled: {result['enable_rfid']}")
+                handled_keys.add('enable_rfid')
+            if 'fan_speed' in result:
+                lines.append(f"Fan Speed: {result['fan_speed']} RPM")
+                handled_keys.add('fan_speed')
+            
+            # Feed assist status
+            if 'feed_assist_count' in result:
+                lines.append(f"Feed Assist Count: {result['feed_assist_count']}")
+                handled_keys.add('feed_assist_count')
+            if 'cont_assist_time' in result:
+                lines.append(f"Continuous Assist Time: {result['cont_assist_time']}s")
+                handled_keys.add('cont_assist_time')
+            
+            # Slot information (one line per slot)
+            slots = result.get('slots', [])
+            if slots:
+                handled_keys.add('slots')
+                lines.append(f"\nSlots ({len(slots)} total):")
+                for slot in slots:
+                    slot_handled = set()
+                    slot_parts = []
+                    
+                    # Known slot fields in preferred order
+                    if 'index' in slot:
+                        idx = slot['index']
+                        slot_parts.append(f"index={idx}")
+                        slot_handled.add('index')
+                    if 'status' in slot:
+                        slot_parts.append(f"status={slot['status']}")
+                        slot_handled.add('status')
+                    if 'sku' in slot:
+                        sku = slot['sku']
+                        if sku:  # Only show if not empty
+                            slot_parts.append(f"sku={sku}")
+                        slot_handled.add('sku')
+                    if 'type' in slot:
+                        slot_type = slot['type']
+                        if slot_type:  # Only show if not empty
+                            slot_parts.append(f"type={slot_type}")
+                        slot_handled.add('type')
+                    if 'color' in slot:
+                        color = slot['color']
+                        if isinstance(color, list) and len(color) >= 3:
+                            slot_parts.append(f"color=RGB({color[0]},{color[1]},{color[2]})")
+                        else:
+                            slot_parts.append(f"color={color}")
+                        slot_handled.add('color')
+                    if 'rfid' in slot:
+                        rfid_val = slot['rfid']
+                        # Format RFID nicely: 0=no tag, 1=empty tag, 2=tag with data
+                        rfid_labels = {0: "no_tag", 1: "empty", 2: "programmed"}
+                        rfid_str = rfid_labels.get(rfid_val, str(rfid_val))
+                        slot_parts.append(f"rfid={rfid_str}")
+                        slot_handled.add('rfid')
+                    if 'icon_type' in slot:
+                        slot_parts.append(f"icon_type={slot['icon_type']}")
+                        slot_handled.add('icon_type')
+                    if 'colors' in slot:
+                        # colors is an array of RGBA arrays - format compactly
+                        colors = slot['colors']
+                        if isinstance(colors, list) and colors:
+                            if len(colors) == 1 and len(colors[0]) >= 3:
+                                # Single color - show as RGBA
+                                c = colors[0]
+                                slot_parts.append(f"rgba=RGBA({c[0]},{c[1]},{c[2]},{c[3] if len(c) > 3 else 255})")
+                            else:
+                                # Multiple colors - show count
+                                slot_parts.append(f"colors={len(colors)}_colors")
+                        slot_handled.add('colors')
+                    
+                    # Any unknown slot fields
+                    for key, value in slot.items():
+                        if key not in slot_handled:
+                            if isinstance(value, (dict, list)):
+                                slot_parts.append(f"{key}={json.dumps(value)}")
+                            else:
+                                slot_parts.append(f"{key}={value}")
+                    
+                    slot_line = f"  Slot: {', '.join(slot_parts)}"
+                    lines.append(slot_line)
+            
+            # Catch any unknown top-level keys
+            unknown_keys = []
+            for key, value in result.items():
+                if key not in handled_keys:
+                    if isinstance(value, (dict, list)):
+                        unknown_keys.append(f"{key}={json.dumps(value)}")
+                    else:
+                        unknown_keys.append(f"{key}={value}")
+            
+            if unknown_keys:
+                lines.append("\nAdditional Fields:")
+                for item in unknown_keys:
+                    lines.append(f"  {item}")
+            
+            return "\n".join(lines)
 
         if instance_num is not None:
             ace = ace_get_instance(gcmd)
@@ -153,32 +298,49 @@ def cmd_ACE_GET_STATUS(gcmd):
                 if response and response.get("code") == 0:
                     result = response.get("result", {})
                     inst_num = ace.instance_num if hasattr(ace, "instance_num") else 0
-                    status_info = {
-                        "instance": inst_num,
-                        "status": result.get("status", "unknown"),
-                        "temp": result.get("temp", 0),
-                        "dryer_status": result.get("dryer_status", {})
-                    }
-                    gcmd.respond_info(f"// {json.dumps(status_info)}")
+                    
+                    if verbose:
+                        # Verbose output: all information nicely formatted
+                        formatted = format_verbose_status(result, inst_num)
+                        gcmd.respond_info(formatted)
+                    else:
+                        # Standard output: compact JSON
+                        status_info = {
+                            "instance": inst_num,
+                            "status": result.get("status", "unknown"),
+                            "temp": result.get("temp", 0),
+                            "dryer_status": result.get("dryer", {})
+                        }
+                        gcmd.respond_info(f"// {json.dumps(status_info)}")
                 else:
                     msg = response.get("msg") if response else "No response"
                     gcmd.respond_info(f"Status query failed: {msg}")
 
             ace.send_request({"method": "get_status"}, status_callback)
         else:
-            gcmd.respond_info("=== ACE Status (All Instances) ===")
+            if verbose:
+                gcmd.respond_info("=== ACE Status (All Instances - Verbose) ===\n")
+            else:
+                gcmd.respond_info("=== ACE Status (All Instances) ===")
 
             def query_instance(inst_num, manager, ace):
                 def status_callback(response):
                     if response and response.get("code") == 0:
                         result = response.get("result", {})
-                        status_info = {
-                            "instance": inst_num,
-                            "status": result.get("status", "unknown"),
-                            "temp": result.get("temp", 0),
-                            "dryer_status": result.get("dryer_status", {})
-                        }
-                        gcmd.respond_info(f"// {json.dumps(status_info)}")
+                        
+                        if verbose:
+                            # Verbose output: all information nicely formatted
+                            formatted = format_verbose_status(result, inst_num)
+                            gcmd.respond_info(formatted + "\n")
+                        else:
+                            # Standard output: compact JSON
+                            status_info = {
+                                "instance": inst_num,
+                                "status": result.get("status", "unknown"),
+                                "temp": result.get("temp", 0),
+                                "dryer_status": result.get("dryer", {})
+                            }
+                            gcmd.respond_info(f"// {json.dumps(status_info)}")
                     else:
                         msg = response.get("msg") if response else "No response"
                         gcmd.respond_info(f"Instance {inst_num}: Status query failed: {msg}")
@@ -1527,7 +1689,7 @@ def cmd_ACE_SHOW_INSTANCE_CONFIG(gcmd):
 
 
 ACE_COMMANDS = [
-    ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. INSTANCE= or TOOL="),
+    ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. INSTANCE= or TOOL=, VERBOSE=1 for detailed output"),
     ("ACE_RECONNECT", cmd_ACE_RECONNECT, "Reconnect ACE serial. INSTANCE="),
     ("ACE_GET_CURRENT_INDEX", cmd_ACE_GET_CURRENT_INDEX, "Query currently loaded tool index"),
     ("ACE_FEED", cmd_ACE_FEED, "Feed filament. T=<tool> or INSTANCE= INDEX=, LENGTH=, [SPEED=]"),

@@ -168,8 +168,10 @@ ACE_SET_PURGE_AMOUNT PURGELENGTH=75 PURGESPEED=500 INSTANCE=0
 ACE_GET_CURRENT_INDEX                      # Query: which tool is currently loaded? (-1 = none)
 
 # Get ACE hardware status
-ACE_GET_STATUS                             # Query all instances
-ACE_GET_STATUS INSTANCE=0                  # Query instance 0 only
+ACE_GET_STATUS                             # Query all instances (compact JSON output)
+ACE_GET_STATUS INSTANCE=0                  # Query instance 0 only (compact JSON)
+ACE_GET_STATUS VERBOSE=1                   # Query all instances (detailed human-readable output)
+ACE_GET_STATUS INSTANCE=0 VERBOSE=1        # Query instance 0 (detailed output with all fields)
 
 # Reconnect serial
 ACE_RECONNECT                              # Reconnect all instances

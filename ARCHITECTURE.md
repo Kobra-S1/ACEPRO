@@ -437,8 +437,10 @@ All commands are table-driven and globally registered. Commands use flexible par
 
 **Core Operations:**
 ```
-ACE_GET_STATUS [INSTANCE=<n>]              # Query ACE hardware status
+ACE_GET_STATUS [INSTANCE=<n>] [VERBOSE=1]  # Query ACE hardware status
                                            # Without INSTANCE: all instances
+                                           # VERBOSE=1: detailed output (all fields)
+                                           # VERBOSE=0 (default): compact JSON
                                            
 ACE_RECONNECT [INSTANCE=<n>]               # Reconnect serial connection(s)
 
@@ -787,7 +789,8 @@ max_dryer_temperature: 60
 ### Debug Commands
 
 ```gcode
-ACE_DEBUG_SENSORS              # Check sensor states
-ACE_DEBUG_STATE                # Check manager state
-ACE_GET_STATUS INSTANCE=0      # Query ACE hardware
+ACE_DEBUG_SENSORS                  # Check sensor states
+ACE_DEBUG_STATE                    # Check manager state
+ACE_GET_STATUS INSTANCE=0          # Query ACE hardware (compact JSON)
+ACE_GET_STATUS INSTANCE=0 VERBOSE=1 # Query ACE hardware (detailed output)
 ```

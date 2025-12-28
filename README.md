@@ -480,7 +480,7 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_GET_STATUS` | Query ACE hardware status | `[INSTANCE=<0-3>]` or omit for all |
+| `ACE_GET_STATUS` | Query ACE hardware status | `[INSTANCE=<0-3>] [VERBOSE=1]` - omit INSTANCE for all, VERBOSE=1 for detailed output |
 | `ACE_RECONNECT` | Manually reconnect serial | `[INSTANCE=<0-3>]` or omit for all |
 | `ACE_DEBUG_SENSORS` | Print all sensor states | - |
 | `ACE_DEBUG_STATE` | Print manager and instance state | - |
@@ -682,12 +682,13 @@ When a toolchange fails:
 ### Debug Commands
 
 ```gcode
-ACE_DEBUG_SENSORS          # Print all sensor states (toolhead, RMS, path-free)
-ACE_DEBUG_STATE            # Print manager state (tool mapping, filament position)
-ACE_GET_STATUS INSTANCE=0  # Query ACE hardware status
-ACE_QUERY_SLOTS            # Check inventory (all instances)
-ACE_QUERY_SLOTS INSTANCE=0 # Check inventory (instance 0 only)
-ACE_SHOW_INSTANCE_CONFIG   # Display resolved configuration
+ACE_DEBUG_SENSORS                   # Print all sensor states (toolhead, RMS, path-free)
+ACE_DEBUG_STATE                     # Print manager state (tool mapping, filament position)
+ACE_GET_STATUS INSTANCE=0           # Query ACE hardware status (compact JSON)
+ACE_GET_STATUS INSTANCE=0 VERBOSE=1 # Query ACE hardware (detailed, all fields)
+ACE_QUERY_SLOTS                     # Check inventory (all instances)
+ACE_QUERY_SLOTS INSTANCE=0          # Check inventory (instance 0 only)
+ACE_SHOW_INSTANCE_CONFIG            # Display resolved configuration
 ```
 
 ### Sensor Validation
