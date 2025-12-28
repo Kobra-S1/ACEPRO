@@ -35,13 +35,15 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | File | Tests | Description |
 |------|-------|-------------|
 | **test_endless_spool.py** | 20 | Endless spool match modes (exact/material/next), runout handling |
+| **test_endless_spool_swap.py** | 7 | Endless spool swap execution, retry logic, candidate search validation |
 | **test_runout_monitor.py** | 26 | Runout detection, sensor polling, toolchange interaction |
+| **test_retry_logic.py** | 8 | Feed/retract retry behavior, FORBIDDEN handling, backoff logic |
 | **test_set_and_save.py** | 15 | Persistent variable storage to saved_variables.cfg |
 | **test_toolchange_integration.py** | 7 | End-to-end tool change scenarios across multiple ACE units |
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 352 tests** across 10 test modules
+**Total: 367 tests** across 12 test modules
 
 ## Critical Regression Tests
 
@@ -358,6 +360,43 @@ test_no_match_stays_paused
 # Cross-instance
 test_match_across_multiple_ace_units
 test_prioritize_same_instance
+```
+
+### Endless Spool Swap Tests (`test_endless_spool_swap.py`)
+
+Endless spool swap execution and retry logic:
+
+```python
+# Successful swaps
+test_successful_swap_on_first_attempt  # Happy path - T0 → T1 works
+test_swap_marks_slots_empty_correctly  # Inventory state updates
+
+# Retry and recovery
+test_swap_retries_after_failed_load_finds_next_match  # T0 → T1 fails → T2 succeeds
+test_swap_searches_from_original_tool_not_candidate  # Bug fix: search from T0, not failed T1
+test_swap_skips_non_ready_slots  # Only attempts 'ready' tools
+test_swap_exhausts_all_candidates_then_fails  # No matches left → show prompt
+
+# Match mode respect
+test_swap_respects_material_match_mode  # Material-only matching works
+```
+
+### Retry Logic Tests (`test_retry_logic.py`)
+
+Feed and retract retry behavior:
+
+```python
+# Feed retries
+test_feed_retries_on_forbidden_response  # FORBIDDEN → retry after 2s
+test_feed_no_retry_on_non_forbidden  # Other errors → immediate fail
+test_feed_no_retry_on_no_response  # No response → immediate fail
+test_feed_retries_until_max_attempts  # Max 3 attempts with backoff
+
+# Retract retries
+test_retract_retries_on_forbidden_response  # FORBIDDEN → retry after 2s
+test_retract_no_retry_on_non_forbidden  # Other errors → immediate fail
+test_retract_no_retry_on_no_response  # No response → immediate fail
+test_retract_retries_until_max_attempts  # Max 3 attempts with backoff
 ```
 
 ### Runout Monitor Tests (`test_runout_monitor.py`)

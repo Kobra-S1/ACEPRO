@@ -244,16 +244,29 @@ class EndlessSpool:
                         )
 
                     self.gcode.respond_info("ACE: Searching for next matching spool...")
-                    next_tool = self.find_exact_match(from_tool)
-
-                    # Keep searching if we already tried this one
-                    search_depth = 0
-                    max_search = 10
-                    while next_tool in tried_tools and search_depth < max_search:
-                        next_tool = self.find_exact_match(next_tool)
-                        if next_tool == -1:
-                            break
-                        search_depth += 1
+                    
+                    # Temporarily mark tried tools as unavailable during search
+                    saved_statuses = {}
+                    for tried_tool in tried_tools:
+                        tried_inst_num = get_instance_from_tool(tried_tool)
+                        tried_slot = get_local_slot(tried_tool, tried_inst_num)
+                        if tried_inst_num >= 0 and tried_slot >= 0:
+                            tried_ace = self.manager.instances[tried_inst_num]
+                            if tried_ace:
+                                saved_statuses[tried_tool] = tried_ace.inventory[tried_slot]["status"]
+                                tried_ace.inventory[tried_slot]["status"] = "searching"  # Temp status
+                    
+                    try:
+                        next_tool = self.find_exact_match(from_tool)
+                    finally:
+                        # Restore original statuses
+                        for tried_tool, saved_status in saved_statuses.items():
+                            tried_inst_num = get_instance_from_tool(tried_tool)
+                            tried_slot = get_local_slot(tried_tool, tried_inst_num)
+                            if tried_inst_num >= 0 and tried_slot >= 0:
+                                tried_ace = self.manager.instances[tried_inst_num]
+                                if tried_ace:
+                                    tried_ace.inventory[tried_slot]["status"] = saved_status
 
                     if next_tool == -1 or next_tool in tried_tools:
                         raise Exception(
