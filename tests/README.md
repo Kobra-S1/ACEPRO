@@ -27,7 +27,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 |------|-------|-------------|
 | **test_commands.py** | 75 | All G-code command handlers (ACE_GET_STATUS, ACE_FEED, ACE_CHANGE_TOOL, etc.) |
 | **test_manager.py** | 113 | AceManager core logic, sensor management, tool changes, state tracking |
-| **test_instance.py** | 35 | AceInstance initialization, configuration, serial communication, RFID query tracking |
+| **test_instance.py** | 37 | AceInstance initialization, configuration, serial communication, RFID query tracking, JSON emission |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
 
 ### Feature-Specific Tests
@@ -41,7 +41,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 350 tests** across 10 test modules
+**Total: 352 tests** across 10 test modules
 
 ## Critical Regression Tests
 

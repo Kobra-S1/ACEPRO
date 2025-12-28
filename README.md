@@ -47,8 +47,9 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 
 **Start here for complete information:**
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)**
-- **[example_cmds.txt](example_cmds.txt)**
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design, components, data flow
+- **[example_cmds.txt](example_cmds.txt)** - G-code command examples and usage
+- **[tests/README.md](tests/README.md)** - Test suite documentation
 
 ## 🏗️ Architecture
 

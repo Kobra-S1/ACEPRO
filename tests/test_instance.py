@@ -1713,5 +1713,164 @@ class TestRfidQueryTracking(unittest.TestCase):
         self.assertIn(0, instance._pending_rfid_queries)
 
 
+class TestInventoryJsonEmission(unittest.TestCase):
+    """Test JSON emission of inventory data for UI/KlipperScreen."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+        
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_printer.lookup_object.side_effect = self._mock_lookup_object
+        self.mock_reactor.monotonic.return_value = 0.0
+        
+        self.variables = {}
+        self.mock_save_vars.allVariables = self.variables
+        
+        self.ace_config = {
+            'baud': 115200,
+            'feed_speed': 60,
+            'retract_speed': 60,
+            'total_max_feeding_length': 1200,
+            'parkposition_to_toolhead_length': 1000,
+            'toolchange_load_length': 950,
+            'parkposition_to_rdm_length': 150,
+            'incremental_feeding_length': 50,
+            'incremental_feeding_speed': 30,
+            'extruder_feeding_length': 22,
+            'extruder_feeding_speed': 5,
+            'toolhead_slow_loading_speed': 5,
+            'heartbeat_interval': 1.0,
+            'timeout_multiplier': 3.0,
+            'max_dryer_temperature': 60,
+            'filament_runout_sensor_name_rdm': 'return_module',
+            'filament_runout_sensor_name_nozzle': 'filament_runout_nozzle',
+            'toolhead_full_purge_length': 22,
+            'rfid_inventory_sync_enabled': True,
+            'rfid_temp_mode': 'average',
+            'status_debug_logging': False,
+        }
+    
+    def _mock_lookup_object(self, name, default=None):
+        """Mock printer lookup_object."""
+        if name == 'gcode':
+            return self.mock_gcode
+        elif name == 'save_variables':
+            return self.mock_save_vars
+        return default
+    
+    @patch('ace.instance.AceSerialManager')
+    def test_emit_inventory_includes_optional_rfid_fields_when_present(self, mock_serial_mgr_class):
+        """Verify JSON output includes optional RFID fields (sku, brand, icon_type, rgba) when present."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        # Set up inventory with RFID data in slot 0, non-RFID in slot 1
+        instance.inventory[0].update({
+            'status': 'ready',
+            'color': [234, 42, 43],
+            'material': 'PLA',
+            'temp': 200,
+            'rfid': True,
+            'sku': 'AHPLBK-101',
+            'brand': 'Some Brand',
+            'icon_type': 0,
+            'rgba': [234, 42, 43, 255],
+            'extruder_temp': {'min': 190, 'max': 210},
+            'hotbed_temp': {'min': 50, 'max': 60},
+            'diameter': 1.75,
+            'total': 1000,
+            'current': 750
+        })
+        
+        instance.inventory[1].update({
+            'status': 'ready',
+            'color': [255, 255, 255],
+            'material': 'PLA',
+            'temp': 200,
+            'rfid': False  # No RFID, so optional fields should not appear
+        })
+        
+        # Emit inventory update
+        instance._emit_inventory_update()
+        
+        # Find the JSON output
+        notify_calls = [c.args[0] for c in self.mock_gcode.respond_info.call_args_list 
+                       if str(c.args[0]).startswith('// ')]
+        self.assertTrue(notify_calls, "Expected JSON notification")
+        
+        json_output = notify_calls[-1].lstrip('// ')
+        data = json.loads(json_output)
+        
+        # Verify structure
+        self.assertIn('instance', data)
+        self.assertIn('slots', data)
+        self.assertEqual(len(data['slots']), 4)
+        
+        # Verify slot 0 (with RFID) includes all optional fields
+        slot0 = data['slots'][0]
+        self.assertEqual(slot0['status'], 'ready')
+        self.assertTrue(slot0['rfid'])
+        self.assertIn('sku', slot0)
+        self.assertEqual(slot0['sku'], 'AHPLBK-101')
+        self.assertIn('brand', slot0)
+        self.assertEqual(slot0['brand'], 'Some Brand')
+        self.assertIn('icon_type', slot0)
+        self.assertEqual(slot0['icon_type'], 0)
+        self.assertIn('rgba', slot0)
+        self.assertEqual(slot0['rgba'], [234, 42, 43, 255])
+        self.assertIn('extruder_temp', slot0)
+        self.assertIn('hotbed_temp', slot0)
+        self.assertIn('diameter', slot0)
+        self.assertIn('total', slot0)
+        self.assertIn('current', slot0)
+        
+        # Verify slot 1 (without RFID) excludes optional fields
+        slot1 = data['slots'][1]
+        self.assertEqual(slot1['status'], 'ready')
+        self.assertFalse(slot1['rfid'])
+        self.assertNotIn('sku', slot1)
+        self.assertNotIn('brand', slot1)
+        self.assertNotIn('icon_type', slot1)
+        self.assertNotIn('rgba', slot1)
+        self.assertNotIn('extruder_temp', slot1)
+        self.assertNotIn('hotbed_temp', slot1)
+        
+        # Verify required fields always present
+        for slot in data['slots']:
+            self.assertIn('status', slot)
+            self.assertIn('color', slot)
+            self.assertIn('material', slot)
+            self.assertIn('temp', slot)
+            self.assertIn('rfid', slot)
+    
+    @patch('ace.instance.AceSerialManager')
+    def test_emit_inventory_backward_compatibility(self, mock_serial_mgr_class):
+        """Verify JSON output maintains backward compatibility with required fields."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        
+        # Empty slots should still have all required fields
+        instance._emit_inventory_update()
+        
+        notify_calls = [c.args[0] for c in self.mock_gcode.respond_info.call_args_list 
+                       if str(c.args[0]).startswith('// ')]
+        json_output = notify_calls[-1].lstrip('// ')
+        data = json.loads(json_output)
+        
+        # All slots must have required fields
+        for i, slot in enumerate(data['slots']):
+            self.assertIn('status', slot, f"Slot {i} missing 'status'")
+            self.assertIn('color', slot, f"Slot {i} missing 'color'")
+            self.assertIn('material', slot, f"Slot {i} missing 'material'")
+            self.assertIn('temp', slot, f"Slot {i} missing 'temp'")
+            self.assertIn('rfid', slot, f"Slot {i} missing 'rfid'")
+
+
 if __name__ == '__main__':
     unittest.main()
