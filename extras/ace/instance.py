@@ -1095,15 +1095,22 @@ class AceInstance:
                 total = result.get("total")
                 current = result.get("current")
                 
-                # Calculate temperature from RFID (use average of min/max)
+                # Calculate temperature from RFID based on rfid_temp_mode config
                 temp_min = extruder_temp.get("min", 0)
                 temp_max = extruder_temp.get("max", 0)
-                if temp_min > 0 and temp_max > 0:
-                    rfid_temp = (temp_min + temp_max) // 2
-                elif temp_max > 0:
-                    rfid_temp = temp_max
-                elif temp_min > 0:
-                    rfid_temp = temp_min
+                temp_mode = self.ace_config.get("rfid_temp_mode", "average")
+                
+                if temp_min > 0 or temp_max > 0:
+                    if temp_mode == "min" and temp_min > 0:
+                        rfid_temp = temp_min
+                    elif temp_mode == "max" and temp_max > 0:
+                        rfid_temp = temp_max
+                    elif temp_min > 0 and temp_max > 0:
+                        rfid_temp = (temp_min + temp_max) // 2
+                    elif temp_max > 0:
+                        rfid_temp = temp_max
+                    else:
+                        rfid_temp = temp_min
                 else:
                     rfid_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
                 

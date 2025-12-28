@@ -38,8 +38,10 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_runout_monitor.py** | 26 | Runout detection, sensor polling, toolchange interaction |
 | **test_set_and_save.py** | 15 | Persistent variable storage to saved_variables.cfg |
 | **test_toolchange_integration.py** | 7 | End-to-end tool change scenarios across multiple ACE units |
+| **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
+| **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 301 tests** across 8 test modules
+**Total: 340 tests** across 10 test modules
 
 ## Critical Regression Tests
 
@@ -356,6 +358,67 @@ test_toolchange_with_sensor_validation
 test_ace_disabled_no_toolchange
 ```
 
+### Inventory Persistence Tests (`test_inventory_persistence.py`)
+
+Loading and saving inventory to persistent storage:
+
+```python
+# File handling
+test_load_inventory_missing_file
+test_load_inventory_file_exists_but_empty
+test_load_inventory_corrupted_json
+
+# Structure compatibility
+test_load_inventory_old_structure_no_rfid_field
+test_load_inventory_old_structure_all_slots
+test_load_inventory_extended_structure_with_sku_brand
+
+# Field handling
+test_load_inventory_missing_optional_fields_in_slot
+test_inventory_preserves_sku_brand_through_restart
+test_new_fields_dont_break_backward_compat
+
+# Edge cases
+test_partial_inventory_missing_slots
+test_inventory_with_extra_unknown_fields
+test_load_inventory_instance_not_present
+```
+
+### RFID Callback Tests (`test_rfid_callback.py`)
+
+RFID data capture and processing:
+
+```python
+# Request sending
+test_sends_correct_request
+
+# Temperature calculation modes
+test_temp_mode_average
+test_temp_mode_min
+test_temp_mode_max
+test_temp_fallback_when_no_rfid_temp
+test_temp_mode_min_falls_back_to_max_when_min_zero
+test_temp_mode_max_falls_back_to_min_when_max_zero
+
+# Field storage
+test_all_rfid_fields_stored
+test_partial_rfid_fields_stored
+test_syncs_to_persistent_storage
+test_emits_inventory_update
+
+# Error handling
+test_handles_error_response
+test_handles_no_response
+test_handles_missing_result
+test_handles_invalid_slot_index
+
+# Config parsing
+test_config_default_is_average
+test_config_accepts_min
+test_config_accepts_max
+test_config_invalid_value_defaults_to_average
+```
+
 ## Development Workflow
 
 ### Adding New Tests
@@ -452,7 +515,7 @@ Tests provide mock Klipper objects. Real Klipper is not required for testing.
 
 ## Performance
 
-- **Full test suite**: ~5 seconds (299 tests)
+- **Full test suite**: ~5 seconds (340 tests)
 - **Single test file**: ~0.5-1 second
 - **Single test**: <0.1 second
 

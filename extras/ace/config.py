@@ -66,6 +66,11 @@ def read_ace_config(config):
     ace_config["rfid_inventory_sync_enabled"] = config.getboolean(
         "rfid_inventory_sync_enabled", True
     )
+    # RFID temperature mode: how to calculate print temp from min/max
+    # Options: "average" (default), "min", "max"
+    ace_config["rfid_temp_mode"] = config.get("rfid_temp_mode", "average").lower()
+    if ace_config["rfid_temp_mode"] not in ("average", "min", "max"):
+        ace_config["rfid_temp_mode"] = "average"
 
     ace_config["parkposition_to_toolhead_length"] = config.getint("parkposition_to_toolhead_length", 1000)
     ace_config["parkposition_to_rdm_length"] = config.getint("parkposition_to_rdm_length", 150)
