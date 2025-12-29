@@ -148,7 +148,8 @@ _enable_feed_assist(slot)                    # Auto-push filament on detection
 _disable_feed_assist(slot)                   # Disable auto-push
 _update_feed_assist(slot)                    # Update active feed assist slot
 _get_current_feed_assist_index()             # Query current feed assist slot
-_on_ace_connect()                            # Restore feed assist after reconnection
+_on_ace_connect()                            # Mark feed assist for deferred restoration
+_maybe_restore_pending_feed_assist()         # Restore after first successful heartbeat
 
 # Sensor Monitoring (New in 2024-12)
 _make_sensor_trigger_monitor(sensor_type)    # Create sensor state change monitor
@@ -397,6 +398,11 @@ get_connection_status()                  # Get detailed status dict:
                                          #   stable: bool - connected 30s+ and <6 reconnects in 180s
                                          #   recent_reconnects: int - reconnects in last 180s
                                          #   time_connected: float - seconds since last connect
+
+# Connection stability ensures robust operation:
+# - Feed assist restoration deferred until first successful heartbeat
+# - This prevents send failures during initial connection negotiation
+# - Reconnect timestamps only track actual failed attempts (not initial connection)
 
 # Stability Constants (in __init__):
 #   INSTABILITY_WINDOW = 180.0           # Look at reconnects in last 3 minutes
@@ -781,6 +787,7 @@ sensors: Dict[str, Sensor]          # Sensor objects
 ```python
 inventory: List[Dict]               # Slot metadata (runtime copy)
 _feed_assist_index: int             # Current feed assist slot (-1 = none)
+_pending_feed_assist_restore: int   # Slot pending restoration after reconnect (-1 = none)
 _info: Dict                         # ACE hardware status
 serial_mgr: AceSerialManager        # Communication handler
 feed_assist_active_after_ace_connect: bool  # Restore feed assist on reconnect (config)
@@ -865,7 +872,7 @@ total_max_feeding_length: 2600
 pre_cut_retract_length: 2
 heartbeat_interval: 1.0
 max_dryer_temperature: 55
-feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect
+feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect (deferred until first successful heartbeat)
 ```
 ### Debug Commands
 

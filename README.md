@@ -51,6 +51,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
+- ✅ **Feed Assist Restoration**: Automatically restores feed assist after reconnection (deferred until connection stable)
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 
 ## 📖 Documentation
@@ -598,6 +599,25 @@ Connection supervision is **enabled by default**. To disable:
 ```ini
 [ace]
 ace_connection_supervision: False
+```
+
+### Feed Assist Restoration
+
+When ACE reconnects (after power cycle or USB disconnect), feed assist is automatically restored if it was previously enabled. The restoration is **deferred until after the first successful heartbeat** to ensure the connection is stable before sending commands. This prevents "No response" errors during initial connection negotiation.
+
+```gcode
+# Log sequence during reconnection:
+# ACE[0]: Connected - will restore feed assist on slot 2 after heartbeat
+# ... (heartbeat succeeds) ...
+# ACE[0]: Restoring feed assist on slot 2
+# ACE[0]: Feed assist restored on slot 2
+```
+
+To disable automatic feed assist restoration:
+
+```ini
+[ace]
+feed_assist_active_after_ace_connect: False
 ```
 
 ### Status Command
