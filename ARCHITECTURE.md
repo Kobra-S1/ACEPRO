@@ -10,13 +10,12 @@ The ACE Pro is a multi-material filament management system for Klipper-based 3D 
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Klipper Printer                         │
 │  ┌────────────────────────────────────────────────────────────┐ │
-│  │                      AceManager (Singleton)                │ │
+│  │                      AceManager                            │ │
 │  │  - Coordinates multiple ACE instances                      │ │
 │  │  - Manages global filament position state                  │ │
 │  │  - Handles runout detection & monitoring                   │ │
 │  │  │  Sensors: toolhead_sensor, return_module_sensor         │ │
-│  │  - Orchestrates tool changes (T0-T15)                      │ │
-│  │  - Smart unload/load with sensor-aware fallback            │ │
+│  │  - Orchestrates tool changes (T0-Tn)                       │ │
 │  └──┬────────────────────────────────────────────┬────────────┘ │
 │     │                                            │              │
 │     ▼                                            ▼              │
@@ -438,12 +437,14 @@ All commands are table-driven and globally registered. Commands use flexible par
 
 **Core Operations:**
 ```
-ACE_GET_STATUS [INSTANCE=<n>] [VERBOSE=1]  # Query ACE hardware status
-                                           # Without INSTANCE: all instances
+ACE_GET_STATUS [INSTANCE=<n>|TOOL=<n>] [VERBOSE=1]
+                                           # Query ACE hardware status
+                                           # Without INSTANCE/TOOL: all instances
                                            # VERBOSE=1: detailed output (all fields)
                                            # VERBOSE=0 (default): compact JSON
                                            
 ACE_RECONNECT [INSTANCE=<n>]               # Reconnect serial connection(s)
+                                           # Without INSTANCE: reconnect all instances
 
 ACE_FEED [T=<tool>|INSTANCE=<n> INDEX=<n>] LENGTH=<mm> [SPEED=<mm/s>]
                                            # Feed filament from slot
@@ -463,25 +464,28 @@ ACE_STOP_RETRACT [T=<tool>|INSTANCE=<n> INDEX=<n>]
 ACE_SMART_UNLOAD [TOOL=<n>]                # Intelligent unload with fallback strategies
                                            # Tries current, then other slots, then cross-instance
 
-ACE_SMART_LOAD                             # Load all non-empty slots to RDM sensor
+ACE_SMART_LOAD                             # Load all non-empty slots to verification sensor (toolhead)
 
 ACE_CHANGE_TOOL TOOL=<n>                   # Execute tool change T<n>
-                                           # (internal: delegates to _ACE_CHANGE_TOOL_WRAPPER)
+                                           # TOOL=-1: unload current tool
                                            
 ACE_FULL_UNLOAD [TOOL=<n>|TOOL=ALL]        # Full unload until slot empty
-                                           # TOOL=ALL: unload all tools
+                                           # TOOL=ALL: unload all non-empty slots
                                            # No TOOL: unload current tool
+                                           # Clears tool index on success
 ```
 
 **Inventory Management:**
 ```
-ACE_SET_SLOT [T=<tool>|INSTANCE=<n> INDEX=<n>] COLOR=R,G,B MATERIAL=<name> TEMP=<°C>
+ACE_SET_SLOT [T=<tool>|INSTANCE=<n> INDEX=<n>] COLOR=<name>|R,G,B MATERIAL=<name> TEMP=<°C>
              or EMPTY=1                    # Set slot metadata or clear
+                                           # COLOR can be named (e.g. RED, BLUE) or R,G,B
 
 ACE_QUERY_SLOTS [INSTANCE=<n>]             # Query slots
                                            # Without INSTANCE: all instances
 
 ACE_SAVE_INVENTORY [INSTANCE=<n>]          # Persist inventory to saved_variables
+                                           # If INSTANCE specified, saves that instance
 
 ACE_RESET_PERSISTENT_INVENTORY INSTANCE=<n>
                                            # Clear all slot metadata for instance
@@ -562,13 +566,14 @@ ACE_DEBUG_STATE                            # Print manager & instance state
 ACE_DEBUG INSTANCE=<n> METHOD=<name> [PARAMS=<json>]
                                            # Send raw debug request to hardware
 
-ACE_DEBUG_CHECK_SPOOL_READY TOOL=<n> [TIMEOUT=<sec>]
-                                           # Test spool ready check with timeout
+ACE_DEBUG_CHECK_SPOOL_READY TOOL=<n>       # Test spool ready check
+                                           # Verifies slot is ready and available
 
 ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0|1 RDM=0|1 or RESET=1
                                            # Inject sensor state (testing)
 
 ACE_SHOW_INSTANCE_CONFIG [INSTANCE=<n>]    # Display resolved config for instance(s)
+                                           # Without INSTANCE: compare all instances
 ```
 
 **Tool Selection (Dynamic):**
@@ -801,35 +806,35 @@ This example is just for reference; check printer_KS1.cfg / printer_K3.cfg for l
 
 ```ini
 [ace]
-ace_count: 2
+ace_count: 1
 baud: 115200
 
-# Tubes
-parkposition_to_toolhead_length: 1000
+# Tube Lengths
+parkposition_to_toolhead_length: 800
 parkposition_to_rdm_length: 150
+toolchange_load_length: 2000
 
-# Speeds
+# Feeding Speeds
 feed_speed: 60
 retract_speed: 50
-incremental_feeding_length: 50
-incremental_feeding_speed: 30
-extruder_feeding_length: 1
-extruder_feeding_speed: 5
-toolhead_retraction_speed: 10
-toolhead_retraction_length: 40
+incremental_feeding_length: 100
+incremental_feeding_speed: 60
+extruder_feeding_length: 10
+extruder_feeding_speed: 8
 toolhead_slow_loading_speed: 5
+toolhead_full_purge_length: 85
 
-# Purge
+# Purge Settings
 default_color_change_purge_length: 50
-default_color_change_purge_speed: 400
-purge_max_chunk_length: 300
+default_color_change_purge_speed: 300
+purge_max_chunk_length: 250
 purge_multiplier: 1.0
 
-# Safety
-total_max_feeding_length: 2500
+# Safety & Misc
+total_max_feeding_length: 2600
 pre_cut_retract_length: 2
 heartbeat_interval: 1.0
-max_dryer_temperature: 60
+max_dryer_temperature: 55
 ```
 ### Debug Commands
 

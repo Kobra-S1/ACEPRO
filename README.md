@@ -1,14 +1,23 @@
-# ACE Pro - Anycubic Color Engine Pro Driver for Klipper
+<div align="center">
+
+# ACE Pro - A Klipper driver for the Anycubic Color Engine Pro
+
+</div>
+
+<p align="center">
+  <img src="img/ACEPro.png" alt="Overview" width="30%">
+</p>
 
 Based on the great work of utkabobr ([DuckACE](https://github.com/utkabobr/DuckACE)) and szkrisz ([ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)).
 This is a fork of szkrisz' ACEPRO Klipper driver.
 
-This Anycubic-centric fork has diverged significantly from the original and focuses on:
+This Anycubic-centric fork has structural diverged from the original and focuses on:
 - Supporting multiple ACE units.
 - Adds RFID support (to automatically populate inventory)
 - Adds more Endless-Spool matching modes (exact, material only or just use the next available spool)
 - Splitting functionality into focused modules (instead of one large file)
 - Shortening load/unload times with revised feed sequences
+- Adds more graceful error-handling if ACE rejects commands
 - Adding many console commands for experimentation ;)
 - Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5)
 - Expanding controls/panels in the ACE KlipperScreen panel
@@ -35,7 +44,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 ## ✨ Features
 
 ### Core Functionality
-- ✅ **Multi-ACE Pro Support**: Multiple ACE units support (tested with 3 ACEPRO units for 12 color printing, but more should be possible)
+- ✅ **Multi-ACE Pro Support**: Multiple ACE units support (tested with 3 ACEPRO units for 12-color printing, but more should be possible)
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
 - ✅ **Runout Detection**: Real-time state-change detection
@@ -85,17 +94,25 @@ config/
 ## 🔧 Hardware Requirements
 
 ### Required Components
-- 1-N **Anycubic Color Engine Pro** units
+- 1 or more **Anycubic Color Engine Pro** units
 - **Filament Sensors** (required): 
-  - Toolhead sensor (before hotend) - for runout detection
-  - Optional: RMS sensor (return module) - for jam detection and path validation
-- **Hotend**: Recommended: Filament cutter
-- **ACE Adapter**: Ace-Pro to USB Adapter
+  - Toolhead sensor (close to the hotend) - for runout detection
+  - Optional: RMS sensor (return module in Anycubic terms) - for jam detection and path validation
+- **Hotend**: Recommended: Having there a Filament cutter
+- **ACE Adapter**: Adapter which converts the Ace-Pro conector to standard USB
+
 
 ### ACE Pro USB Pin Configuration / Adapter
 ![Connector Pinout](/img/connector.png)
 Connect the ACE Pro to a regular USB port and configure the sensor pins according to your board layout.
 ![USB Adapter ((c) Gwebster)](/img/Ace2USB_gwebster.png)
+
+Other variations to get a standard USB connection to the ACE can be found on printables.com:
+
+https://www.printables.com/model/1163780-anycubic-ace-pro-usb-a-adapter
+
+https://www.printables.com/model/1227630-anycubic-acepro-back-cover-for-usb-c
+
 ## 📦 Installation
 
 ### Prerequisites
@@ -104,6 +121,7 @@ Connect the ACE Pro to a regular USB port and configure the sensor pins accordin
 ```bash
 cd ~
 git clone https://github.com/Kobra-S1/ACEPRO.git
+git checkout dev # For the development branch with the latest update
 ```
 
 2. **Install Python Dependencies (if not already installed)**
@@ -192,7 +210,7 @@ Update your Orca slicer end machine-gcode to call PRINT_END macro:
 ```
 PRINT_END CUT_TIP=1
 ```
-This will assure that at print end, ACE Pro driver (if available) gets informed of the print end, as also filament is cut and retracted and printhead moves to park position.
+This will ensure that at print end, ACE Pro driver (if available) gets informed of the print end, as also filament is cut and retracted and printhead moves to park position.
 If you prefer to NOT get the filament cut at print end, change CUT_TIP argument to zero:
 ```
 PRINT_END CUT_TIP=0
@@ -536,14 +554,6 @@ ACE_QUERY_SLOTS
 # Query specific instance
 ACE_QUERY_SLOTS INSTANCE=0
 
-# Example response:
-# Instance 0:
-# [
-#   {"status": "ready", "color": [255,0,0], "material": "PLA", "temp": 210},
-#   {"status": "ready", "color": [0,255,0], "material": "PETG", "temp": 240},
-#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0},
-#   {"status": "empty", "color": [0,0,0], "material": "", "temp": 0}
-# ]
 ```
 
 ### Empty Slot Data Retention
@@ -702,7 +712,7 @@ ACE_SHOW_INSTANCE_CONFIG            # Display resolved configuration
 
 ### Sensor Validation
 
-For Test sensor functionality, DONT use it if you are not know what you are doing:
+For testing sensor functionality, DON'T use it if you don't know what you are doing:
 
 ```gcode
 # Manual sensor state injection (for testing)
