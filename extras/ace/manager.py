@@ -1277,25 +1277,23 @@ class AceManager:
         if is_printing:
             prompt_text = (
                 f"Print paused: ACE connection unstable. {' | '.join(instance_details)}. "
-                f"Wait for stabilization (30s) or cancel print."
+                f"Please fix the issue, then use RESUME to continue or CANCEL_PRINT to abort."
             )
         else:
             prompt_text = (
                 f"ACE connection issue detected. {' | '.join(instance_details)}. "
-                f"Waiting for stable connection..."
+                f"Please check connections and verify ACE unit is powered on."
             )
 
         self.gcode.run_script_from_command(
             f'RESPOND TYPE=command MSG="action:prompt_text {prompt_text}"'
         )
 
-        if is_printing:
-            self.gcode.run_script_from_command(
-                'RESPOND TYPE=command MSG="action:prompt_footer_button Resume|RESUME|primary"'
-            )
-            self.gcode.run_script_from_command(
-                'RESPOND TYPE=command MSG="action:prompt_footer_button Cancel Print|CANCEL_PRINT|error"'
-            )
+        # Just a dismiss button for all cases
+        self.gcode.run_script_from_command(
+            'RESPOND TYPE=command MSG="action:prompt_footer_button Dismiss|'
+            'RESPOND TYPE=command MSG=action:prompt_end|secondary"'
+        )
 
         self.gcode.run_script_from_command(
             'RESPOND TYPE=command MSG="action:prompt_show"'
