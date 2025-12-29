@@ -581,10 +581,11 @@ Monitors ACE connection stability and automatically pauses prints if connection 
 ### How It Works
 
 1. **Reconnect Tracking** → Each failed connection attempt is timestamped
-2. **Instability Detection** → If 6+ reconnects occur within 3 minutes, connection is flagged as unstable
-3. **During Print** → Print is paused, dialog shown with Resume/Cancel options
-4. **When Idle** → Informational dialog shown (no pause)
-5. **Recovery** → Dialog auto-closes when connection stabilizes (connected for 30+ seconds)
+2. **Health Monitoring** → Connection status checked every 2 seconds (low overhead)
+3. **Instability Detection** → If 6+ reconnects occur within 3 minutes, connection is flagged as unstable
+4. **During Print** → Print is paused, dialog shown informing user to fix the issue
+5. **When Idle** → Informational dialog shown (no pause)
+6. **Recovery** → Dialog auto-closes when connection stabilizes (connected for 30+ seconds)
 
 ### Retry Backoff
 
@@ -594,13 +595,12 @@ Failed connection attempts use exponential backoff to avoid log spam:
 
 ### Configuration
 
-Connection supervision is **enabled by default**. To disable:
+Connection supervision is **enabled by default** and checks every 2 seconds. To disable:
 
 ```ini
 [ace]
 ace_connection_supervision: False
 ```
-
 ### Feed Assist Restoration
 
 When ACE reconnects (after power cycle or USB disconnect), feed assist is automatically restored if it was previously enabled. The restoration is **deferred until after the first successful heartbeat** to ensure the connection is stable before sending commands. This prevents "No response" errors during initial connection negotiation.
@@ -671,6 +671,26 @@ If you see the connection issue dialog during a print, follow these steps:
    - If unable to stabilize after multiple attempts: `CANCEL_PRINT`
 
 **Tip**: Keep the console/Mainsail terminal open to monitor connection status messages in real-time.
+### Persistent USB Issues?
+
+If you're experiencing **repeated USB disconnections** that you didn't have before enabling connection supervision:
+
+1. **Disable Connection Supervision**
+   ```ini
+   [ace]
+   ace_connection_supervision: False
+   ```
+   Then restart Klipper: `sudo systemctl restart klipper`
+
+2. **Check current usage**
+   - Ensure Raspberry Pi power supply provides sufficient current (3A+ recommended)
+   - Check if other USB devices are drawing significant power
+
+3. **USB Cable Quality**
+   - Use high-quality USB cables (≤ 1m length)
+   - Avoid USB hubs with poor power delivery
+   - Try different USB ports on the Raspberry Pi
+
 ## �🔄 Endless Spool Feature
 
 Automatically switches to a matching spool when filament runs out, enabling continuous multi-day prints.

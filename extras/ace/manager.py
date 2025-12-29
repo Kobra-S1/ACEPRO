@@ -1122,11 +1122,13 @@ class AceManager:
 
     def _monitor_ace_state(self, eventtime):
         """
-        Monitor ACE Pro enable/disable state and connection health (1 second interval).
+        Monitor ACE Pro enable/disable state and connection health (2 second interval).
 
         Checks if ACE Pro unit is enabled/disabled via output pin and
         updates sensor state accordingly. Also monitors connection stability
         and pauses print if connection is unstable during printing.
+        
+
         """
         try:
             self.update_ace_support_active_state()
@@ -1138,8 +1140,8 @@ class AceManager:
         except Exception as e:
             self.gcode.respond_info(f"ACE: Error in ACE state monitor: {e}")
 
-        # Return next check time (1 second from now)
-        return eventtime + 1.0
+        # Return next check time (2 seconds)
+        return eventtime + 2.0
 
     def _check_connection_health(self, eventtime):
         """
