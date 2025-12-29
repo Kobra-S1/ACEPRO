@@ -14,6 +14,10 @@ from .config import (
     SENSOR_RDM,
     FILAMENT_STATE_BOWDEN,
     FILAMENT_STATE_NOZZLE,
+    RFID_STATE_NO_INFO,
+    RFID_STATE_FAILED,
+    RFID_STATE_IDENTIFIED,
+    RFID_STATE_IDENTIFYING,
     get_instance_from_tool,
     get_local_slot,
     OVERRIDABLE_PARAMS,
@@ -250,8 +254,13 @@ def cmd_ACE_GET_STATUS(gcmd):
                         slot_handled.add('color')
                     if 'rfid' in slot:
                         rfid_val = slot['rfid']
-                        # Format RFID nicely: 0=no tag, 1=empty tag, 2=tag with data
-                        rfid_labels = {0: "no_tag", 1: "empty", 2: "programmed"}
+                        # Format RFID nicely with named constants
+                        rfid_labels = {
+                            RFID_STATE_NO_INFO: "no_tag",
+                            RFID_STATE_FAILED: "failed",
+                            RFID_STATE_IDENTIFIED: "identified",
+                            RFID_STATE_IDENTIFYING: "identifying"
+                        }
                         rfid_str = rfid_labels.get(rfid_val, str(rfid_val))
                         slot_parts.append(f"rfid={rfid_str}")
                         slot_handled.add('rfid')

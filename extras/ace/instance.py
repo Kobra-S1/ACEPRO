@@ -13,6 +13,10 @@ from .config import (
     FILAMENT_STATE_SPLITTER,
     FILAMENT_STATE_TOOLHEAD,
     FILAMENT_STATE_NOZZLE,
+    RFID_STATE_NO_INFO,
+    RFID_STATE_FAILED,
+    RFID_STATE_IDENTIFIED,
+    RFID_STATE_IDENTIFYING,
     get_tool_offset,
     set_and_save_variable,
     create_inventory,
@@ -1271,7 +1275,7 @@ class AceInstance:
                             # Accept true black RFID colors (0,0,0) instead of treating as invalid
                             color_valid = bool(color_list) and len(color_list) >= 3
 
-                            if rfid_state == 2 and material and color_valid:
+                            if rfid_state == RFID_STATE_IDENTIFIED and material and color_valid:
                                 incoming_color = color_list[:3]
 
                                 # Check if we're missing full RFID data (need to query get_filament_info)
@@ -1326,8 +1330,8 @@ class AceInstance:
                             else:
                                 updated_rfid = saved_rfid
                         else:
-                            # RFID syncing disabled: ignore RFID-tagged metadata (rfid_state != 0)
-                            # and leave saved values untouched. Non-RFID updates (rfid_state == 0)
+                            # RFID syncing disabled: ignore RFID-tagged metadata (rfid_state != RFID_STATE_NO_INFO)
+                            # and leave saved values untouched. Non-RFID updates (rfid_state == RFID_STATE_NO_INFO)
                             # can still fall through to defaulting logic below.
                             updated_rfid = saved_rfid
 
@@ -1340,9 +1344,9 @@ class AceInstance:
                             or all(c == 0 for c in updated_color[:3])
                         )
 
-                        # When RFID sync is disabled AND the slot reports RFID data (rfid_state != 0),
+                        # When RFID sync is disabled AND the slot reports RFID data (rfid_state != RFID_STATE_NO_INFO),
                         # do not auto-fill defaults; leave values as-is to satisfy "ignore RFID data".
-                        allow_default_fill = not (not self.rfid_inventory_sync_enabled and rfid_state not in (None, 0))
+                        allow_default_fill = not (not self.rfid_inventory_sync_enabled and rfid_state not in (None, RFID_STATE_NO_INFO))
 
                         if allow_default_fill and (missing_material or missing_temp):
                             if missing_material:

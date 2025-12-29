@@ -203,8 +203,14 @@ cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_gener
 
 Update your Orca slicer start machine-gcode to provide the initial_tool parameter to G9111 macro:
 ```
-G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperature[initial_tool]] tool=[initial_tool]
+G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperature[initial_tool]] tool=[initial_tool] SKIP_PURGE_FOR_ALREADY_LOADED_TOOL=1
 ```
+
+**Parameters:**
+- `bedTemp` - Bed temperature
+- `extruderTemp` - Nozzle temperature for the initial tool
+- `tool` - Initial tool index (from `[initial_tool]` Orca variable)
+- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL=1` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts. Set to `0` to always purge.
 
 2. **Update End G-code**
 
@@ -900,7 +906,7 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
 ### Prerequisites
 
 - **KlipperScreen** must be installed and running
-- This panel is **optional** — ACE Pro functions via G-code commands regardless
+- This panel is **optional** — ACE Pro functions via klipper console commands regardless
 
 ### Installation
 

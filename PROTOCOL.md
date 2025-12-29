@@ -136,10 +136,16 @@ Response params:
 - color: [R, G, B] (RGB color - decimal values 0-255, legacy field)
 - colors: [[R, G, B, A]] (Array of RGBA colors - decimal 0-255 with alpha channel)
 - icon_type: 0 (Icon type indicator, purpose unknown)
-- rfid: 0 (Information not found), 1 (Failed to identify), 2 (Identified), 3 (Identifying)
+- rfid: 0 (No information / no tag detected), 1 (Failed to identify), 2 (Successfully identified), 3 (Currently identifying)
 - extruder_temp: Dictionary of temperature data
 - hotbed_temp: Dictionary of temperature data
 - diameter: 1.75 (Filament diameter in millimeters)
+
+Note: In the ACE Pro Klipper driver, these RFID values are defined as named constants:
+  - RFID_STATE_NO_INFO = 0 (no RFID tag detected)
+  - RFID_STATE_FAILED = 1 (tag present but identification failed)
+  - RFID_STATE_IDENTIFIED = 2 (tag successfully identified with valid data)
+  - RFID_STATE_IDENTIFYING = 3 (tag identification in progress)
 - total: 330 (Total spool weight/length, units unknown)
 - current: 0 (Current usage, units unknown)
 
@@ -189,7 +195,7 @@ Slot status dictionary:
 - brand: "FakeBrand"
 - type: "PLA", "PLA+", "TPU", "ABS", "PETG", etc
 - color: [0, 0, 0] (Red, green, blue decimal values 0-255)
-- rfid: 0 (Information not found), 1 (Failed to identify), 2 (Identified), 3 (Identifying)
+- rfid: 0 (No info), 1 (Failed), 2 (Identified), 3 (Identifying) - see RFID_STATE_* constants above
 
 drying
 ------

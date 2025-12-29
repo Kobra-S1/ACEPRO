@@ -29,6 +29,12 @@ UNLOAD_RETRY_DELAY = 0.5               # Seconds between attempts
 UNLOAD_INITIAL_LENGTH = 50             # mm for first attempt
 UNLOAD_SPEED_MULTIPLIERS = [1.0, 0.7, 0.4]  # Speed factors per attempt
 
+# RFID state constants (from ACE hardware status responses)
+RFID_STATE_NO_INFO = 0         # Information not found (no RFID tag)
+RFID_STATE_FAILED = 1          # Failed to identify tag
+RFID_STATE_IDENTIFIED = 2      # Successfully identified tag
+RFID_STATE_IDENTIFYING = 3     # Currently identifying tag
+
 # RFID inventory sync configuration
 # When enabled, ACE hardware status updates (from RFID or manual changes)
 # automatically sync material/color data to Klipper inventory

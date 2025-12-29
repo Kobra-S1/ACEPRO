@@ -25,7 +25,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 
 | File | Tests | Description |
 |------|-------|-------------|
-| **test_commands.py** | 93 | All G-code command handlers, instance/slot resolution, parameter validation |
+| **test_commands.py** | 98 | All G-code command handlers, instance/slot resolution, parameter validation, verbose output formatting |
 | **test_manager.py** | 52 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
 | **test_instance.py** | 62 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, inventory write optimization, deferred feed assist restoration, JSON emission |
 | **test_config_utils.py** | 51 | Configuration parsing, tool mapping, inventory creation |
@@ -44,7 +44,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 459 tests** across 13 test modules
+**Total: 465 tests** across 13 test modules
 
 
 ## Running Tests
@@ -166,6 +166,11 @@ test_cmd_ACE_GET_STATUS_single_instance
 test_cmd_ACE_GET_STATUS_all_instances
 test_cmd_ACE_GET_STATUS_includes_dryer_status  # CRITICAL: Validates dryer_status field
 test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped  # CRITICAL: Validates field exists when stopped
+test_cmd_ACE_GET_STATUS_verbose_rfid_labels  # Verifies RFID states display as text (no_tag, failed, identified, identifying)
+test_cmd_ACE_GET_STATUS_verbose_slot_formatting  # Tests slot data formatting with temps, diameter, spool usage
+test_cmd_ACE_GET_STATUS_verbose_dryer_formatting  # Validates dryer status single-line formatting
+test_cmd_ACE_GET_STATUS_verbose_all_instances  # Tests verbose mode for all instances
+test_cmd_ACE_GET_STATUS_verbose_unknown_fields  # Ensures unknown fields appear under "Additional Fields"
 test_cmd_ACE_GET_CURRENT_INDEX
 test_cmd_ACE_QUERY_SLOTS_all
 test_cmd_ACE_QUERY_SLOTS_single

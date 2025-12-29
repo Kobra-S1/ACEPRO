@@ -252,6 +252,245 @@ class TestCommandSmoke:
         assert 'dryer_status' in json_response, "dryer_status field must be present even when empty"
         assert isinstance(json_response['dryer_status'], dict)
 
+    def test_cmd_ACE_GET_STATUS_verbose_rfid_labels(self, mock_gcmd, setup_mocks):
+        """Test that ACE_GET_STATUS VERBOSE=1 displays RFID states with correct text labels."""
+        import json
+        from ace.config import RFID_STATE_NO_INFO, RFID_STATE_FAILED, RFID_STATE_IDENTIFIED, RFID_STATE_IDENTIFYING
+        
+        # Mock parameters to request verbose output
+        mock_gcmd.get_int = Mock(side_effect=lambda key, default=None: {
+            "INSTANCE": 0,
+            "VERBOSE": 1
+        }.get(key, default))
+        
+        # Mock response with all RFID states
+        mock_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "temp": 25,
+                "dryer_status": {},
+                "slots": [
+                    {"index": 0, "status": "ready", "rfid": RFID_STATE_NO_INFO},
+                    {"index": 1, "status": "ready", "rfid": RFID_STATE_FAILED},
+                    {"index": 2, "status": "ready", "rfid": RFID_STATE_IDENTIFIED},
+                    {"index": 3, "status": "ready", "rfid": RFID_STATE_IDENTIFYING}
+                ]
+            }
+        }
+        
+        captured_callback = None
+        def capture_callback(request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+        
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+        
+        # Execute the command
+        ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
+        
+        # Verify and execute callback
+        assert captured_callback is not None
+        captured_callback(mock_response)
+        
+        # Verify verbose output contains text labels, not numbers
+        call_args = mock_gcmd.respond_info.call_args_list
+        verbose_output = "\n".join([call[0][0] for call in call_args])
+        
+        # Check for text labels (not numeric values)
+        assert "rfid=no_tag" in verbose_output, "RFID_STATE_NO_INFO should display as 'no_tag'"
+        assert "rfid=failed" in verbose_output, "RFID_STATE_FAILED should display as 'failed'"
+        assert "rfid=identified" in verbose_output, "RFID_STATE_IDENTIFIED should display as 'identified'"
+        assert "rfid=identifying" in verbose_output, "RFID_STATE_IDENTIFYING should display as 'identifying'"
+        
+        # Ensure numeric values are NOT present
+        assert "rfid=0" not in verbose_output
+        assert "rfid=1" not in verbose_output
+        assert "rfid=2" not in verbose_output
+        assert "rfid=3" not in verbose_output
+
+    def test_cmd_ACE_GET_STATUS_verbose_slot_formatting(self, mock_gcmd, setup_mocks):
+        """Test that ACE_GET_STATUS VERBOSE=1 formats slot data correctly."""
+        mock_gcmd.get_int = Mock(side_effect=lambda key, default=None: {
+            "INSTANCE": 0,
+            "VERBOSE": 1
+        }.get(key, default))
+        
+        # Mock response with diverse slot data
+        mock_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "temp": 30,
+                "dryer_status": {},
+                "slots": [
+                    {
+                        "index": 0,
+                        "status": "ready",
+                        "sku": "PLA-001",
+                        "type": "PLA",
+                        "color": [255, 0, 0],
+                        "rfid": 2,
+                        "icon_type": 1
+                    }
+                ]
+            }
+        }
+        
+        # Mock inventory with RFID temperature data
+        ACE_INSTANCES[0].inventory = [
+            {
+                "status": "ready",
+                "extruder_temp": {"min": 200, "max": 220},
+                "hotbed_temp": {"min": 60, "max": 80},
+                "diameter": 1.75,
+                "total": 1000,
+                "current": 750
+            }
+        ]
+        
+        captured_callback = None
+        def capture_callback(request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+        
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+        ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
+        
+        assert captured_callback is not None
+        captured_callback(mock_response)
+        
+        # Verify verbose output contains all expected fields
+        call_args = mock_gcmd.respond_info.call_args_list
+        verbose_output = "\n".join([call[0][0] for call in call_args])
+        
+        assert "index=0" in verbose_output
+        assert "status=ready" in verbose_output
+        assert "sku=PLA-001" in verbose_output
+        assert "type=PLA" in verbose_output
+        assert "color=RGB(255,0,0)" in verbose_output
+        assert "extruder_temp=200-220°C" in verbose_output
+        assert "hotbed_temp=60-80°C" in verbose_output
+        assert "diameter=1.75mm" in verbose_output
+        assert "spool=750/1000m" in verbose_output
+
+    def test_cmd_ACE_GET_STATUS_verbose_dryer_formatting(self, mock_gcmd, setup_mocks):
+        """Test that ACE_GET_STATUS VERBOSE=1 formats dryer status correctly."""
+        mock_gcmd.get_int = Mock(side_effect=lambda key, default=None: {
+            "INSTANCE": 0,
+            "VERBOSE": 1
+        }.get(key, default))
+        
+        mock_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "temp": 45,
+                "dryer_status": {
+                    "status": "drying",
+                    "target_temp": 45,
+                    "duration": 240,
+                    "remain_time": 14000
+                },
+                "slots": []
+            }
+        }
+        
+        captured_callback = None
+        def capture_callback(request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+        
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+        ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
+        
+        assert captured_callback is not None
+        captured_callback(mock_response)
+        
+        call_args = mock_gcmd.respond_info.call_args_list
+        verbose_output = "\n".join([call[0][0] for call in call_args])
+        
+        # Dryer status should be formatted on one line
+        assert "Dryer:" in verbose_output
+        assert "status=drying" in verbose_output
+        assert "target_temp=45°C" in verbose_output
+        assert "duration=240min" in verbose_output
+        assert "remain_time=14000min" in verbose_output
+
+    def test_cmd_ACE_GET_STATUS_verbose_all_instances(self, mock_gcmd, setup_mocks):
+        """Test that ACE_GET_STATUS VERBOSE=1 queries all instances correctly."""
+        mock_gcmd.get_int = Mock(side_effect=lambda key, default=None: {
+            "INSTANCE": None,
+            "VERBOSE": 1
+        }.get(key, default))
+        
+        mock_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "temp": 25,
+                "dryer_status": {},
+                "slots": []
+            }
+        }
+        
+        captured_callbacks = []
+        def capture_callback(request, callback):
+            captured_callbacks.append(callback)
+        
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+        ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
+        
+        # Execute all callbacks
+        for callback in captured_callbacks:
+            callback(mock_response)
+        
+        call_args = mock_gcmd.respond_info.call_args_list
+        verbose_output = "\n".join([call[0][0] for call in call_args])
+        
+        # Should have verbose header
+        assert "ACE Status (All Instances - Verbose)" in verbose_output
+        # Should have instance status
+        assert "ACE Instance" in verbose_output
+
+    def test_cmd_ACE_GET_STATUS_verbose_unknown_fields(self, mock_gcmd, setup_mocks):
+        """Test that ACE_GET_STATUS VERBOSE=1 displays unknown fields under Additional Fields."""
+        mock_gcmd.get_int = Mock(side_effect=lambda key, default=None: {
+            "INSTANCE": 0,
+            "VERBOSE": 1
+        }.get(key, default))
+        
+        mock_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "temp": 25,
+                "dryer_status": {},
+                "slots": [],
+                "unknown_field_1": "test_value",
+                "unknown_field_2": 42
+            }
+        }
+        
+        captured_callback = None
+        def capture_callback(request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+        
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+        ace.commands.cmd_ACE_GET_STATUS(mock_gcmd)
+        
+        assert captured_callback is not None
+        captured_callback(mock_response)
+        
+        call_args = mock_gcmd.respond_info.call_args_list
+        verbose_output = "\n".join([call[0][0] for call in call_args])
+        
+        # Unknown fields should appear under "Additional Fields"
+        assert "Additional Fields:" in verbose_output
+        assert "unknown_field_1=test_value" in verbose_output
+        assert "unknown_field_2=42" in verbose_output
+
     def test_cmd_ACE_RECONNECT_single(self, mock_gcmd, setup_mocks):
         """Test ACE_RECONNECT with specific instance."""
         mock_gcmd.get_int = Mock(return_value=0)
