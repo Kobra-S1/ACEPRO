@@ -630,7 +630,47 @@ ACE_GET_CONNECTION_STATUS
 # ACE[0]: Connected (stable)
 # ACE[1]: Disconnected, 4/6 reconnects in 180s, next retry: 17s
 ```
+### Troubleshooting Connection Issues
 
+If you see the connection issue dialog during a print, follow these steps:
+
+1. **Check Physical Connections**
+   - Verify USB cable is securely connected to both ACE and Raspberry Pi
+   - Try a different USB port if available
+   - Check if USB cable is damaged or too long (use high-quality cable ≤ 1m)
+
+2. **Power Cycle ACE Unit**
+   - Turn off ACE power switch
+   - Wait 10 seconds
+   - Turn ACE power back on
+   - Wait for ACE to fully boot (LEDs stabilize)
+
+3. **Verify Connection Status**
+   ```gcode
+   ACE_GET_CONNECTION_STATUS
+   
+   # Look for "Connected (stable)" - this means good to continue:
+   # ACE[0]: Connected (stable)
+   
+   # If you see "stabilizing" or reconnects, wait 30 seconds and check again:
+   # ACE[0]: Connected (stabilizing, 23s), 6/6 reconnects in 180s  ← WAIT
+   ```
+
+4. **When to Resume**
+   - ✅ **Safe to resume**: `Connected (stable)` with 0 reconnects
+   - ⚠️ **Wait**: `Connected (stabilizing, XXs)` - check again after 30 seconds
+   - ❌ **Not ready**: `Disconnected` or high reconnect count - repeat steps 1-2
+
+5. **Repeat if Necessary**
+   - Try steps 1-4 multiple times (2-3 attempts) before canceling print
+   - Connection may stabilize after a few minutes
+   - If problem persists after 3 attempts, concider canceling the print and investigate
+
+6. **Resume or Cancel**
+   - Once connection shows `stable`, dismiss the dialog and run: `RESUME`
+   - If unable to stabilize after multiple attempts: `CANCEL_PRINT`
+
+**Tip**: Keep the console/Mainsail terminal open to monitor connection status messages in real-time.
 ## �🔄 Endless Spool Feature
 
 Automatically switches to a matching spool when filament runs out, enabling continuous multi-day prints.
