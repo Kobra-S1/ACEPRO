@@ -84,6 +84,9 @@ class AceInstance:
         self.max_dryer_temperature = float(ace_config["max_dryer_temperature"])
 
         self.rfid_inventory_sync_enabled = ace_config.get("rfid_inventory_sync_enabled", True)
+        self.feed_assist_active_after_ace_connect = ace_config.get(
+            "feed_assist_active_after_ace_connect", True
+        )
 
         # Not overridable per instance
         self.toolhead_full_purge_length = float(ace_config["toolhead_full_purge_length"])
@@ -109,6 +112,7 @@ class AceInstance:
         )
         self.tool_offset = get_tool_offset(self.instance_num)
         self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)
+        self.serial_mgr.set_on_connect_callback(self._on_ace_connect)
 
     @property
     def manager(self):
@@ -1401,6 +1405,56 @@ class AceInstance:
             msg = response.get("msg", "Unknown error")
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Heartbeat response error: {msg}"
+            )
+
+    def _on_ace_connect(self):
+        """
+        Handle ACE connection/reconnection.
+        
+        Restores feed assist if:
+        - feed_assist_active_after_ace_connect config is True
+        - Feed assist was previously active on a slot
+        """
+        if not self.feed_assist_active_after_ace_connect:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Connected - feed assist restoration disabled"
+            )
+            return
+
+        # Check if feed assist was active before disconnect
+        if self._feed_assist_index >= 0:
+            slot = self._feed_assist_index
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Connected - "
+                f"restoring feed assist on slot {slot}"
+            )
+            try:
+                # Re-send the start_feed_assist command to ACE hardware
+                request = {"method": "start_feed_assist", "params": {"index": slot}}
+                self.send_request(
+                    request,
+                    lambda response: self._on_feed_assist_restore_response(response, slot)
+                )
+            except Exception as e:
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: Failed to restore feed assist: {e}"
+                )
+        else:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Connected - "
+                f"no previous feed assist to restore"
+            )
+
+    def _on_feed_assist_restore_response(self, response, slot):
+        """Handle response from feed assist restoration after reconnect."""
+        if response and response.get("code") == 0:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Feed assist restored on slot {slot}"
+            )
+        else:
+            msg = response.get("msg", "Unknown") if response else "No response"
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Feed assist restoration failed: {msg}"
             )
 
     def get_status(self, eventtime=None):

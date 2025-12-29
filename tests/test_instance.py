@@ -219,6 +219,68 @@ class TestFeedAssist(unittest.TestCase):
         # Since we're testing with index 2 active, passing -1 won't match
         # This tests the branching logic
 
+    @patch('ace.instance.AceSerialManager')
+    def test_on_ace_connect_restores_feed_assist(self, mock_serial_mgr_class):
+        """Test feed assist is restored on ACE reconnect when previously active."""
+        # Setup
+        self.ace_config['feed_assist_active_after_ace_connect'] = True
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance._feed_assist_index = 2  # Feed assist was active on slot 2
+        
+        # Track send_request calls
+        sent_requests = []
+        instance.serial_mgr.send_request = Mock(
+            side_effect=lambda req, cb: sent_requests.append(req)
+        )
+        
+        # Call _on_ace_connect
+        instance._on_ace_connect()
+        
+        # Verify start_feed_assist was sent for slot 2
+        self.assertEqual(len(sent_requests), 1)
+        self.assertEqual(sent_requests[0]['method'], 'start_feed_assist')
+        self.assertEqual(sent_requests[0]['params']['index'], 2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_on_ace_connect_skips_when_disabled(self, mock_serial_mgr_class):
+        """Test feed assist restoration is skipped when config disabled."""
+        # Setup
+        self.ace_config['feed_assist_active_after_ace_connect'] = False
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance._feed_assist_index = 2  # Feed assist was active
+        
+        # Track send_request calls
+        sent_requests = []
+        instance.serial_mgr.send_request = Mock(
+            side_effect=lambda req, cb: sent_requests.append(req)
+        )
+        
+        # Call _on_ace_connect
+        instance._on_ace_connect()
+        
+        # Verify no requests were sent
+        self.assertEqual(len(sent_requests), 0)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_on_ace_connect_skips_when_no_previous_feed_assist(self, mock_serial_mgr_class):
+        """Test feed assist restoration is skipped when no previous feed assist."""
+        # Setup
+        self.ace_config['feed_assist_active_after_ace_connect'] = True
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance._feed_assist_index = -1  # No feed assist was active
+        
+        # Track send_request calls
+        sent_requests = []
+        instance.serial_mgr.send_request = Mock(
+            side_effect=lambda req, cb: sent_requests.append(req)
+        )
+        
+        # Call _on_ace_connect
+        instance._on_ace_connect()
+        
+        # Verify no requests were sent
+        self.assertEqual(len(sent_requests), 0)
+
 
 class TestInventoryManagement(unittest.TestCase):
     """Test inventory operations."""

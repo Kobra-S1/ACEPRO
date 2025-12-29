@@ -69,6 +69,7 @@ class AceSerialManager:
         self._last_status_request_time = 0
         self.heartbeat_interval = 1.0
         self.heartbeat_callback = None
+        self.on_connect_callback = None
 
         self.timeout_s = self.DEFAULT_TIMEOUT_S
         self.timeout_multiplier = 2
@@ -236,7 +237,7 @@ class AceSerialManager:
             self.reactor.NOW + delay
         )
 
-    def reconnect(self, delay=3):
+    def reconnect(self, delay=5):
         """Disconnect and schedule reconnection (only if ACE enabled)."""
         if not self._ace_pro_enabled:
             self.gcode.respond_info(
@@ -334,6 +335,16 @@ class AceSerialManager:
                     self.connect_timer = None
 
                 self.start_heartbeat()
+
+                # Call on_connect callback if registered
+                if self.on_connect_callback:
+                    try:
+                        self.on_connect_callback()
+                    except Exception as e:
+                        logging.warning(
+                            f"ACE[{self.instance_num}]: on_connect callback error: {e}"
+                        )
+
                 return True
         except SerialException as e:
             self.gcode.respond_info(f"ACE[{self.instance_num}]: Connection failed: {e}")
@@ -641,6 +652,15 @@ class AceSerialManager:
         """
         self.heartbeat_callback = callback
 
+    def set_on_connect_callback(self, callback):
+        """
+        Set the callback for successful ACE connection/reconnection.
+
+        Args:
+            callback: Function() called after ACE connects
+        """
+        self.on_connect_callback = callback
+
     def start_heartbeat(self):
         """
         Start the heartbeat timer to send periodic status requests.
@@ -773,7 +793,7 @@ class AceSerialManager:
             # Try to reconnect
             if self.connect_timer is None:
                 self.gcode.respond_info(f"[{self.instance_num}] Scheduling reconnect")
-                self.reconnect(3.0)
+                self.reconnect(5.0)
                 return self.reactor.NOW + 1.5
             else:
                 self.gcode.respond_info(

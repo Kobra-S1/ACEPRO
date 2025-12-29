@@ -547,5 +547,56 @@ class TestDispatchResponse:
         assert was_solicited is False
 
 
+class TestOnConnectCallback:
+    """Test on_connect_callback functionality."""
+
+    def setup_method(self):
+        """Create serial manager for callback testing."""
+        with patch('ace.serial_manager.serial'):
+            from ace.serial_manager import AceSerialManager
+            
+            self.mock_gcode = Mock()
+            self.mock_reactor = Mock()
+            
+            self.manager = AceSerialManager(
+                gcode=self.mock_gcode,
+                reactor=self.mock_reactor,
+                instance_num=0,
+                ace_enabled=True
+            )
+
+    def test_on_connect_callback_initially_none(self):
+        """on_connect_callback should start as None."""
+        assert self.manager.on_connect_callback is None
+
+    def test_set_on_connect_callback(self):
+        """set_on_connect_callback should store the callback."""
+        mock_callback = Mock()
+        self.manager.set_on_connect_callback(mock_callback)
+        assert self.manager.on_connect_callback == mock_callback
+
+    @patch('ace.serial_manager.serial')
+    def test_on_connect_callback_called_on_successful_connect(self, mock_serial_module):
+        """on_connect_callback should be called after successful connection."""
+        # Set up mock serial
+        mock_serial = Mock()
+        mock_serial.is_open = True
+        mock_serial_module.Serial.return_value = mock_serial
+        
+        # Register callback
+        mock_callback = Mock()
+        self.manager.set_on_connect_callback(mock_callback)
+        
+        # Mock reactor timer registration
+        self.manager.reactor.NOW = 0.0
+        self.manager.reactor.register_timer = Mock(return_value="timer_handle")
+        
+        # Attempt connection
+        result = self.manager.connect("/dev/ttyACM0", 115200)
+        
+        assert result is True
+        mock_callback.assert_called_once()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

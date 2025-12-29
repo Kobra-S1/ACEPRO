@@ -142,6 +142,7 @@ _enable_feed_assist(slot)                    # Auto-push filament on detection
 _disable_feed_assist(slot)                   # Disable auto-push
 _update_feed_assist(slot)                    # Update active feed assist slot
 _get_current_feed_assist_index()             # Query current feed assist slot
+_on_ace_connect()                            # Restore feed assist after reconnection
 
 # Sensor Monitoring (New in 2024-12)
 _make_sensor_trigger_monitor(sensor_type)    # Create sensor state change monitor
@@ -759,6 +760,7 @@ inventory: List[Dict]               # Slot metadata (runtime copy)
 _feed_assist_index: int             # Current feed assist slot (-1 = none)
 _info: Dict                         # ACE hardware status
 serial_mgr: AceSerialManager        # Communication handler
+feed_assist_active_after_ace_connect: bool  # Restore feed assist on reconnect (config)
 ```
 
 ### Inventory Slot Structure
@@ -840,6 +842,7 @@ total_max_feeding_length: 2600
 pre_cut_retract_length: 2
 heartbeat_interval: 1.0
 max_dryer_temperature: 55
+feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect
 ```
 ### Debug Commands
 

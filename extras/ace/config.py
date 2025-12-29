@@ -61,7 +61,7 @@ def read_ace_config(config):
         "filament_runout_sensor_name_nozzle", "filament_runout_nozzle"
     )
     ace_config["feed_assist_active_after_ace_connect"] = config.getboolean(
-        "feed_assist_active_after_ace_connect", False
+        "feed_assist_active_after_ace_connect", True
     )
     ace_config["rfid_inventory_sync_enabled"] = config.getboolean(
         "rfid_inventory_sync_enabled", True

@@ -25,17 +25,17 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 
 | File | Tests | Description |
 |------|-------|-------------|
-| **test_commands.py** | 88 | All G-code command handlers, instance/slot resolution, parameter validation |
-| **test_manager.py** | 122 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
-| **test_instance.py** | 45 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, inventory write optimization, JSON emission |
-| **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
-| **test_serial_manager.py** | 34 | USB location parsing, CRC calculation, frame parsing, status change detection |
+| **test_commands.py** | 93 | All G-code command handlers, instance/slot resolution, parameter validation |
+| **test_manager.py** | 52 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
+| **test_instance.py** | 61 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, inventory write optimization, feed assist reconnect restoration, JSON emission |
+| **test_config_utils.py** | 51 | Configuration parsing, tool mapping, inventory creation |
+| **test_serial_manager.py** | 37 | USB location parsing, CRC calculation, frame parsing, status change detection, on_connect_callback |
 
 ### Feature-Specific Tests
 
 | File | Tests | Description |
 |------|-------|-------------|
-| **test_endless_spool.py** | 20 | Endless spool match modes (exact/material/next), runout handling |
+| **test_endless_spool.py** | 23 | Endless spool match modes (exact/material/next), runout handling |
 | **test_endless_spool_swap.py** | 7 | Endless spool swap execution, retry logic, candidate search validation |
 | **test_runout_monitor.py** | 51 | Runout detection, sensor polling, toolchange interaction, error handling |
 | **test_retry_logic.py** | 8 | Feed/retract retry behavior, FORBIDDEN handling, backoff logic |
@@ -44,7 +44,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 438 tests** across 13 test modules
+**Total: 444 tests** across 13 test modules
 
 
 ## Running Tests

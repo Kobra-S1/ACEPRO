@@ -12,6 +12,12 @@ from ks_includes.widgets.keypad import Keypad  # noqa: E402
 class Panel(ScreenPanel):
     FILAMENT_TEMP_DEFAULTS = {
         "PLA": 200,
+        "PETG": 235,
+        "ABS": 240,
+        "ASA": 245,
+        "PVA": 185,
+        "HIPS": 230,
+        "PC": 260,
         "PLA+": 210,
         "PLA Glow": 210,
         "PLA High Speed": 215,
@@ -19,13 +25,7 @@ class Panel(ScreenPanel):
         "PLA Matte": 205,
         "PLA SE": 210,
         "PLA Silk": 215,
-        "ABS": 240,
-        "ASA": 245,
-        "PETG": 235,
         "TPU": 210,
-        "PVA": 185,
-        "HIPS": 230,
-        "PC": 260
     }
 
     def material_options(self):
