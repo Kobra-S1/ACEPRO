@@ -975,6 +975,12 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
     manager.runout_monitor.runout_detection_active = False
     manager.gcode.respond_info("ACE: Runout detection disabled for print end")
 
+    do_cut = gcmd.get_int('CUT_TIP', 1)
+
+    if not do_cut:
+        gcmd.respond_info("ACE: Print end - skipping unload (CUT_TIP=0), tool remains loaded")
+        return
+
     try:
         tool_index = get_variable("ace_current_index", -1)
 

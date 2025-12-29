@@ -617,10 +617,18 @@ class TestCommandSmoke:
             assert INSTANCE_MANAGERS[0].smart_unload.called
 
     def test_cmd_ACE_HANDLE_PRINT_END(self, mock_gcmd, setup_mocks):
-        """Test ACE_HANDLE_PRINT_END."""
+        """Test ACE_HANDLE_PRINT_END with CUT_TIP=1 (default)."""
+        mock_gcmd.get_int = Mock(return_value=1)  # CUT_TIP=1
         with patch('ace.commands.get_variable', return_value=0):
             ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
             assert INSTANCE_MANAGERS[0].smart_unload.called
+
+    def test_cmd_ACE_HANDLE_PRINT_END_skip_cut(self, mock_gcmd, setup_mocks):
+        """Test ACE_HANDLE_PRINT_END with CUT_TIP=0 skips unload."""
+        mock_gcmd.get_int = Mock(return_value=0)  # CUT_TIP=0
+        with patch('ace.commands.get_variable', return_value=0):
+            ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
+            assert not INSTANCE_MANAGERS[0].smart_unload.called
 
     def test_cmd_ACE_SMART_LOAD(self, mock_gcmd, setup_mocks):
         """Test ACE_SMART_LOAD."""

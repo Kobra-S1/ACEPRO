@@ -434,7 +434,7 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 | `ACE_SMART_UNLOAD` | Intelligent unload with multi-slot fallback | `[TOOL=<index>]` |
 | `ACE_SMART_LOAD` | Load all non-empty slots to RMS sensor | - |
 | `ACE_FULL_UNLOAD` | Complete unload until slot empty | `TOOL=<index>` or `TOOL=ALL` |
-| `_ACE_HANDLE_PRINT_END` | End-of-print sequence (retract, cut, store) | Called by END_PRINT |
+| `_ACE_HANDLE_PRINT_END` | End-of-print cleanup (disable runout, optionally unload) | `[CUT_TIP=1]` (1=unload+cut, 0=keep loaded) |
 
 ### Manual Feed/Retract Operations
 
