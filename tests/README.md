@@ -27,7 +27,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 |------|-------|-------------|
 | **test_commands.py** | 88 | All G-code command handlers, instance/slot resolution, parameter validation |
 | **test_manager.py** | 122 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
-| **test_instance.py** | 37 | AceInstance initialization, configuration, serial communication, RFID query tracking, JSON emission |
+| **test_instance.py** | 42 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, JSON emission |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
 | **test_serial_manager.py** | 34 | USB location parsing, CRC calculation, frame parsing, status change detection |
 
@@ -44,89 +44,8 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 430 tests** across 13 test modules
+**Total: 435 tests** across 13 test modules
 
-## Critical Regression Tests
-
-### Dryer Status Field Validation
-
-Tests `test_cmd_ACE_GET_STATUS_includes_dryer_status` and `test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped` validate that the ACE_GET_STATUS command includes dryer status information in its JSON response.
-
-**Why this is critical:**
-- KlipperScreen dryer panel relies on these fields to display live temperature and remaining time
-- The `dryer_status` field was added to support real-time dryer monitoring
-- Without these fields, the UI will show zeros and incorrect status
-
-**Validated fields:**
-```json
-{
-  "instance": 0,
-  "status": "ready",
-  "temp": 45,  // Current dryer temperature (required for UI)
-  "dryer_status": {  // Required field for dryer panel
-    "status": "drying",  // Dryer state: "drying"/"stop"/"heater_err"
-    "target_temp": 45,  // Target temperature setting
-    "duration": 240,  // Total dry duration in minutes
-    "remain_time": 14000  // Remaining seconds (for countdown display)
-  }
-}
-```
-
-**What breaks without these tests:**
-- Future code changes might remove `dryer_status` from the response thinking it's unused
-- KlipperScreen dryer panel would show "stopped" and 0°C for all dryers
-- Users would lose visibility into dryer operation status
-
-**Test coverage:**
-- `test_cmd_ACE_GET_STATUS_includes_dryer_status`: Validates full structure when dryer is active
-- `test_cmd_ACE_GET_STATUS_dryer_status_empty_when_stopped`: Validates field exists even when dryer is stopped
-
-These tests ensure the critical communication path between Klipper and KlipperScreen dryer UI remains functional.
-
-### RFID Query Tracking Tests
-
-Tests in `TestRfidQueryTracking` class (`test_instance.py`) validate that RFID data queries are sent exactly once per spool insertion, preventing console spam while ensuring data is always fetched when needed.
-
-**Why this is critical:**
-- ACE heartbeat runs at 1Hz - without guards, RFID queries would flood the console every second
-- Async callbacks complete after next heartbeat starts - need to track in-flight queries
-- Failed queries must not cause infinite retry loops
-- Spool removal/reinsertion must allow fresh queries
-
-**Problem solved:**
-```
-# Without tracking (BAD - floods console):
-ACE[0]: Slot 0 querying full RFID data...  # Every heartbeat!
-ACE[0]: Slot 1 querying full RFID data...
-ACE[0]: Slot 2 querying full RFID data...
-ACE[0]: Slot 3 querying full RFID data...
-# Repeats forever...
-
-# With tracking (GOOD - one query per spool):
-ACE[0]: Slot 0 querying full RFID data...  # Once at startup
-ACE[0]: Slot 0 RFID full data -> sku=..., temp=215°C
-# No more queries until spool is removed and reinserted
-```
-
-**Test coverage (10 tests):**
-
-| Test | What it proves |
-|------|----------------|
-| `test_init_creates_empty_tracking_sets` | Both tracking sets start empty |
-| `test_rfid_query_only_sent_once_per_slot` | First heartbeat triggers query, subsequent don't spam |
-| `test_query_not_sent_when_already_pending` | No duplicate queries while one is in-flight |
-| `test_empty_slot_clears_query_tracking` | Removing spool clears both tracking sets |
-| `test_reinserted_spool_triggers_new_query` | After empty→ready, query is allowed again |
-| `test_rfid_query_not_blocked_after_callback_completes` | System doesn't get stuck after success |
-| `test_rfid_query_not_blocked_after_failed_callback` | System doesn't get stuck after failure |
-| `test_query_skipped_when_already_has_rfid_data` | No unnecessary queries if data present |
-| `test_multiple_slots_tracked_independently` | Slot 0 tracking doesn't affect slot 1 |
-| `test_query_rfid_full_data_guards_prevent_duplicate` | Direct test of pending guard |
-
-**What breaks without these tests:**
-- Code changes might remove tracking sets thinking they're unused → console spam returns
-- Changes to callback logic might leave pending flag set → queries never happen
-- Changes to empty slot handling might not clear flags → stale data on spool swap
 
 ## Running Tests
 

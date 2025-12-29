@@ -500,6 +500,166 @@ class TestStatusCallbacks(unittest.TestCase):
         
         self.assertFalse(instance.is_ready())
 
+    @patch('ace.instance.AceSerialManager')
+    def test_non_rfid_spool_gets_default_material_and_temp(self, mock_serial_mgr_class):
+        """Non-RFID spool (rfid=0) in empty slot gets default material/temp/color."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Slot starts empty with no metadata
+        self.assertEqual(instance.inventory[0]['status'], 'empty')
+        self.assertEqual(instance.inventory[0]['material'], '')
+        self.assertEqual(instance.inventory[0]['color'], [0, 0, 0])
+        self.assertEqual(instance.inventory[0]['temp'], 0)
+
+        # Non-RFID spool inserted (rfid=0)
+        response = {
+            'result': {
+                'slots': [
+                    {
+                        'index': 0,
+                        'status': 'ready',
+                        'rfid': 0,  # Non-RFID spool
+                    }
+                ]
+            }
+        }
+
+        instance._status_update_callback(response)
+
+        slot = instance.inventory[0]
+        self.assertEqual(slot['status'], 'ready')
+        # Should get defaults: <Unknown>, 225°C, gray
+        self.assertEqual(slot['material'], '<Unknown>')
+        self.assertEqual(slot['temp'], 225)
+        self.assertEqual(slot['color'], [128, 128, 128])
+        self.assertFalse(slot['rfid'])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_non_rfid_spool_no_rfid_key_gets_defaults(self, mock_serial_mgr_class):
+        """Spool with no rfid key in response gets default material/temp/color."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Non-RFID spool inserted (no rfid key at all)
+        response = {
+            'result': {
+                'slots': [
+                    {
+                        'index': 0,
+                        'status': 'ready',
+                        # No 'rfid' key - simulates older firmware or non-RFID detection
+                    }
+                ]
+            }
+        }
+
+        instance._status_update_callback(response)
+
+        slot = instance.inventory[0]
+        self.assertEqual(slot['status'], 'ready')
+        self.assertEqual(slot['material'], '<Unknown>')
+        self.assertEqual(slot['temp'], 225)
+        self.assertEqual(slot['color'], [128, 128, 128])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_empty_to_ready_preserves_saved_metadata(self, mock_serial_mgr_class):
+        """Slot with saved metadata preserves it when spool reinserted."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Pre-populate inventory with saved metadata (simulates persistence)
+        instance.inventory[0].update({
+            'status': 'empty',
+            'material': 'PETG',
+            'color': [100, 150, 200],
+            'temp': 240,
+            'rfid': False,
+        })
+
+        # Non-RFID spool inserted
+        response = {
+            'result': {
+                'slots': [
+                    {
+                        'index': 0,
+                        'status': 'ready',
+                        'rfid': 0,
+                    }
+                ]
+            }
+        }
+
+        instance._status_update_callback(response)
+
+        slot = instance.inventory[0]
+        self.assertEqual(slot['status'], 'ready')
+        # Should preserve saved values, NOT apply defaults
+        self.assertEqual(slot['material'], 'PETG')
+        self.assertEqual(slot['temp'], 240)
+        self.assertEqual(slot['color'], [100, 150, 200])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_rfid_sync_disabled_with_non_rfid_spool_gets_defaults(self, mock_serial_mgr_class):
+        """Non-RFID spool still gets defaults even when RFID sync is disabled."""
+        INSTANCE_MANAGERS.clear()
+        ace_config = dict(self.ace_config)
+        ace_config['rfid_inventory_sync_enabled'] = False
+        instance = AceInstance(0, ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Non-RFID spool inserted (rfid=0)
+        response = {
+            'result': {
+                'slots': [
+                    {
+                        'index': 0,
+                        'status': 'ready',
+                        'rfid': 0,  # Non-RFID spool
+                    }
+                ]
+            }
+        }
+
+        instance._status_update_callback(response)
+
+        slot = instance.inventory[0]
+        self.assertEqual(slot['status'], 'ready')
+        # Should still get defaults because it's NOT an RFID spool
+        self.assertEqual(slot['material'], '<Unknown>')
+        self.assertEqual(slot['temp'], 225)
+        self.assertEqual(slot['color'], [128, 128, 128])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_default_values_match_class_constants(self, mock_serial_mgr_class):
+        """Verify default values match AceInstance class constants."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Verify the class constants
+        self.assertEqual(instance.DEFAULT_MATERIAL, '<Unknown>')
+        self.assertEqual(instance.DEFAULT_TEMP, 225)
+        self.assertEqual(instance.DEFAULT_COLOR, [128, 128, 128])
+
+        # Insert non-RFID spool and verify defaults are applied
+        response = {
+            'result': {
+                'slots': [
+                    {'index': 0, 'status': 'ready', 'rfid': 0}
+                ]
+            }
+        }
+        instance._status_update_callback(response)
+
+        slot = instance.inventory[0]
+        self.assertEqual(slot['material'], instance.DEFAULT_MATERIAL)
+        self.assertEqual(slot['temp'], instance.DEFAULT_TEMP)
+        self.assertEqual(slot['color'], list(instance.DEFAULT_COLOR))
+
 
 class TestFeedRetractOperations(unittest.TestCase):
     """Test feed and retract operations."""

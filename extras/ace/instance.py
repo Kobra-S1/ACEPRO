@@ -25,9 +25,9 @@ class AceInstance:
     """Manages a single physical ACE Pro unit with 4 slots."""
 
     # Defaults for slots that report ready but provide no metadata
-    DEFAULT_MATERIAL = "PLA"
-    DEFAULT_COLOR = [255, 255, 255]
-    DEFAULT_TEMP = 200
+    DEFAULT_MATERIAL = "<Unknown>"
+    DEFAULT_COLOR = [128, 128, 128]
+    DEFAULT_TEMP = 225
     
     # Material temperature defaults (from RFID tags)
     MATERIAL_TEMPS = {
