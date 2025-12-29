@@ -790,12 +790,25 @@ def cmd_ACE_DISABLE_ENDLESS_SPOOL(gcmd):
 
 
 def cmd_ACE_RESET_PERSISTENT_INVENTORY(gcmd):
-    """Reset persistent filament inventory to empty slots. INSTANCE= required."""
-    ace = ace_get_instance(gcmd)
-    ace.reset_persistent_inventory()
-    manager = ace_get_manager(ace.instance_num)
-    manager._sync_inventory_to_persistent(ace.instance_num)
-    gcmd.respond_info(f"ACE[{ace.instance_num}]: Inventory reset to empty")
+    """Reset persistent filament inventory to empty slots. INSTANCE= for single, omit for all."""
+    instance_num = gcmd.get_int("INSTANCE", default=None)
+    
+    if instance_num is not None:
+        # Reset specific instance
+        ace = ace_get_instance(gcmd)
+        ace.reset_persistent_inventory()
+        manager = ace_get_manager(ace.instance_num)
+        manager._sync_inventory_to_persistent(ace.instance_num)
+        gcmd.respond_info(f"ACE[{ace.instance_num}]: Inventory reset to empty")
+    else:
+        # Reset ALL instances
+        manager = ace_get_manager()
+        for inst_num in sorted(ACE_INSTANCES.keys()):
+            ace = ACE_INSTANCES[inst_num]
+            ace.reset_persistent_inventory()
+            manager._sync_inventory_to_persistent(inst_num)
+            gcmd.respond_info(f"ACE[{inst_num}]: Inventory reset to empty")
+        gcmd.respond_info(f"All {len(ACE_INSTANCES)} ACE instances reset")
 
 
 def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):

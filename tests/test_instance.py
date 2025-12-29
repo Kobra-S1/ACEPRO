@@ -530,8 +530,8 @@ class TestStatusCallbacks(unittest.TestCase):
 
         slot = instance.inventory[0]
         self.assertEqual(slot['status'], 'ready')
-        # Should get defaults: <Unknown>, 225°C, gray
-        self.assertEqual(slot['material'], '<Unknown>')
+        # Should get defaults: Unknown, 225°C, gray
+        self.assertEqual(slot['material'], 'Unknown')
         self.assertEqual(slot['temp'], 225)
         self.assertEqual(slot['color'], [128, 128, 128])
         self.assertFalse(slot['rfid'])
@@ -560,7 +560,7 @@ class TestStatusCallbacks(unittest.TestCase):
 
         slot = instance.inventory[0]
         self.assertEqual(slot['status'], 'ready')
-        self.assertEqual(slot['material'], '<Unknown>')
+        self.assertEqual(slot['material'], 'Unknown')
         self.assertEqual(slot['temp'], 225)
         self.assertEqual(slot['color'], [128, 128, 128])
 
@@ -629,7 +629,7 @@ class TestStatusCallbacks(unittest.TestCase):
         slot = instance.inventory[0]
         self.assertEqual(slot['status'], 'ready')
         # Should still get defaults because it's NOT an RFID spool
-        self.assertEqual(slot['material'], '<Unknown>')
+        self.assertEqual(slot['material'], 'Unknown')
         self.assertEqual(slot['temp'], 225)
         self.assertEqual(slot['color'], [128, 128, 128])
 
@@ -641,7 +641,7 @@ class TestStatusCallbacks(unittest.TestCase):
         INSTANCE_MANAGERS[0] = Mock()
 
         # Verify the class constants
-        self.assertEqual(instance.DEFAULT_MATERIAL, '<Unknown>')
+        self.assertEqual(instance.DEFAULT_MATERIAL, 'Unknown')
         self.assertEqual(instance.DEFAULT_TEMP, 225)
         self.assertEqual(instance.DEFAULT_COLOR, [128, 128, 128])
 
@@ -659,6 +659,115 @@ class TestStatusCallbacks(unittest.TestCase):
         self.assertEqual(slot['material'], instance.DEFAULT_MATERIAL)
         self.assertEqual(slot['temp'], instance.DEFAULT_TEMP)
         self.assertEqual(slot['color'], list(instance.DEFAULT_COLOR))
+
+    @patch('ace.instance.AceSerialManager')
+    def test_inventory_write_only_on_change(self, mock_serial_mgr_class):
+        """Verify inventory is only written when values actually change."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Set up initial state with RFID spool
+        instance.inventory[0] = {
+            'status': 'ready',
+            'color': [255, 0, 0],
+            'material': 'PLA',
+            'temp': 200,
+            'rfid': True
+        }
+        
+        # Store reference to original dict to detect if it's modified
+        original_inventory = instance.inventory[0].copy()
+
+        # Send identical status - should NOT trigger write
+        response = {
+            'result': {
+                'slots': [
+                    {'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'PLA', 'color': [255, 0, 0]}
+                ]
+            }
+        }
+        instance._status_update_callback(response)
+
+        # Inventory should remain unchanged (same values)
+        self.assertEqual(instance.inventory[0]['status'], original_inventory['status'])
+        self.assertEqual(instance.inventory[0]['color'], original_inventory['color'])
+        self.assertEqual(instance.inventory[0]['material'], original_inventory['material'])
+        self.assertEqual(instance.inventory[0]['temp'], original_inventory['temp'])
+        self.assertEqual(instance.inventory[0]['rfid'], original_inventory['rfid'])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_inventory_write_all_fields_on_change(self, mock_serial_mgr_class):
+        """Verify ALL inventory fields are written correctly when a change occurs."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Set up initial empty state
+        instance.inventory[0] = {
+            'status': 'empty',
+            'color': [0, 0, 0],
+            'material': '',
+            'temp': 0,
+            'rfid': False
+        }
+
+        # Send status with new RFID spool - should trigger write of ALL fields
+        response = {
+            'result': {
+                'slots': [
+                    {'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'PETG', 'color': [0, 255, 0]}
+                ]
+            }
+        }
+        instance._status_update_callback(response)
+
+        # Verify ALL fields were written
+        slot = instance.inventory[0]
+        self.assertEqual(slot['status'], 'ready')  # status updated
+        self.assertEqual(slot['color'], [0, 255, 0])  # color updated
+        self.assertEqual(slot['material'], 'PETG')  # material updated
+        self.assertEqual(slot['temp'], 235)  # PETG lookup temp
+        self.assertEqual(slot['rfid'], True)  # rfid flag updated
+
+    @patch('ace.instance.AceSerialManager')
+    def test_inventory_write_detects_each_field_change(self, mock_serial_mgr_class):
+        """Verify each individual field change triggers a proper write."""
+        INSTANCE_MANAGERS.clear()
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        # Test status change
+        instance.inventory[0] = {'status': 'empty', 'color': [0,0,0], 'material': '', 'temp': 0, 'rfid': False}
+        response = {'result': {'slots': [{'index': 0, 'status': 'ready', 'rfid': 0}]}}
+        instance._status_update_callback(response)
+        self.assertEqual(instance.inventory[0]['status'], 'ready')
+
+        # Test color change (non-RFID with manual setup)
+        instance.inventory[0] = {'status': 'ready', 'color': [0,0,0], 'material': 'PLA', 'temp': 200, 'rfid': False}
+        # Force a color update by simulating RFID with different color
+        instance.inventory[0]['color'] = [100, 100, 100]  # Change color directly
+        response = {'result': {'slots': [{'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'PLA', 'color': [200, 200, 200]}]}}
+        instance._status_update_callback(response)
+        self.assertEqual(instance.inventory[0]['color'], [200, 200, 200])
+
+        # Test material change
+        instance.inventory[0] = {'status': 'ready', 'color': [255,0,0], 'material': 'PLA', 'temp': 200, 'rfid': True}
+        response = {'result': {'slots': [{'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'ABS', 'color': [255, 0, 0]}]}}
+        instance._status_update_callback(response)
+        self.assertEqual(instance.inventory[0]['material'], 'ABS')
+
+        # Test temp change (via material lookup)
+        instance.inventory[0] = {'status': 'ready', 'color': [255,0,0], 'material': 'PLA', 'temp': 200, 'rfid': True}
+        response = {'result': {'slots': [{'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'PETG', 'color': [255, 0, 0]}]}}
+        instance._status_update_callback(response)
+        self.assertEqual(instance.inventory[0]['temp'], 235)  # PETG temp
+
+        # Test rfid flag change
+        instance.inventory[0] = {'status': 'ready', 'color': [255,0,0], 'material': 'PLA', 'temp': 200, 'rfid': False}
+        response = {'result': {'slots': [{'index': 0, 'status': 'ready', 'rfid': 2, 'type': 'PLA', 'color': [255, 0, 0]}]}}
+        instance._status_update_callback(response)
+        self.assertEqual(instance.inventory[0]['rfid'], True)
 
 
 class TestFeedRetractOperations(unittest.TestCase):

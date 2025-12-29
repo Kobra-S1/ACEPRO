@@ -530,7 +530,7 @@ Track filament materials, colors, and temperatures for intelligent toolchanges a
 **RFID handling:** When a slot transitions to `ready` and ACE reports `rfid=2` with non-empty material and color, the driver copies that material/color into the slot inventory and automatically sets temperature based on material type (e.g., PLA→200°C, PLA High Speed→215°C, ABS→240°C), persists it, and emits a `// {"instance":..., "slots":...}` notify line. KlipperScreen listens for those notify lines and refreshes immediately, so the panel updates without pressing Refresh. RFID sync can be toggled with `ACE_ENABLE_RFID_SYNC` / `ACE_DISABLE_RFID_SYNC` (per-instance or all). Black RFID tag colors (0,0,0) are accepted and overwrite manual values; when RFID sync is enabled and a slot has an RFID spool, the KlipperScreen config dialog locks manual material/color changes.
 
 **Non-RFID spools:** When a spool without an RFID tag is inserted into an empty slot, the driver automatically applies default metadata to make the slot immediately usable:
-- **Material**: `<Unknown>` - clearly indicates unconfigured spool, won't match in endless spool "exact" or "material" modes
+- **Material**: `Unknown` - clearly indicates unconfigured spool, won't match in endless spool "exact" or "material" modes
 - **Color**: Gray `[128, 128, 128]` - matches UI empty slot color, visually indicates unconfigured
 - **Temperature**: 225°C - safe middle-ground for most materials
 

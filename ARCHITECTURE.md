@@ -116,7 +116,7 @@ inventory: List[Dict]               # Per-slot: material, color, temp, status
 serial_mgr: AceSerialManager        # Communication handler
 
 # Defaults for non-RFID spools (applied when slot becomes ready with no metadata)
-DEFAULT_MATERIAL = "<Unknown>"      # Won't match in endless spool exact/material modes
+DEFAULT_MATERIAL = "Unknown"       # Won't match in endless spool exact/material modes
 DEFAULT_COLOR = [128, 128, 128]     # Gray - matches UI empty slot color
 DEFAULT_TEMP = 225                  # Safe middle-ground temperature
 ```

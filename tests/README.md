@@ -27,7 +27,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 |------|-------|-------------|
 | **test_commands.py** | 88 | All G-code command handlers, instance/slot resolution, parameter validation |
 | **test_manager.py** | 122 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
-| **test_instance.py** | 42 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, JSON emission |
+| **test_instance.py** | 45 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, inventory write optimization, JSON emission |
 | **test_config_utils.py** | 30 | Configuration parsing, tool mapping, inventory creation |
 | **test_serial_manager.py** | 34 | USB location parsing, CRC calculation, frame parsing, status change detection |
 
@@ -44,7 +44,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 435 tests** across 13 test modules
+**Total: 438 tests** across 13 test modules
 
 
 ## Running Tests
@@ -460,6 +460,34 @@ test_config_default_is_average
 test_config_accepts_min
 test_config_accepts_max
 test_config_invalid_value_defaults_to_average
+```
+
+### Instance Tests (`test_instance.py`)
+
+AceInstance core functionality:
+
+```python
+# Status callback handling
+test_status_callback_updates_info
+test_status_callback_with_invalid_response
+test_status_callback_handles_missing_result
+
+# Non-RFID default handling
+test_non_rfid_spool_gets_default_material_and_temp
+test_non_rfid_spool_no_rfid_key_gets_defaults
+test_empty_to_ready_preserves_saved_metadata
+test_rfid_sync_disabled_with_non_rfid_spool_gets_defaults
+test_default_values_match_class_constants
+
+# Inventory write optimization
+test_inventory_write_only_on_change       # Skip writes when data unchanged
+test_inventory_write_all_fields_on_change # All 5 fields written correctly
+test_inventory_write_detects_each_field_change  # Each field triggers write
+
+# RFID query tracking
+test_rfid_query_sets_pending_flag
+test_rfid_query_tracks_attempted
+test_rfid_query_clears_on_empty_slot
 ```
 
 ### Serial Manager Tests (`test_serial_manager.py`)

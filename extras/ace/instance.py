@@ -25,7 +25,7 @@ class AceInstance:
     """Manages a single physical ACE Pro unit with 4 slots."""
 
     # Defaults for slots that report ready but provide no metadata
-    DEFAULT_MATERIAL = "<Unknown>"
+    DEFAULT_MATERIAL = "Unknown"
     DEFAULT_COLOR = [128, 128, 128]
     DEFAULT_TEMP = 225
     
@@ -1355,12 +1355,18 @@ class AceInstance:
                     else:
                         updated_rfid = saved_rfid
 
-                    # Update inventory with new status, keep saved metadata
-                    self.inventory[idx]["status"] = new_status
-                    self.inventory[idx]["color"] = updated_color
-                    self.inventory[idx]["material"] = updated_material
-                    self.inventory[idx]["temp"] = updated_temp
-                    self.inventory[idx]["rfid"] = updated_rfid
+                    # Only write to inventory if values actually changed
+                    inv = self.inventory[idx]
+                    if (inv.get("status") != new_status or
+                        inv.get("color") != updated_color or
+                        inv.get("material") != updated_material or
+                        inv.get("temp") != updated_temp or
+                        inv.get("rfid") != updated_rfid):
+                        inv["status"] = new_status
+                        inv["color"] = updated_color
+                        inv["material"] = updated_material
+                        inv["temp"] = updated_temp
+                        inv["rfid"] = updated_rfid
 
         # Persist changes if any status changed
         if inventory_changed:
