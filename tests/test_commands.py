@@ -886,9 +886,86 @@ class TestCommandSmoke:
         assert mock_gcmd.respond_info.called
 
     def test_cmd_ACE_DEBUG_SENSORS(self, mock_gcmd, setup_mocks):
-        """Test ACE_DEBUG_SENSORS."""
+        """Test ACE_DEBUG_SENSORS basic functionality."""
         ace.commands.cmd_ACE_DEBUG_SENSORS(mock_gcmd)
         assert mock_gcmd.respond_info.called
+
+    def test_cmd_ACE_DEBUG_SENSORS_with_rdm(self, mock_gcmd, setup_mocks):
+        """Test ACE_DEBUG_SENSORS with RDM sensor present."""
+        from ace.config import SENSOR_TOOLHEAD, SENSOR_RDM
+        
+        # Mock manager with RDM sensor
+        manager = INSTANCE_MANAGERS[0]
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager.get_switch_state = Mock(side_effect=lambda sensor: {
+            SENSOR_TOOLHEAD: True,
+            SENSOR_RDM: False
+        }.get(sensor, False))
+        manager.is_filament_path_free = Mock(return_value=True)
+        
+        ace.commands.cmd_ACE_DEBUG_SENSORS(mock_gcmd)
+        
+        # Verify all sensors were queried
+        assert manager.get_switch_state.call_count == 2  # Toolhead + RDM
+        manager.get_switch_state.assert_any_call(SENSOR_TOOLHEAD)
+        manager.get_switch_state.assert_any_call(SENSOR_RDM)
+        assert manager.is_filament_path_free.called
+        
+        # Check output includes RDM
+        call_args = [call[0][0] for call in mock_gcmd.respond_info.call_args_list]
+        output = "\n".join(call_args)
+        assert "Toolhead Sensor:" in output
+        assert "RDM Sensor:" in output
+        assert "Path Free:" in output
+
+    def test_cmd_ACE_DEBUG_SENSORS_without_rdm(self, mock_gcmd, setup_mocks):
+        """Test ACE_DEBUG_SENSORS without RDM sensor (should skip RDM output)."""
+        from ace.config import SENSOR_TOOLHEAD, SENSOR_RDM
+        
+        # Mock manager without RDM sensor
+        manager = INSTANCE_MANAGERS[0]
+        manager.has_rdm_sensor = Mock(return_value=False)
+        manager.get_switch_state = Mock(side_effect=lambda sensor: {
+            SENSOR_TOOLHEAD: True
+        }.get(sensor, False))
+        manager.is_filament_path_free = Mock(return_value=False)
+        
+        ace.commands.cmd_ACE_DEBUG_SENSORS(mock_gcmd)
+        
+        # Verify only toolhead sensor was queried, not RDM
+        assert manager.get_switch_state.call_count == 1  # Only Toolhead
+        manager.get_switch_state.assert_called_with(SENSOR_TOOLHEAD)
+        assert manager.is_filament_path_free.called
+        
+        # Check output does NOT include RDM
+        call_args = [call[0][0] for call in mock_gcmd.respond_info.call_args_list]
+        output = "\n".join(call_args)
+        assert "Toolhead Sensor:" in output
+        assert "RDM Sensor:" not in output  # Should not be present
+        assert "Path Free:" in output
+
+    def test_cmd_ACE_DEBUG_SENSORS_sensor_states(self, mock_gcmd, setup_mocks):
+        """Test ACE_DEBUG_SENSORS shows correct sensor states."""
+        from ace.config import SENSOR_TOOLHEAD, SENSOR_RDM
+        
+        # Mock specific sensor states
+        manager = INSTANCE_MANAGERS[0]
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager.get_switch_state = Mock(side_effect=lambda sensor: {
+            SENSOR_TOOLHEAD: False,  # CLEAR
+            SENSOR_RDM: True  # TRIGGERED
+        }.get(sensor, False))
+        manager.is_filament_path_free = Mock(return_value=True)  # YES
+        
+        ace.commands.cmd_ACE_DEBUG_SENSORS(mock_gcmd)
+        
+        call_args = [call[0][0] for call in mock_gcmd.respond_info.call_args_list]
+        output = "\n".join(call_args)
+        
+        # Verify correct state labels
+        assert "Toolhead Sensor: CLEAR" in output
+        assert "RDM Sensor: TRIGGERED" in output
+        assert "Path Free: YES" in output
 
     def test_cmd_ACE_DEBUG_STATE(self, mock_gcmd, setup_mocks):
         """Test ACE_DEBUG_STATE."""

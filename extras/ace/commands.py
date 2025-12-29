@@ -1233,39 +1233,38 @@ def cmd_ACE_SET_FEED_SPEED(gcmd):
 
 
 def cmd_ACE_DEBUG_SENSORS(gcmd):
-    """Debug: Print all sensor states (toolhead, RDM, path-free) for all instances."""
+    """Debug: Print all sensor states (toolhead, RDM, path-free) - sensors are shared across all ACE instances."""
     try:
         if not INSTANCE_MANAGERS:
             gcmd.respond_info("ACE: No instances configured")
             return
 
-        gcmd.respond_info("=== ACE Sensor Debug Info ===")
+        gcmd.respond_info("=== Printer Filament Sensor Debug Info ===")
 
-        def debug_instance_sensors(instance_num, mgr, instance):
-            gcmd.respond_info(f"\nACE[{instance_num}] Sensors:")
+        # Get any manager - sensors are shared across all instances
+        manager = list(INSTANCE_MANAGERS.values())[0]
 
+        try:
+            toolhead_state = manager.get_switch_state(SENSOR_TOOLHEAD)
+            state_str = "TRIGGERED" if toolhead_state else "CLEAR"
+            gcmd.respond_info(f"Toolhead Sensor: {state_str}")
+        except Exception as e:
+            gcmd.respond_info(f"Toolhead Sensor: ERROR - {e}")
+
+        if manager.has_rdm_sensor():
             try:
-                toolhead_state = mgr.get_switch_state(SENSOR_TOOLHEAD)
-                state_str = "TRIGGERED" if toolhead_state else "CLEAR"
-                gcmd.respond_info(f"  Toolhead Sensor: {state_str}")
-            except Exception as e:
-                gcmd.respond_info(f"  Toolhead Sensor: ERROR - {e}")
-
-            try:
-                rdm_state = mgr.get_switch_state(SENSOR_RDM)
+                rdm_state = manager.get_switch_state(SENSOR_RDM)
                 state_str = "TRIGGERED" if rdm_state else "CLEAR"
-                gcmd.respond_info(f"  RDM Sensor: {state_str}")
+                gcmd.respond_info(f"RDM Sensor: {state_str}")
             except Exception as e:
-                gcmd.respond_info(f"  RDM Sensor: ERROR - {e}")
+                gcmd.respond_info(f"RDM Sensor: ERROR - {e}")
 
-            try:
-                path_free = mgr.is_filament_path_free()
-                state_str = "YES" if path_free else "NO"
-                gcmd.respond_info(f"  Path Free: {state_str}")
-            except Exception as e:
-                gcmd.respond_info(f"  Path Free: ERROR - {e}")
-
-        for_each_instance(debug_instance_sensors)
+        try:
+            path_free = manager.is_filament_path_free()
+            state_str = "YES" if path_free else "NO"
+            gcmd.respond_info(f"Path Free: {state_str}")
+        except Exception as e:
+            gcmd.respond_info(f"Path Free: ERROR - {e}")
 
         gcmd.respond_info("\n=== End Sensor Debug ===")
 

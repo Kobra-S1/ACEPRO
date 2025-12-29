@@ -386,6 +386,37 @@ filament_runout_sensor_name_nozzle: filament_runout_nozzle
 
 The RunoutMonitor component will pause printing if filament runs out during a job when these sensors are configured (detected by filament_runout_sensor_name_nozzle).
 
+#### Understanding Sensor States
+
+The filament runout sensors in Mainsail/Fluidd show different states depending on filament position:
+
+- **"Runout Nozzle"** - Sensor at the toolhead (close to hotend)
+- **"Runout Rdm"** - Sensor at the back of printer (after the 4-in-1 / 8-in-1 filament hub)
+
+**Normal States:**
+
+| Filament State | Runout Nozzle | Runout Rdm | Meaning |
+|----------------|---------------|------------|---------|
+| Fully unloaded | empty | empty | No filament in path - ready to load |
+| Loaded to nozzle | **detected** | **detected** | Filament loaded from ACE into toolhead |
+
+**Troubleshooting:**
+
+- ⚠️ **Both show "detected" when fully unloaded?**
+  - Sensors may have stuck/broken filament debris
+  - Clean sensors before attempting load/unload operations
+  - Use `ACE_DEBUG_SENSORS` to verify sensor states
+
+- ⚠️ **"Detected" at nozzle but "empty" at RDM?**
+  - Broken filament path (filament stuck at nozzle but path is broken)
+  - System will **refuse to load** in this state to prevent jams
+  - Manually retract stuck filament or use `ACE_CHANGE_TOOL TOOL=-1` to force unload
+
+**Debug Command:**
+```gcode
+ACE_DEBUG_SENSORS  # Shows current state of all sensors
+```
+
 ### Customization
 
 To customize settings for your specific hardware:
