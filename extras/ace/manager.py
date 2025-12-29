@@ -162,6 +162,13 @@ class AceManager:
 
         self.toolchange_in_progress = False
 
+        # Connection health monitoring state
+        self._connection_supervision_enabled = self.ace_config.get(
+            "ace_connection_supervision", True
+        )
+        self._connection_issue_shown = False  # Track if dialog is currently shown
+        self._last_connection_status = {}     # Track per-instance connection state
+
         # Register event handlers
         handler = self.printer.register_event_handler
         handler("klippy:ready", self._handle_ready)
@@ -1115,18 +1122,194 @@ class AceManager:
 
     def _monitor_ace_state(self, eventtime):
         """
-        Monitor ACE Pro enable/disable state (1 second interval).
+        Monitor ACE Pro enable/disable state and connection health (1 second interval).
 
         Checks if ACE Pro unit is enabled/disabled via output pin and
-        updates sensor state accordingly.
+        updates sensor state accordingly. Also monitors connection stability
+        and pauses print if connection is unstable during printing.
         """
         try:
             self.update_ace_support_active_state()
+
+            # Check connection health for all instances (if supervision enabled)
+            if self._ace_pro_enabled and self._connection_supervision_enabled:
+                self._check_connection_health(eventtime)
+
         except Exception as e:
             self.gcode.respond_info(f"ACE: Error in ACE state monitor: {e}")
 
         # Return next check time (1 second from now)
         return eventtime + 1.0
+
+    def _check_connection_health(self, eventtime):
+        """
+        Check connection stability for all ACE instances.
+
+        If any instance has an unstable connection:
+        - During printing: Pause print and show dialog with resume/cancel
+        - When idle: Show informational dialog
+        """
+        unstable_instances = []
+
+        for instance in self.instances:
+            status = instance.serial_mgr.get_connection_status()
+            instance_num = instance.instance_num
+
+            # Track if connection state changed
+            prev_status = self._last_connection_status.get(instance_num, {})
+            was_stable = prev_status.get("stable", True)
+            is_stable = status["stable"]
+
+            self._last_connection_status[instance_num] = status
+
+            # Detect instability - only flag as unstable when reconnect threshold exceeded
+            # This avoids false alarms for brief disconnects that quickly recover
+            reconnect_threshold = instance.serial_mgr.INSTABILITY_THRESHOLD
+            
+            if status["recent_reconnects"] >= reconnect_threshold:
+                unstable_instances.append({
+                    "instance": instance_num,
+                    "connected": status["connected"],
+                    "recent_reconnects": status["recent_reconnects"],
+                    "time_connected": status["time_connected"],
+                })
+
+            # Log when connection becomes stable again
+            if is_stable and not was_stable and prev_status:
+                self.gcode.respond_info(
+                    f"ACE[{instance_num}]: Connection stabilized "
+                    f"(connected for {status['time_connected']:.0f}s)"
+                )
+                # Clear dialog if all instances are now stable
+                if self._connection_issue_shown:
+                    all_stable = all(
+                        self._last_connection_status.get(i.instance_num, {}).get("stable", True)
+                        for i in self.instances
+                    )
+                    if all_stable:
+                        self._close_connection_dialog()
+                        self._connection_issue_shown = False
+
+        # If we have unstable instances and haven't shown dialog yet
+        if unstable_instances and not self._connection_issue_shown:
+            self._handle_connection_issue(unstable_instances, eventtime)
+
+    def _handle_connection_issue(self, unstable_instances, eventtime):
+        """
+        Handle detected connection issues.
+
+        Args:
+            unstable_instances: List of dicts with instance connection info
+            eventtime: Current event time
+        """
+        # Check if we're printing
+        print_stats = self.printer.lookup_object("print_stats", None)
+        is_printing = False
+        if print_stats:
+            try:
+                stats = print_stats.get_status(eventtime)
+                state = (stats.get("state") or "").lower()
+                is_printing = state in ["printing", "paused"]
+            except Exception:
+                pass
+
+        # Build message
+        instance_details = []
+        for info in unstable_instances:
+            if not info["connected"]:
+                status = "disconnected"
+            elif info["recent_reconnects"] >= 3:
+                status = f"unstable ({info['recent_reconnects']} reconnects in 60s)"
+            else:
+                status = f"stabilizing ({info['time_connected']:.0f}s connected)"
+            instance_details.append(f"ACE {info['instance']}: {status}")
+
+        details_str = ", ".join(instance_details)
+
+        if is_printing:
+            # Pause print and show dialog with resume/cancel
+            self.gcode.respond_info(
+                f"ACE: Connection issue detected during print - {details_str}"
+            )
+            self._pause_for_connection_issue(unstable_instances)
+        else:
+            # Just show informational dialog
+            self.gcode.respond_info(
+                f"ACE: Connection issue detected - {details_str}"
+            )
+            self._show_connection_issue_dialog(unstable_instances, is_printing=False)
+
+        self._connection_issue_shown = True
+
+    def _pause_for_connection_issue(self, unstable_instances):
+        """Pause print due to ACE connection issue."""
+        try:
+            self.gcode.respond_info("ACE: Pausing print due to connection issue")
+            self.gcode.run_script_from_command("PAUSE")
+        except Exception as e:
+            self.gcode.respond_info(f"ACE: Error pausing print: {e}")
+
+        self._show_connection_issue_dialog(unstable_instances, is_printing=True)
+
+    def _show_connection_issue_dialog(self, unstable_instances, is_printing):
+        """
+        Show Mainsail dialog for connection issue.
+
+        Args:
+            unstable_instances: List of instances with connection issues
+            is_printing: If True, show resume/cancel buttons; if False, just info
+        """
+        self.gcode.run_script_from_command(
+            'RESPOND TYPE=command MSG="action:prompt_begin ACE Connection Issue"'
+        )
+
+        # Build instance details
+        instance_details = []
+        for info in unstable_instances:
+            if not info["connected"]:
+                status = "disconnected"
+            elif info["recent_reconnects"] >= 3:
+                status = f"unstable ({info['recent_reconnects']} reconnects/min)"
+            else:
+                status = f"stabilizing ({info['time_connected']:.0f}s)"
+            instance_details.append(f"ACE {info['instance']}: {status}")
+
+        if is_printing:
+            prompt_text = (
+                f"Print paused: ACE connection unstable. {' | '.join(instance_details)}. "
+                f"Wait for stabilization (30s) or cancel print."
+            )
+        else:
+            prompt_text = (
+                f"ACE connection issue detected. {' | '.join(instance_details)}. "
+                f"Waiting for stable connection..."
+            )
+
+        self.gcode.run_script_from_command(
+            f'RESPOND TYPE=command MSG="action:prompt_text {prompt_text}"'
+        )
+
+        if is_printing:
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_footer_button Resume|RESUME|primary"'
+            )
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_footer_button Cancel Print|CANCEL_PRINT|error"'
+            )
+
+        self.gcode.run_script_from_command(
+            'RESPOND TYPE=command MSG="action:prompt_show"'
+        )
+
+    def _close_connection_dialog(self):
+        """Close the connection issue dialog."""
+        try:
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_end"'
+            )
+            self.gcode.respond_info("ACE: Connection restored - dialog closed")
+        except Exception as e:
+            self.gcode.respond_info(f"ACE: Error closing dialog: {e}")
 
     @toolchange_in_progress_guard
     def perform_tool_change(self, current_tool, target_tool, is_endless_spool=False):

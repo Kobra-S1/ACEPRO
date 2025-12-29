@@ -177,6 +177,13 @@ ACE_GET_STATUS INSTANCE=0 VERBOSE=1        # Query instance 0 (detailed output w
 ACE_RECONNECT                              # Reconnect all instances
 ACE_RECONNECT INSTANCE=0                   # Reconnect instance 0 only
 
+# Connection status and stability
+ACE_GET_CONNECTION_STATUS                  # Show connection status for all instances
+# Example output:
+#   === ACE Connection Status ===
+#   ACE[0]: Connected (stable)
+#   ACE[1]: Disconnected, 4/6 reconnects in 180s, next retry: 17s
+
 # ========== DEBUG COMMANDS ==========
 
 # Print sensor states

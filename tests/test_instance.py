@@ -220,8 +220,8 @@ class TestFeedAssist(unittest.TestCase):
         # This tests the branching logic
 
     @patch('ace.instance.AceSerialManager')
-    def test_on_ace_connect_restores_feed_assist(self, mock_serial_mgr_class):
-        """Test feed assist is restored on ACE reconnect when previously active."""
+    def test_on_ace_connect_defers_feed_assist_restore(self, mock_serial_mgr_class):
+        """Test feed assist restoration is deferred until first heartbeat."""
         # Setup
         self.ace_config['feed_assist_active_after_ace_connect'] = True
         instance = AceInstance(0, self.ace_config, self.mock_printer)
@@ -236,10 +236,53 @@ class TestFeedAssist(unittest.TestCase):
         # Call _on_ace_connect
         instance._on_ace_connect()
         
-        # Verify start_feed_assist was sent for slot 2
+        # Verify no request sent yet - just pending
+        self.assertEqual(len(sent_requests), 0)
+        self.assertEqual(instance._pending_feed_assist_restore, 2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_on_ace_connect_restores_feed_assist_after_heartbeat(self, mock_serial_mgr_class):
+        """Test feed assist is restored after first successful heartbeat."""
+        # Setup
+        self.ace_config['feed_assist_active_after_ace_connect'] = True
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance._feed_assist_index = 2  # Feed assist was active on slot 2
+        
+        # Pre-populate inventory to prevent RFID queries during test
+        for i in range(4):
+            instance.inventory[i]["status"] = "empty"
+        
+        # Track send_request calls
+        sent_requests = []
+        instance.serial_mgr.send_request = Mock(
+            side_effect=lambda req, cb: sent_requests.append(req)
+        )
+        
+        # Call _on_ace_connect to set pending restore
+        instance._on_ace_connect()
+        self.assertEqual(instance._pending_feed_assist_restore, 2)
+        
+        # Simulate first successful heartbeat (all empty slots to avoid RFID queries)
+        heartbeat_response = {
+            "code": 0,
+            "result": {
+                "status": "ready",
+                "slots": [
+                    {"index": 0, "status": "empty"},
+                    {"index": 1, "status": "empty"},
+                    {"index": 2, "status": "empty"},
+                    {"index": 3, "status": "empty"},
+                ]
+            }
+        }
+        instance._on_heartbeat_response(heartbeat_response)
+        
+        # Now feed assist should be restored
         self.assertEqual(len(sent_requests), 1)
         self.assertEqual(sent_requests[0]['method'], 'start_feed_assist')
         self.assertEqual(sent_requests[0]['params']['index'], 2)
+        # Pending should be cleared
+        self.assertEqual(instance._pending_feed_assist_restore, -1)
 
     @patch('ace.instance.AceSerialManager')
     def test_on_ace_connect_skips_when_disabled(self, mock_serial_mgr_class):

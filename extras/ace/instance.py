@@ -95,6 +95,7 @@ class AceInstance:
         self._info = create_status_dict(self.SLOT_COUNT)
         self.inventory = create_inventory(self.SLOT_COUNT)
         self._feed_assist_index = -1
+        self._pending_feed_assist_restore = -1  # Slot to restore after first heartbeat
         self._dryer_active = False
         self._dryer_temperature = 0
         self._dryer_duration = 0
@@ -1401,19 +1402,47 @@ class AceInstance:
 
         if response.get("code") == 0 and "result" in response:
             self._status_update_callback(response)
+            
+            # Restore pending feed assist after first successful heartbeat
+            self._maybe_restore_pending_feed_assist()
         else:
             msg = response.get("msg", "Unknown error")
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Heartbeat response error: {msg}"
             )
 
+    def _maybe_restore_pending_feed_assist(self):
+        """
+        Restore feed assist if pending after reconnect.
+        
+        Called after first successful heartbeat to ensure connection is stable.
+        """
+        if self._pending_feed_assist_restore < 0:
+            return
+        
+        slot = self._pending_feed_assist_restore
+        self._pending_feed_assist_restore = -1  # Clear before attempting
+        
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: Restoring feed assist on slot {slot}"
+        )
+        try:
+            request = {"method": "start_feed_assist", "params": {"index": slot}}
+            self.send_request(
+                request,
+                lambda response: self._on_feed_assist_restore_response(response, slot)
+            )
+        except Exception as e:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Failed to restore feed assist: {e}"
+            )
+
     def _on_ace_connect(self):
         """
         Handle ACE connection/reconnection.
         
-        Restores feed assist if:
-        - feed_assist_active_after_ace_connect config is True
-        - Feed assist was previously active on a slot
+        Defers feed assist restoration until after first successful heartbeat
+        to ensure connection is actually stable before sending commands.
         """
         if not self.feed_assist_active_after_ace_connect:
             self.gcode.respond_info(
@@ -1424,21 +1453,12 @@ class AceInstance:
         # Check if feed assist was active before disconnect
         if self._feed_assist_index >= 0:
             slot = self._feed_assist_index
+            # Defer restoration until after first heartbeat confirms communication
+            self._pending_feed_assist_restore = slot
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Connected - "
-                f"restoring feed assist on slot {slot}"
+                f"will restore feed assist on slot {slot} after heartbeat"
             )
-            try:
-                # Re-send the start_feed_assist command to ACE hardware
-                request = {"method": "start_feed_assist", "params": {"index": slot}}
-                self.send_request(
-                    request,
-                    lambda response: self._on_feed_assist_restore_response(response, slot)
-                )
-            except Exception as e:
-                self.gcode.respond_info(
-                    f"ACE[{self.instance_num}]: Failed to restore feed assist: {e}"
-                )
         else:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Connected - "

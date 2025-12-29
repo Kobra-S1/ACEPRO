@@ -29,7 +29,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_manager.py** | 52 | AceManager core logic, sensor management, tool changes, state tracking, edge cases |
 | **test_instance.py** | 61 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, inventory write optimization, feed assist reconnect restoration, JSON emission |
 | **test_config_utils.py** | 51 | Configuration parsing, tool mapping, inventory creation |
-| **test_serial_manager.py** | 37 | USB location parsing, CRC calculation, frame parsing, status change detection, on_connect_callback |
+| **test_serial_manager.py** | 44 | USB location parsing, CRC calculation, frame parsing, status change detection, on_connect_callback, connection stability |
 
 ### Feature-Specific Tests
 
@@ -44,7 +44,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 444 tests** across 13 test modules
+**Total: 451 tests** across 13 test modules
 
 
 ## Running Tests

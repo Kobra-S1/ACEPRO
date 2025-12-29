@@ -598,5 +598,306 @@ class TestOnConnectCallback:
         mock_callback.assert_called_once()
 
 
+class TestConnectionStability:
+    """Test rate-based connection stability tracking."""
+
+    def setup_method(self):
+        """Create serial manager for stability testing."""
+        with patch('ace.serial_manager.serial'):
+            from ace.serial_manager import AceSerialManager
+            
+            self.mock_gcode = Mock()
+            self.mock_reactor = Mock()
+            self.mock_reactor.monotonic.return_value = 1000.0
+            
+            self.manager = AceSerialManager(
+                gcode=self.mock_gcode,
+                reactor=self.mock_reactor,
+                instance_num=0,
+                ace_enabled=True
+            )
+
+    def test_initial_state_no_reconnects(self):
+        """Initial state should have no reconnect timestamps."""
+        assert len(self.manager._reconnect_timestamps) == 0
+        assert self.manager._last_connected_time == 0.0
+
+    def test_reconnect_does_not_add_timestamp(self):
+        """reconnect() should not add timestamp - only callback failures do."""
+        self.manager.reactor.register_timer = Mock(return_value="timer")
+        self.manager.reactor.NOW = 0.0
+        self.manager.reactor.monotonic.return_value = 1000.0
+        
+        self.manager.reconnect(delay=1)
+        
+        # reconnect() no longer adds timestamp - callback does on failure
+        assert len(self.manager._reconnect_timestamps) == 0
+
+    def test_callback_failures_tracked(self):
+        """Failed callback retries should add timestamps."""
+        # Capture callback
+        captured_callback = None
+        def capture_timer(callback, when):
+            nonlocal captured_callback
+            captured_callback = callback
+            return "timer"
+        
+        self.manager.reactor.register_timer = capture_timer
+        self.manager.reactor.NOW = 0.0
+        self.manager.auto_connect = Mock(return_value=False)
+        
+        # Start reconnect
+        self.manager.reconnect(delay=1)
+        
+        # Simulate 3 failed callbacks
+        for t in [1000.0, 1010.0, 1020.0]:
+            self.manager.reactor.monotonic.return_value = t
+            captured_callback(t)
+        
+        assert len(self.manager._reconnect_timestamps) == 3
+
+    def test_old_timestamps_pruned_during_callback(self):
+        """Timestamps older than INSTABILITY_WINDOW should be pruned on reconnect."""
+        # Capture callback
+        captured_callback = None
+        def capture_timer(callback, when):
+            nonlocal captured_callback
+            captured_callback = callback
+            return "timer"
+        
+        self.manager.reactor.register_timer = capture_timer
+        self.manager.reactor.NOW = 0.0
+        self.manager.auto_connect = Mock(return_value=False)
+        
+        # Start first reconnect and fail - adds timestamp at 1000
+        self.manager.reconnect(delay=1)
+        self.manager.reactor.monotonic.return_value = 1000.0
+        captured_callback(1000.0)
+        
+        assert len(self.manager._reconnect_timestamps) == 1
+        
+        # Start second reconnect 200 seconds later (window is 180s)
+        self.manager.reactor.monotonic.return_value = 1200.0
+        captured_callback(1200.0)
+        
+        # Old timestamp should be pruned, only new one remains
+        assert len(self.manager._reconnect_timestamps) == 1
+        assert self.manager._reconnect_timestamps[0] == 1200.0
+
+    def test_is_connection_stable_requires_connected(self):
+        """is_connection_stable should return False if not connected."""
+        self.manager._connected = False
+        self.manager._last_connected_time = 1000.0
+        
+        assert self.manager.is_connection_stable() is False
+
+    def test_is_connection_stable_requires_grace_period(self):
+        """is_connection_stable requires 30s grace period after connect."""
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._last_connected_time = 990.0  # Connected 10s ago
+        self.manager.reactor.monotonic.return_value = 1000.0
+        
+        # Only 10 seconds connected, need 30
+        assert self.manager.is_connection_stable() is False
+        
+        # After 30 seconds
+        self.manager.reactor.monotonic.return_value = 1025.0
+        assert self.manager.is_connection_stable() is True
+
+    def test_is_connection_stable_fails_with_too_many_reconnects(self):
+        """is_connection_stable should return False with 6+ reconnects in 60s."""
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._last_connected_time = 900.0  # Connected long ago
+        self.manager.reactor.monotonic.return_value = 1000.0
+        
+        # Add 6 recent reconnects (threshold is 6)
+        self.manager._reconnect_timestamps = [945.0, 950.0, 955.0, 960.0, 965.0, 970.0]
+        
+        assert self.manager.is_connection_stable() is False
+
+    def test_is_connection_stable_with_few_reconnects(self):
+        """is_connection_stable should be True with <6 reconnects in 60s."""
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._last_connected_time = 900.0  # Connected long ago
+        self.manager.reactor.monotonic.return_value = 1000.0
+        
+        # Only 5 reconnects (below threshold of 6)
+        self.manager._reconnect_timestamps = [950.0, 955.0, 960.0, 965.0, 970.0]
+        
+        assert self.manager.is_connection_stable() is True
+
+    @patch('ace.serial_manager.serial')
+    def test_successful_connect_records_time(self, mock_serial_module):
+        """Successful connection should record connect time."""
+        mock_serial = Mock()
+        mock_serial.is_open = True
+        mock_serial_module.Serial.return_value = mock_serial
+        
+        self.manager.reactor.NOW = 0.0
+        self.manager.reactor.register_timer = Mock(return_value="timer")
+        self.manager.reactor.monotonic.return_value = 2000.0
+        
+        result = self.manager.connect("/dev/ttyACM0", 115200)
+        
+        assert result is True
+        assert self.manager._last_connected_time == 2000.0
+
+    def test_get_connection_status_returns_all_fields(self):
+        """get_connection_status should return complete status dict."""
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._last_connected_time = 900.0
+        self.manager._reconnect_timestamps = [950.0, 960.0]
+        self.manager.reactor.monotonic.return_value = 1000.0
+        
+        status = self.manager.get_connection_status()
+        
+        assert status["connected"] is True
+        assert status["stable"] is True  # 2 reconnects < 3 threshold, 100s > 30s grace
+        assert status["recent_reconnects"] == 2
+        assert status["time_connected"] == 100.0
+        assert status["last_connected_time"] == 900.0
+
+
+class TestRetryLoopTimestampTracking:
+    """Test that retry callbacks properly track timestamps."""
+
+    def setup_method(self):
+        """Create serial manager for retry loop testing."""
+        with patch('ace.serial_manager.serial'):
+            from ace.serial_manager import AceSerialManager
+            
+            self.mock_gcode = Mock()
+            self.mock_reactor = Mock()
+            self.mock_reactor.monotonic.return_value = 1000.0
+            self.mock_reactor.NOW = 0.0
+            self.mock_reactor.NEVER = float('inf')
+            
+            self.manager = AceSerialManager(
+                gcode=self.mock_gcode,
+                reactor=self.mock_reactor,
+                instance_num=0,
+                ace_enabled=True
+            )
+            self.manager._baud = 115200
+
+    def test_connect_to_ace_retry_loop_tracks_timestamps(self):
+        """Each failed retry in connect_to_ace callback should add a timestamp."""
+        # Capture the callback when register_timer is called
+        captured_callback = None
+        def capture_timer(callback, when):
+            nonlocal captured_callback
+            captured_callback = callback
+            return "timer"
+        
+        self.manager.reactor.register_timer = capture_timer
+        
+        # Mock auto_connect to always fail
+        self.manager.auto_connect = Mock(return_value=False)
+        
+        # Start connection
+        self.manager.connect_to_ace(115200)
+        
+        assert captured_callback is not None
+        
+        # Simulate multiple retry callbacks (each one should add a timestamp)
+        for i in range(6):
+            self.mock_reactor.monotonic.return_value = 1000.0 + (i * 10)
+            captured_callback(1000.0 + (i * 10))
+        
+        # Should have 6 timestamps from 6 failed attempts
+        assert len(self.manager._reconnect_timestamps) == 6
+
+    def test_reconnect_retry_loop_tracks_timestamps(self):
+        """Each failed retry in reconnect callback should add a timestamp."""
+        # Capture the callback when register_timer is called
+        captured_callback = None
+        def capture_timer(callback, when):
+            nonlocal captured_callback
+            captured_callback = callback
+            return "timer"
+        
+        self.manager.reactor.register_timer = capture_timer
+        
+        # Mock auto_connect to always fail
+        self.manager.auto_connect = Mock(return_value=False)
+        
+        # Initial reconnect call (does NOT add timestamp - only callback failures do)
+        self.mock_reactor.monotonic.return_value = 1000.0
+        self.manager.reconnect(delay=5)
+        
+        assert captured_callback is not None
+        initial_count = len(self.manager._reconnect_timestamps)
+        assert initial_count == 0  # reconnect() no longer adds timestamp
+        
+        # Simulate 6 retry callbacks (each failure adds a timestamp)
+        for i in range(6):
+            self.mock_reactor.monotonic.return_value = 1010.0 + (i * 10)
+            captured_callback(1010.0 + (i * 10))
+        
+        # Should have 6 total timestamps (all from retries)
+        assert len(self.manager._reconnect_timestamps) == 6
+
+    def test_successful_connect_stops_retry_loop(self):
+        """Successful auto_connect should return NEVER to stop timer."""
+        captured_callback = None
+        def capture_timer(callback, when):
+            nonlocal captured_callback
+            captured_callback = callback
+            return "timer"
+        
+        self.manager.reactor.register_timer = capture_timer
+        
+        # First 3 attempts fail, then succeed
+        attempt_count = [0]
+        def mock_auto_connect(instance, baud):
+            attempt_count[0] += 1
+            return attempt_count[0] >= 4  # Success on 4th attempt
+        
+        self.manager.auto_connect = mock_auto_connect
+        
+        self.manager.connect_to_ace(115200)
+        
+        # Simulate retries
+        for i in range(3):
+            self.mock_reactor.monotonic.return_value = 1000.0 + (i * 10)
+            result = captured_callback(1000.0 + (i * 10))
+            assert result != self.mock_reactor.NEVER  # Should continue
+        
+        # 4th attempt should succeed
+        self.mock_reactor.monotonic.return_value = 1030.0
+        result = captured_callback(1030.0)
+        assert result == self.mock_reactor.NEVER  # Should stop
+
+    def test_backoff_resets_on_successful_connect(self):
+        """Backoff should reset to MIN after successful connect."""
+        captured_callback = None
+        def capture_timer(callback, when):
+            nonlocal captured_callback
+            captured_callback = callback
+            return "timer"
+        
+        self.manager.reactor.register_timer = capture_timer
+        
+        # Set backoff to high value
+        self.manager._reconnect_backoff = 30.0
+        
+        # Mock successful connect
+        self.manager.auto_connect = Mock(return_value=True)
+        
+        self.manager.connect_to_ace(115200)
+        captured_callback(1000.0)
+        
+        # Backoff should reset to MIN
+        assert self.manager._reconnect_backoff == self.manager.RECONNECT_BACKOFF_MIN
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

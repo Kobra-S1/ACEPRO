@@ -392,6 +392,47 @@ def cmd_ACE_GET_STATUS(gcmd):
         gcmd.respond_info(f"ACE_GET_STATUS error: {e}")
 
 
+def cmd_ACE_GET_CONNECTION_STATUS(gcmd):
+    """Get connection status for all ACE instances."""
+    try:
+        lines = []
+        lines.append("=== ACE Connection Status ===")
+        
+        for inst_num in sorted(ACE_INSTANCES.keys()):
+            ace = ACE_INSTANCES[inst_num]
+            status = ace.serial_mgr.get_connection_status()
+            
+            # Build status line
+            if status["connected"]:
+                if status["stable"]:
+                    conn_state = "Connected (stable)"
+                else:
+                    conn_state = f"Connected (stabilizing, {status['time_connected']:.0f}s)"
+            else:
+                conn_state = "Disconnected"
+            
+            # Add reconnect info if any recent attempts
+            reconnects = status["recent_reconnects"]
+            threshold = ace.serial_mgr.INSTABILITY_THRESHOLD
+            window = ace.serial_mgr.INSTABILITY_WINDOW
+            
+            if reconnects > 0:
+                reconnect_info = f", {reconnects}/{threshold} reconnects in {int(window)}s"
+            else:
+                reconnect_info = ""
+            
+            # Current backoff delay
+            backoff = ace.serial_mgr._reconnect_backoff
+            backoff_info = f", next retry: {backoff:.0f}s" if not status["connected"] else ""
+            
+            lines.append(f"ACE[{inst_num}]: {conn_state}{reconnect_info}{backoff_info}")
+        
+        gcmd.respond_info("\n".join(lines))
+        
+    except Exception as e:
+        gcmd.respond_info(f"ACE_GET_CONNECTION_STATUS error: {e}")
+
+
 def cmd_ACE_RECONNECT(gcmd):
     """Reconnect ACE serial connection. [INSTANCE=] - omit to reconnect all instances."""
     try:
@@ -1744,6 +1785,8 @@ def cmd_ACE_SHOW_INSTANCE_CONFIG(gcmd):
 
 ACE_COMMANDS = [
     ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. INSTANCE= or TOOL=, VERBOSE=1 for detailed output"),
+    ("ACE_GET_CONNECTION_STATUS", cmd_ACE_GET_CONNECTION_STATUS,
+     "Get connection status for all ACE instances (connected, stable, retry info)"),
     ("ACE_RECONNECT", cmd_ACE_RECONNECT, "Reconnect ACE serial. INSTANCE="),
     ("ACE_GET_CURRENT_INDEX", cmd_ACE_GET_CURRENT_INDEX, "Query currently loaded tool index"),
     ("ACE_FEED", cmd_ACE_FEED, "Feed filament. T=<tool> or INSTANCE= INDEX=, LENGTH=, [SPEED=]"),

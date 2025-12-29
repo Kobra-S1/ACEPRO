@@ -50,6 +50,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Runout Detection**: Real-time state-change detection
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
+- ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 
 ## 📖 Documentation
@@ -495,11 +496,12 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 | `ACE_SET_PURGE_AMOUNT` | Override purge for next tool change | `PURGELENGTH=<mm> PURGESPEED=<mm/min> [INSTANCE=<0-3>]` |
 | `ACE_RESET_ACTIVE_TOOLHEAD` | Reset active tool to -1 | `INSTANCE=<0-3>` |
 
-### System & Diagnostics (7 commands)
+### System & Diagnostics (8 commands)
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `ACE_GET_STATUS` | Query ACE hardware status | `[INSTANCE=<0-3>] [VERBOSE=1]` - omit INSTANCE for all, VERBOSE=1 for detailed output |
+| `ACE_GET_CONNECTION_STATUS` | Query connection stability for all instances | - |
 | `ACE_RECONNECT` | Manually reconnect serial | `[INSTANCE=<0-3>]` or omit for all |
 | `ACE_DEBUG_SENSORS` | Print all sensor states | - |
 | `ACE_DEBUG_STATE` | Print manager and instance state | - |
@@ -571,7 +573,45 @@ When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver:
 
 This means if you remove and reinsert a spool, the slot automatically restores to `ready` with its previous color/material/temp settings.
 
-## 🔄 Endless Spool Feature
+## � Connection Supervision
+
+Monitors ACE connection stability and automatically pauses prints if connection becomes unstable.
+
+### How It Works
+
+1. **Reconnect Tracking** → Each failed connection attempt is timestamped
+2. **Instability Detection** → If 6+ reconnects occur within 3 minutes, connection is flagged as unstable
+3. **During Print** → Print is paused, dialog shown with Resume/Cancel options
+4. **When Idle** → Informational dialog shown (no pause)
+5. **Recovery** → Dialog auto-closes when connection stabilizes (connected for 30+ seconds)
+
+### Retry Backoff
+
+Failed connection attempts use exponential backoff to avoid log spam:
+- **Pattern**: 5s → 8s → 11s → 17s → 25s → 30s → 5s (cyclic)
+- Backoff resets to 5s after successful connection
+
+### Configuration
+
+Connection supervision is **enabled by default**. To disable:
+
+```ini
+[ace]
+ace_connection_supervision: False
+```
+
+### Status Command
+
+```gcode
+ACE_GET_CONNECTION_STATUS
+
+# Example output:
+# === ACE Connection Status ===
+# ACE[0]: Connected (stable)
+# ACE[1]: Disconnected, 4/6 reconnects in 180s, next retry: 17s
+```
+
+## �🔄 Endless Spool Feature
 
 Automatically switches to a matching spool when filament runs out, enabling continuous multi-day prints.
 

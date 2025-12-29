@@ -87,6 +87,9 @@ def read_ace_config(config):
     ace_config["purge_multiplier"] = config.getfloat("purge_multiplier", "1.0")
     ace_config["pre_cut_retract_length"] = config.getint("pre_cut_retract_length", "2")
     ace_config["status_debug_logging"] = config.getboolean("status_debug_logging", False)
+    ace_config["ace_connection_supervision"] = config.getboolean(
+        "ace_connection_supervision", True
+    )
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"
     ace_config["feed_speed"] = config.get("feed_speed", "60")

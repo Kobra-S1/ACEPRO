@@ -86,6 +86,21 @@ class AceSerialManager:
         self._ace_pro_enabled = ace_enabled
         self._status_debug_logging = bool(status_debug_logging)
 
+        # Connection stability tracking
+        # Rate-based detection: unstable if too many reconnects in short window
+        self.INSTABILITY_WINDOW = 180.0      # Look at reconnects in last 3 minutes
+        self.INSTABILITY_THRESHOLD = 6       # 6+ reconnects in window = unstable
+        self.STABILITY_GRACE_PERIOD = 30.0   # Must stay connected 30s to be "stable"
+        self.COUNTER_RESET_PERIOD = 180.0    # Reset counter after 3 min of stability
+
+        self._reconnect_timestamps = []      # List of monotonic times of reconnect attempts
+        self._last_connected_time = 0.0      # Monotonic time of last successful connect
+        self._counter_reset_time = 0.0       # Time when counter was last reset
+        self._reconnect_backoff = 5.0        # Current backoff delay (increases on failure)
+        self.RECONNECT_BACKOFF_MIN = 5.0     # Minimum backoff delay
+        self.RECONNECT_BACKOFF_MAX = 30.0    # Maximum backoff delay (30 seconds)
+        self.RECONNECT_BACKOFF_FACTOR = 1.5  # Multiply backoff on each failure
+
     def enable_ace_pro(self):
         """Enable ACE Pro and reconnect if not connected."""
         was_disabled = not self._ace_pro_enabled
@@ -227,14 +242,42 @@ class AceSerialManager:
                 return self.reactor.NEVER
 
             if self.auto_connect(self.instance_num, self._baud):
-                self.gcode.respond_info(f'ACE[{self.instance_num}]: Ace state: Connected')
+                self.gcode.respond_info(f'ACE[{self.instance_num}]: Connected')
+                # Reset backoff on successful connect
+                self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
                 return self.reactor.NEVER
             else:
-                return eventtime + delay
+                # Track failed connection attempt for stability detection
+                # (only track failures, not the initial attempt)
+                now = self.reactor.monotonic()
+                self._reconnect_timestamps.append(now)
+                
+                # Prune old timestamps outside the instability window
+                cutoff = now - self.INSTABILITY_WINDOW
+                self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
 
+                # Increase backoff delay on failure (exponential backoff)
+                current_backoff = self._reconnect_backoff
+                next_backoff = self._reconnect_backoff * self.RECONNECT_BACKOFF_FACTOR
+                if next_backoff >= self.RECONNECT_BACKOFF_MAX:
+                    # Reset to min after hitting max (cyclic backoff)
+                    self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
+                else:
+                    self._reconnect_backoff = next_backoff
+                recent_count = len(self._reconnect_timestamps)
+                self.gcode.respond_info(
+                    f'ACE[{self.instance_num}]: Retry in {current_backoff:.0f}s '
+                    f'({recent_count} attempts in last {int(self.INSTABILITY_WINDOW)}s)'
+                )
+                return eventtime + current_backoff
+
+        initial_delay = self._reconnect_backoff
+        self.gcode.respond_info(
+            f'ACE[{self.instance_num}]: Starting connection (first attempt in {initial_delay:.0f}s)'
+        )
         self.connect_timer = self.reactor.register_timer(
             connect_callback,
-            self.reactor.NOW + delay
+            self.reactor.NOW + initial_delay
         )
 
     def reconnect(self, delay=5):
@@ -245,8 +288,20 @@ class AceSerialManager:
             )
             return
 
-        self.gcode.respond_info(f'ACE[{self.instance_num}]: (Re)connecting')
+        # Get current reconnect count for logging (don't add timestamp here - callback does it on failure)
+        now = self.reactor.monotonic()
+        cutoff = now - self.INSTABILITY_WINDOW
+        self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
+
+        recent_count = len(self._reconnect_timestamps)
+        self.gcode.respond_info(
+            f'ACE[{self.instance_num}]: (Re)connecting '
+            f'({recent_count} reconnects in last {int(self.INSTABILITY_WINDOW)}s)'
+        )
         self.disconnect()
+
+        # Use backoff delay instead of fixed delay parameter
+        initial_delay = self._reconnect_backoff
 
         def _reconnect_callback(eventtime):
             if not self._ace_pro_enabled:
@@ -255,16 +310,41 @@ class AceSerialManager:
                 )
                 return self.reactor.NEVER
 
-            self.gcode.respond_info(f'ACE[{self.instance_num}]: _reconnect_callback')
             if self.auto_connect(self.instance_num, self._baud):
-                self.gcode.respond_info(f'ACE[{self.instance_num}]: _reconnect_callback: Connected')
+                self.gcode.respond_info(f'ACE[{self.instance_num}]: Connected')
+                # Reset backoff on successful connect
+                self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
                 return self.reactor.NEVER
             else:
-                return eventtime + delay
+                # Track failed connection attempt for stability detection
+                now = self.reactor.monotonic()
+                self._reconnect_timestamps.append(now)
+                
+                # Prune old timestamps outside the instability window
+                cutoff = now - self.INSTABILITY_WINDOW
+                self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
+                
+                # Increase backoff delay on failure (exponential backoff)
+                current_backoff = self._reconnect_backoff
+                next_backoff = self._reconnect_backoff * self.RECONNECT_BACKOFF_FACTOR
+                if next_backoff >= self.RECONNECT_BACKOFF_MAX:
+                    # Reset to min after hitting max (cyclic backoff)
+                    self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
+                else:
+                    self._reconnect_backoff = next_backoff
+                recent_count = len(self._reconnect_timestamps)
+                self.gcode.respond_info(
+                    f'ACE[{self.instance_num}]: Retry in {current_backoff:.0f}s '
+                    f'({recent_count} attempts in last {int(self.INSTABILITY_WINDOW)}s)'
+                )
+                return eventtime + current_backoff
 
+        self.gcode.respond_info(
+            f'ACE[{self.instance_num}]: Scheduling reconnect in {initial_delay:.0f}s'
+        )
         self.connect_timer = self.reactor.register_timer(
             _reconnect_callback,
-            self.reactor.NOW + delay
+            self.reactor.NOW + initial_delay
         )
 
     def dwell(self, delay=1.0):
@@ -276,7 +356,7 @@ class AceSerialManager:
         """Attempt to connect to ACE device."""
         port = self.find_com_port('ACE', instance)
         if port is None:
-            self.gcode.respond_info('No ACE device found')
+            self.gcode.respond_info(f'ACE[{instance}]: No ACE device found')
             return False
 
         self._port = port
@@ -335,6 +415,9 @@ class AceSerialManager:
                     self.connect_timer = None
 
                 self.start_heartbeat()
+
+                # Record connection time for stability grace period tracking
+                self._last_connected_time = self.reactor.monotonic()
 
                 # Call on_connect callback if registered
                 if self.on_connect_callback:
@@ -395,6 +478,83 @@ class AceSerialManager:
     def is_connected(self):
         """Check if serial connection is active."""
         return self._connected and self._serial and self._serial.is_open
+
+    def _get_recent_reconnect_count(self):
+        """
+        Get number of reconnects within the instability window.
+
+        Also prunes old timestamps and resets counter after stability period.
+        """
+        now = self.reactor.monotonic()
+
+        # Prune old timestamps
+        cutoff = now - self.INSTABILITY_WINDOW
+        self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
+
+        # Reset counter after extended stability period
+        if (self._last_connected_time > 0 and
+                (now - self._last_connected_time) > self.COUNTER_RESET_PERIOD and
+                len(self._reconnect_timestamps) == 0):
+            if self._counter_reset_time < self._last_connected_time:
+                self._counter_reset_time = now
+
+        return len(self._reconnect_timestamps)
+
+    def is_connection_stable(self):
+        """
+        Check if connection is stable using rate-based detection.
+
+        Stable means:
+        - Currently connected
+        - Connected for at least STABILITY_GRACE_PERIOD (30s)
+        - Less than INSTABILITY_THRESHOLD (3) reconnects in INSTABILITY_WINDOW (60s)
+
+        Returns:
+            bool: True if connected and stable
+        """
+        if not self.is_connected():
+            return False
+
+        now = self.reactor.monotonic()
+
+        # Check grace period: must be connected for at least 30 seconds
+        time_connected = now - self._last_connected_time
+        if time_connected < self.STABILITY_GRACE_PERIOD:
+            return False
+
+        # Check reconnect rate: less than threshold in window
+        recent_count = self._get_recent_reconnect_count()
+        if recent_count >= self.INSTABILITY_THRESHOLD:
+            return False
+
+        return True
+
+    def get_connection_status(self):
+        """
+        Get detailed connection status for monitoring.
+
+        Returns:
+            dict: Connection status with keys:
+                - connected: bool - currently connected
+                - stable: bool - stable per rate-based detection
+                - recent_reconnects: int - reconnects in last 60s
+                - time_connected: float - seconds since last connect
+                - last_connected_time: float (monotonic)
+        """
+        now = self.reactor.monotonic()
+        recent_count = self._get_recent_reconnect_count()
+
+        time_connected = 0.0
+        if self._last_connected_time > 0:
+            time_connected = now - self._last_connected_time
+
+        return {
+            "connected": self.is_connected(),
+            "stable": self.is_connection_stable(),
+            "recent_reconnects": recent_count,
+            "time_connected": time_connected,
+            "last_connected_time": self._last_connected_time,
+        }
 
     # ========== CRC Calculation ==========
 

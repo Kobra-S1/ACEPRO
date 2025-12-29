@@ -96,6 +96,12 @@ update_ace_support_active_state()           # Sync ACE enable/disable state from
 runout_monitor.start_monitoring()           # Begin sensor polling
 runout_monitor.stop_monitoring()            # Stop sensor polling
 set_runout_detection_active(active)         # Enable/disable detection
+
+# Connection Health Monitoring
+_check_connection_health(eventtime)         # Check all instances for stable connections
+_handle_connection_issue(instances, time)   # Pause print (if printing) and show dialog
+_show_connection_issue_dialog(instances, is_printing)  # Mainsail dialog with details
+_close_connection_dialog()                  # Close dialog when connection restored
 ```
 
 ### 2. AceInstance (`instance.py`)
@@ -379,9 +385,26 @@ clear_queues()                           # Clear all pending requests
 
 # Heartbeat & Status
 set_heartbeat_callback(callback)         # Register status update callback
+set_on_connect_callback(callback)        # Register callback for successful (re)connection
 start_heartbeat()                        # Start periodic status requests (1Hz)
 stop_heartbeat()                         # Stop heartbeat
 _send_heartbeat_request()                # Internal heartbeat implementation
+
+# Connection Stability
+is_connection_stable()                   # Check if connected and not in reconnect loop
+get_connection_status()                  # Get detailed status dict:
+                                         #   connected: bool - currently connected
+                                         #   stable: bool - connected 30s+ and <6 reconnects in 180s
+                                         #   recent_reconnects: int - reconnects in last 180s
+                                         #   time_connected: float - seconds since last connect
+
+# Stability Constants (in __init__):
+#   INSTABILITY_WINDOW = 180.0           # Look at reconnects in last 3 minutes
+#   INSTABILITY_THRESHOLD = 6            # 6+ reconnects in window = unstable
+#   STABILITY_GRACE_PERIOD = 30.0        # Must stay connected 30s to be "stable"
+#   RECONNECT_BACKOFF_MIN = 5.0          # Initial retry delay
+#   RECONNECT_BACKOFF_MAX = 30.0         # Maximum retry delay (cyclic)
+#   RECONNECT_BACKOFF_FACTOR = 1.5       # Multiply delay on each failure
 
 # Protocol
 _calc_crc(buffer)                        # Calculate CRC-16 for frame
