@@ -40,6 +40,7 @@ class AceSerialManager:
             status_debug_logging: Enable detailed status logging for debugging
         """
         self._port = None
+        self._usb_location = None
         self._baud = None
 
         self.gcode = gcode
@@ -100,6 +101,10 @@ class AceSerialManager:
         self.RECONNECT_BACKOFF_MIN = 5.0     # Minimum backoff delay
         self.RECONNECT_BACKOFF_MAX = 30.0    # Maximum backoff delay (30 seconds)
         self.RECONNECT_BACKOFF_FACTOR = 1.5  # Multiply backoff on each failure
+        
+        # Expected topology positions for validation
+        self._expected_topology_positions = None  # Set after first successful enumeration
+        self._topology_validation_failed_count = 0
 
     def enable_ace_pro(self):
         """Enable ACE Pro and reconnect if not connected."""
@@ -208,6 +213,22 @@ class AceSerialManager:
         matches.sort(key=lambda x: x[0])
 
         if matches:
+            # Store expected topology positions for validation
+            if self._expected_topology_positions is None:
+                # Check that we found at least instance+1 devices
+                if len(matches) < instance + 1:
+                    self.gcode.respond_info(
+                        f"ACE[{self.instance_num}]: WARNING - Only {len(matches)} ACE(s) found, "
+                        f"but instance {instance} requires at least {instance + 1}. "
+                        f"Waiting for all ACEs to enumerate..."
+                    )
+                    return None
+                
+                self._expected_topology_positions = [self._parse_usb_location(loc) for _, loc, _ in matches]
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: Stored topology positions: {self._expected_topology_positions}"
+                )
+            
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}] USB enumeration order:"
             )
@@ -220,6 +241,86 @@ class AceSerialManager:
         if len(matches) > instance:
             return matches[instance][2]
         return None
+
+    def _get_usb_location_for_port(self, port):
+        """Get USB location string for a specific port."""
+        for portinfo in serial.tools.list_ports.comports():
+            if portinfo.device == port:
+                m = re.search(r'LOCATION=([-\w\.]+)', portinfo.hwid)
+                if m:
+                    return m.group(1)
+                # Fallback
+                m2 = re.search(r'ACM(\d+)', portinfo.device)
+                if m2:
+                    return f"acm.{m2.group(1)}"
+                return portinfo.device
+        return None
+
+    def get_usb_location(self):
+        """Get current USB location."""
+        return getattr(self, '_usb_location', None)
+    
+    def get_usb_topology_position(self):
+        """
+        Get normalized topology position (depth in daisy chain).
+        Returns the number of hops from root, ignoring which root port.
+        
+        Examples:
+            "2-2.3" -> 2 (root -> hub -> port)
+            "2-2.4.3" -> 3 (root -> hub -> port -> port)
+            "1-3.2" -> 2 (root -> port -> port)
+        """
+        location = self.get_usb_location()
+        if not location:
+            return None
+        
+        # Count the number of dots/hyphens = depth in USB tree
+        # Strip the controller number prefix (before first hyphen)
+        if '-' in location:
+            topo = location.split('-', 1)[1]  # e.g., "2.3" or "2.4.3"
+            depth = topo.count('.') + 1  # Count ports in chain
+            return depth
+        
+        return None
+    
+    def _validate_topology_position(self, instance):
+        """
+        Validate that this instance is connected to the correct physical ACE.
+        Uses USB topology depth to verify position in daisy chain.
+        
+        Returns:
+            bool: True if topology position is correct, False otherwise
+        """
+        current_topo = self._parse_usb_location(self._usb_location)
+        
+        if self._expected_topology_positions is None:
+            # First connection - store it but validate the order is ascending
+            # Instance 0 should be shallowest (closest to root), instance 1 deeper, etc.
+            # We can't fully validate yet, but we can check relative to what we have
+            self.gcode.respond_info(
+                f'ACE[{instance}]: First connection - storing topology {current_topo}'
+            )
+            return True
+        
+        if instance >= len(self._expected_topology_positions):
+            # Instance number out of range
+            return True
+        
+        expected_topo = self._expected_topology_positions[instance]
+        
+        # Compare topology positions (they should match)
+        if current_topo != expected_topo:
+            self._topology_validation_failed_count += 1
+            self.gcode.respond_info(
+                f'ACE[{instance}]: Topology mismatch - '
+                f'expected {expected_topo}, got {current_topo} '
+                f'(failure #{self._topology_validation_failed_count})'
+            )
+            return False
+        
+        # Reset failure counter on success
+        self._topology_validation_failed_count = 0
+        return True
 
     # ========== Serial Connection Management ==========
 
@@ -361,6 +462,7 @@ class AceSerialManager:
 
         self._port = port
         self._baud = baud
+        self._usb_location = self._get_usb_location_for_port(port)
 
         self.gcode.respond_info('Try connecting to ' + str(port))
         connected = self.connect(port, baud)
@@ -375,6 +477,15 @@ class AceSerialManager:
         self.gcode.respond_info(
             f'ACE[{instance}]: auto_connect: Connected to {port}, sending get_info request'
         )
+        
+        # Validate we're connected to the correct physical ACE
+        if not self._validate_topology_position(instance):
+            self.gcode.respond_info(
+                f'ACE[{instance}]: Topology validation failed - disconnecting and retrying'
+            )
+            self.disconnect()
+            return False
+        
         self.send_request(
             request={"method": "get_info"},
             callback=lambda response: self.gcode.respond_info(f"ACE[{instance}]: {response}")

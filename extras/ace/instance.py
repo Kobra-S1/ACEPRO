@@ -99,6 +99,7 @@ class AceInstance:
         self._info = create_status_dict(self.SLOT_COUNT)
         self.inventory = create_inventory(self.SLOT_COUNT)
         self._feed_assist_index = -1
+        self._feed_assist_topology_position = None  # Track chain position (0, 1, 2...)
         self._pending_feed_assist_restore = -1  # Slot to restore after first heartbeat
         self._dryer_active = False
         self._dryer_temperature = 0
@@ -210,6 +211,7 @@ class AceInstance:
     def _enable_feed_assist(self, slot_index):
         """Enable feed assist for smooth filament loading."""
         self._feed_assist_index = slot_index
+        self._feed_assist_topology_position = self.serial_mgr.get_usb_topology_position()
 
         def callback(response):
             if response and response.get("code") == 0:
@@ -241,6 +243,7 @@ class AceInstance:
             return
 
         self._feed_assist_index = -1
+        self._feed_assist_topology_position = None
 
         def callback(response):
             if response and response.get("code") == 0:
@@ -1420,6 +1423,7 @@ class AceInstance:
         Restore feed assist if pending after reconnect.
         
         Called after first successful heartbeat to ensure connection is stable.
+        Only restores if reconnecting to same position in daisy chain (topology).
         """
         if self._pending_feed_assist_restore < 0:
             return
@@ -1427,8 +1431,23 @@ class AceInstance:
         slot = self._pending_feed_assist_restore
         self._pending_feed_assist_restore = -1  # Clear before attempting
         
+        # Check if we're at the same position in the daisy chain
+        current_position = self.serial_mgr.get_usb_topology_position()
+        
+        if self._feed_assist_topology_position is not None and current_position != self._feed_assist_topology_position:
+            # Connected to different position in chain, don't restore
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Skipping feed assist restore - "
+                f"different chain position (was: {self._feed_assist_topology_position}, "
+                f"now: {current_position})"
+            )
+            self._feed_assist_index = -1  # Clear stale state
+            self._feed_assist_topology_position = None
+            return
+        
         self.gcode.respond_info(
-            f"ACE[{self.instance_num}]: Restoring feed assist on slot {slot}"
+            f"ACE[{self.instance_num}]: Restoring feed assist on slot {slot} "
+            f"(chain position: {current_position})"
         )
         try:
             request = {"method": "start_feed_assist", "params": {"index": slot}}
