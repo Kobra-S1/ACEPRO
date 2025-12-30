@@ -30,6 +30,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_instance.py** | 62 | AceInstance initialization, configuration, serial communication, RFID query tracking, non-RFID default handling, inventory write optimization, deferred feed assist restoration, JSON emission |
 | **test_config_utils.py** | 51 | Configuration parsing, tool mapping, inventory creation |
 | **test_serial_manager.py** | 44 | USB location parsing, CRC calculation, frame parsing, status change detection, on_connect_callback, connection stability, retry loop timestamp tracking |
+| **test_topology_validation.py** | 24 | USB topology position calculation, enumeration validation, instance binding to physical ACEs, feed assist restoration with topology checks, reconnection scenarios |
 
 ### Feature-Specific Tests
 
@@ -44,7 +45,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_inventory_persistence.py** | 20 | Inventory loading from save_variables, backward compatibility |
 | **test_rfid_callback.py** | 19 | RFID callback functionality, temperature calculation, field storage |
 
-**Total: 468 tests** across 13 test modules
+**Total: 492 tests** across 14 test modules
 
 
 ## Running Tests
@@ -548,6 +549,57 @@ test_dispatch_handles_missing_id
 ```
 
 **Bug fixed**: ACM fallback locations now sort correctly as `(999998, n)` instead of incorrectly returning `(999999,)` for all ACM devices.
+
+### Topology Validation Tests (`test_topology_validation.py`)
+
+USB topology validation and feed assist restoration logic:
+
+```python
+# USB topology position calculation
+test_topology_position_two_levels                    # "2-2.3" → depth 2
+test_topology_position_three_levels                  # "2-2.4.3" → depth 3
+test_topology_position_four_levels                   # "1-3.2.4.1" → depth 4
+test_topology_position_different_root_same_depth     # Different controllers, same depth
+test_topology_position_no_location                   # None location → None result
+test_topology_position_invalid_format                # Invalid format → None result
+
+# USB enumeration validation
+test_enumeration_insufficient_devices_instance_0     # Instance 0 connects with 1 device
+test_enumeration_insufficient_devices_instance_1     # Instance 1 refuses with only 1 device
+test_enumeration_sufficient_devices_instance_1       # Instance 1 connects with 2+ devices
+test_enumeration_topology_sorting                    # Devices sorted by topology depth
+
+# Topology validation during connection
+test_validation_first_connection_no_stored_topology  # First connection always passes
+test_validation_matching_topology                    # Reconnection to same position succeeds
+test_validation_mismatched_topology                  # Wrong position fails validation
+test_validation_failure_counter_increments           # Failure counter tracks mismatches
+test_validation_failure_counter_resets_on_success    # Counter resets on correct connection
+
+# Feed assist topology tracking
+test_feed_assist_topology_stored_on_enable           # Topology saved when enabled
+test_feed_assist_topology_cleared_on_disable         # Topology cleared when disabled
+
+# Feed assist restoration with validation
+test_restoration_skipped_no_pending                  # Skip when nothing pending
+test_restoration_proceeds_matching_topology          # Restore on matching topology
+test_restoration_skipped_mismatched_topology         # Skip on topology mismatch
+test_restoration_proceeds_first_time_no_stored_position  # Backward compat: allow first time
+
+# Complete reconnection scenarios
+test_happy_path_reconnect_same_topology              # Successful reconnection and restoration
+test_error_reconnect_wrong_topology                  # Refuse restoration on wrong ACE
+test_error_instance_swapped_on_reconnect             # Detect and prevent instance swap
+```
+
+**Purpose**: Ensures ACE instances connect to correct physical hardware after power cycles, USB re-enumeration, or cable swaps. Prevents feed assist from activating on wrong physical ACE unit by validating USB topology position (depth in daisy chain).
+
+**Key Logic**:
+- Topology position = depth in USB daisy chain (count dots in `2-2.4.3` → position 3)
+- Instance 0 → shallowest position, Instance 1 → deeper position
+- Feed assist only restored if topology position matches when enabled
+- First connection requires all expected ACEs enumerated before binding
+- Reconnection validates topology matches expected, disconnects if wrong
 
 ## Development Workflow
 
