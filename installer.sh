@@ -161,7 +161,7 @@ main() {
     
     # 1.1 - Klipper installation directory
     DEFAULT_KLIPPER_DIR="$HOME/klipper"
-    KLIPPER_DIR=$(prompt_input "Klipper installation directory" "$DEFAULT_KLIPPER_DIR")
+    KLIPPER_DIR=$(prompt_input "Klipper installation directory (press ENTER to use default)" "$DEFAULT_KLIPPER_DIR")
     
     if [ ! -d "$KLIPPER_DIR" ]; then
         print_error "Klipper directory not found: $KLIPPER_DIR"
@@ -200,7 +200,7 @@ main() {
         print_error "Config directory not found: $CONFIG_DIR"
         exit 1
     fi
-    print_success "Using config directory: $CONFIG_DIR"
+    print_success "Using config directory (press ENTER to use default): $CONFIG_DIR"
     
     # ========================================================================
     # Step 2: Ask for confirmation
