@@ -11,12 +11,13 @@
 Based on the great work of utkabobr ([DuckACE](https://github.com/utkabobr/DuckACE)) and szkrisz ([ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)).
 This is a fork of szkrisz' ACEPRO Klipper driver.
 
-This Anycubic-centric fork has structural diverged from the original and focuses on:
-- Supporting multiple ACE units.
+This Anycubic-centric fork has structurally diverged from the original and focuses on:
+- Supporting multiple ACE units, assigns ACE instance IDs based on USB topology
 - Adds RFID support (to automatically populate inventory)
 - Adds more Endless-Spool matching modes (exact, material only or just use the next available spool)
 - Splitting functionality into focused modules (instead of one large file)
 - Shortening load/unload times with revised feed sequences
+- Purge sequence optimizations (avoids purging too much without intermediate flushing)
 - Adds more graceful error-handling if ACE rejects commands
 - Adding many console commands for experimentation ;)
 - Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5)
@@ -51,7 +52,6 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
-- ✅ **Feed Assist Restoration**: Automatically restores feed assist after reconnection (deferred until connection stable)
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 
 ## 📖 Documentation
@@ -70,11 +70,11 @@ This implementation is organized into separate modules:
 ace/
 ├── __init__.py           # Module initialization
 ├── manager.py            # AceManager - orchestrates all ACE units
-├── instance.py           # AceInstance - per-unit handler (4 slots each)
+├── instance.py           # AceInstance - per-unit handler
 ├── endless_spool.py      # Automatic filament switching logic
 ├── runout_monitor.py     # Filament runout detection during printing
 ├── serial_manager.py     # USB communication protocol
-├── commands.py           # G-code command handlers (37 commands)
+├── commands.py           # G-code command handlers
 └── config.py             # Configuration constants and helpers
 
 config/
@@ -210,7 +210,7 @@ G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperatur
 - `bedTemp` - Bed temperature
 - `extruderTemp` - Nozzle temperature for the initial tool
 - `tool` - Initial tool index (from `[initial_tool]` Orca variable)
-- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL=1` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts. Set to `0` to always purge.
+- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts.Set to `0` to always purge.
 
 2. **Update End G-code**
 
@@ -252,7 +252,14 @@ If you have KlipperScreen installed, link the ACE Pro panel:
 ln -sf ~/ACEPRO/KlipperScreen/acepro.py ~/KlipperScreen/panels/acepro.py
 sudo systemctl restart KlipperScreen
 ```
-
+and then add the add the panel to your KlipperScreen configuration, e.g. add:
+```
+[menu __main acepro]
+name: ACE Pro
+icon: settings
+panel: acepro
+```
+to your config/main_menu.conf
 ## ⚙️ Configuration
 
 ### Configuration File Structure
@@ -417,6 +424,94 @@ The filament runout sensors in Mainsail/Fluidd show different states depending o
 ACE_DEBUG_SENSORS  # Shows current state of all sensors
 ```
 
+### Per-Instance Configuration Overrides
+
+Some configuration parameters can be overridden per ACE instance, allowing different settings for each ACE unit. This is useful when ACE units have different tube lengths or require different speeds.
+
+**Overridable Parameters:**
+
+The following parameters can be set globally (applies to all instances) or overridden per instance:
+
+- `feed_speed` - Default feed speed (mm/s)
+- `retract_speed` - Default retract speed (mm/s)
+- `total_max_feeding_length` - Safety limit for feeding (mm)
+- `toolchange_load_length` - Distance from ACE to splitter (mm)
+- `incremental_feeding_length` - Retry feed length (mm)
+- `incremental_feeding_speed` - Retry feed speed (mm/s)
+- `heartbeat_interval` - Status check interval (seconds)
+- `max_dryer_temperature` - Maximum dryer temp (°C)
+
+**Configuration Syntax:**
+
+Per-instance overrides use a comma-separated format with colon notation:
+
+```ini
+parameter: default_value                    # Simple: same value for all instances
+parameter: default_value,instance:override  # Override specific instance(s)
+parameter: 0:value0,1:value1,2:value2      # Explicit value for each instance
+```
+
+**Examples:**
+
+**Example 1: Same configuration for all instances**
+```ini
+[ace]
+ace_count: 3
+feed_speed: 60
+retract_speed: 50
+# All 3 instances use feed_speed=60, retract_speed=50
+```
+
+**Example 2: Override specific instance(s)**
+```ini
+[ace]
+ace_count: 3
+feed_speed: 60,2:45       # Default 60 for instances 0,1; instance 2 uses 45
+# Instance 0: 60 mm/s
+# Instance 1: 60 mm/s
+# Instance 2: 45 mm/s
+```
+
+**Example 3: Multiple overrides**
+```ini
+[ace]
+ace_count: 4
+toolchange_load_length: 2000,1:2500,3:1800
+# Instance 0: 2000 (default)
+# Instance 1: 2500 (override)
+# Instance 2: 2000 (default)
+# Instance 3: 1800 (override)
+```
+
+**Example 4: Explicit per-instance values (no default)**
+```ini
+[ace]
+ace_count: 3
+feed_speed: 0:60,1:55,2:50   # Each instance has explicit value
+# Instance 0: 60 mm/s
+# Instance 1: 55 mm/s
+# Instance 2: 50 mm/s
+```
+
+**Example 5: Multiple parameters with overrides**
+```ini
+[ace]
+ace_count: 2
+feed_speed: 60,1:45                      # Instance 1 slower
+retract_speed: 50,1:40                   # Instance 1 slower
+toolchange_load_length: 2000,1:2500      # Instance 1 longer tube
+total_max_feeding_length: 2600,1:3000    # Instance 1 higher limit
+```
+
+**Verification:**
+
+Use `ACE_SHOW_INSTANCE_CONFIG` to verify resolved configuration:
+
+```gcode
+ACE_SHOW_INSTANCE_CONFIG           # Compare all instances
+ACE_SHOW_INSTANCE_CONFIG INSTANCE=0  # Show specific instance
+```
+
 ### Customization
 
 To customize settings for your specific hardware:
@@ -427,7 +522,8 @@ To customize settings for your specific hardware:
    - Desired feed/retract speeds
    - Sensor configuration
    - Printer-specific movement parameters
-3. Test with help of the T0, T1, etc. toolchange console commands first before full print cycles
+3. Use per-instance overrides if your ACE units have different characteristics
+4. Test with help of the T0, T1, etc. toolchange console commands first before full print cycles
 
 For detailed command examples with config parameters, see [example_cmds.txt](example_cmds.txt)
 
@@ -572,7 +668,7 @@ Track filament materials, colors, and temperatures for intelligent toolchanges a
 **Non-RFID spools:** When a spool without an RFID tag is inserted into an empty slot, the driver automatically applies default metadata to make the slot immediately usable:
 - **Material**: `Unknown` - clearly indicates unconfigured spool, won't match in endless spool "exact" or "material" modes
 - **Color**: Gray `[128, 128, 128]` - matches UI empty slot color, visually indicates unconfigured
-- **Temperature**: 225°C - safe middle-ground for most materials
+- **Temperature**: 225°C - safe middle-ground for most materials, its your responsibility to set here the right values for your loaded filament.
 
 These defaults are applied only when the slot has no saved metadata. If you remove and reinsert the same spool, saved metadata is restored instead of applying defaults.
 
