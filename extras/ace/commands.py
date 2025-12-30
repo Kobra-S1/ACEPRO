@@ -988,6 +988,15 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
 
     if not do_cut:
         gcmd.respond_info("ACE: Print end - skipping unload (CUT_TIP=0), tool remains loaded")
+        
+        # Disable feed assist on all instances except the one with the loaded tool
+        tool_index = get_variable("ace_current_index", -1)
+        if tool_index >= 0:
+            active_instance = get_instance_from_tool(tool_index)
+            for_each_instance(lambda inst_num, mgr, instance: 
+                instance.reset_feed_assist_state() if inst_num != active_instance else None)
+            gcmd.respond_info(f"ACE: Feed assist disabled on all instances except ACE[{active_instance}] (T{tool_index})")
+        
         return
 
     try:

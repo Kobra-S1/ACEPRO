@@ -1391,9 +1391,17 @@ class AceManager:
             if filament_pos == FILAMENT_STATE_NOZZLE:
                 if sensor_has_filament:
                     # State matches sensor - tool is truly loaded
-                    self.gcode.respond_info(
-                        f"ACE: Tool {target_tool} already loaded at nozzle (reselection), no action needed"
-                    )
+                    # Ensure feed assist is active for this tool (may have been lost after ACE power cycle)
+                    target_instance = get_instance_from_tool(target_tool)
+                    target_local_slot = get_local_slot(target_tool, target_instance)
+                    target_ace = self.instances[target_instance] if target_instance < len(self.instances) else None
+                    
+                    if target_ace:
+                        self.gcode.respond_info(
+                            f"ACE: Tool {target_tool} already loaded - re-enabling feed assist on slot {target_local_slot}"
+                        )
+                        target_ace._enable_feed_assist(target_local_slot)
+                    
                     return f"Tool {target_tool} (already loaded)"
                 else:
                     # State says loaded but sensor is EMPTY - state is WRONG
