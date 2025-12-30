@@ -1139,12 +1139,18 @@ class TestPerformToolChange(unittest.TestCase):
         # Mock get_ace_instance_and_slot_for_tool for target_temp lookup
         mock_instance = Mock()
         mock_instance.inventory = {1: {'status': 'loaded', 'temp': 0}}
+        mock_instance._enable_feed_assist = Mock()
         mock_get_ace.return_value = (mock_instance, 1)
+        
+        # Set up manager.instances to contain the mock_instance at index 0 (tool 1 maps to instance 0, slot 1)
+        manager.instances[0] = mock_instance
         
         # Reselect same tool
         result = manager.perform_tool_change(current_tool=1, target_tool=1)
         
         self.assertIn("already loaded", result)
+        # CRITICAL: Feed assist MUST be re-enabled even for reselection (e.g., after ACE power cycle)
+        mock_instance._enable_feed_assist.assert_called_once_with(1)
         # Should return early without calling load/unload or macros
         # Verify no POST_TOOLCHANGE was called (early return bypasses it)
         post_calls = [call for call in self.mock_gcode.run_script_from_command.call_args_list 
