@@ -1378,10 +1378,17 @@ class TestPerformToolChange(unittest.TestCase):
         manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
         manager.check_and_wait_for_spool_ready = Mock(return_value=False)
         
+        # Mock instance to verify feed assist is NOT called on error
+        mock_instance = Mock()
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
         with self.assertRaises(Exception) as context:
             manager.perform_tool_change(current_tool=-1, target_tool=2)
         
         self.assertIn("not ready", str(context.exception))
+        # CRITICAL: Feed assist must NOT be enabled on error
+        mock_instance._enable_feed_assist.assert_not_called()
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -1518,6 +1525,11 @@ class TestPerformToolChange(unittest.TestCase):
         manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
         manager.check_and_wait_for_spool_ready = Mock(return_value=True)
         
+        # Mock instance to verify feed assist is NOT called on error
+        mock_instance = Mock()
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
         with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
             mock_get_ace.return_value = (None, -1)  # Tool not managed
             
@@ -1525,6 +1537,8 @@ class TestPerformToolChange(unittest.TestCase):
                 manager.perform_tool_change(current_tool=-1, target_tool=99)
             
             self.assertIn("not managed", str(context.exception))
+            # CRITICAL: Feed assist must NOT be enabled when tool not managed
+            mock_instance._enable_feed_assist.assert_not_called()
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -1535,10 +1549,17 @@ class TestPerformToolChange(unittest.TestCase):
         manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
         manager.smart_unload = Mock(return_value=False)  # Unload fails!
         
+        # Mock instance to verify feed assist is NOT called on error
+        mock_instance = Mock()
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+        
         with self.assertRaises(Exception) as context:
             manager.perform_tool_change(current_tool=1, target_tool=2)
         
         self.assertIn("Failed to unload", str(context.exception))
+        # CRITICAL: Feed assist must NOT be enabled on unload failure
+        mock_instance._enable_feed_assist.assert_not_called()
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
