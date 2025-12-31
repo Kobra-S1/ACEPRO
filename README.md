@@ -224,6 +224,8 @@ If you prefer to NOT get the filament cut at print end, change CUT_TIP argument 
 PRINT_END CUT_TIP=0
 ```
 
+⚠️ Place the "PRINT_END" call near the bottom of your machine end gcode section, but above any gcode to disable the motors (as the MACRO potentially needs to move printhead for cutting or retracting filament)
+
 3. **(Optional) Add Adaptive Purge Volume Post-processing**
 
    To support color change adaptive purge volume:
