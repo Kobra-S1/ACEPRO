@@ -2,6 +2,17 @@
 
 A Klipper driver for the Anycubic Color Engine Pro multi-material unit(s), optimized for Kobra-S1 3D printer.
 
+NOTE: You are here on the "main" branch, with the latest stable version.
+
+The "dev" branch contains the latest,more feature rich, version, which has some quite signifcant changes in code as well as the configuration files.
+It will be merged to the main branch when it has proven to be stable enough.
+
+If you are here to installing from scratch, consider using the dev-branch, as it can be a little bit of a headache to migrate manually from the old configuration files and MACROS to the currently used in the "dev" branch.
+
+Dev version also has now a installer script. So its the most simple version to get the driver up&running on supported printers.
+
+If that version still makes you trouble, you can still return here and use the current main branch version.
+
 ## 📋 Table of Contents
 
 - [Features](#-features)
