@@ -45,7 +45,7 @@ class Panel(ScreenPanel):
             self.instance_data[instance_id] = {
                 'inventory': [{
                     "material": "Empty",
-                    "color": [128, 128, 128],
+                    "color": [0, 0, 0],
                     "temp": 0,
                     "status": "empty",
                     "rfid": False
@@ -181,6 +181,214 @@ class Panel(ScreenPanel):
                 "Connection error. Check Klipper status."
             )
             return False
+
+    def _try_refresh_via_rpc(self):
+        """
+        Attempt to refresh ACE data via Moonraker JSON-RPC (objects.query).
+        Returns True if data was fetched and processed, False to fall back to gcode.
+        """
+        try:
+            ws = getattr(self, "_screen", None)
+            klippy = getattr(getattr(ws, "_ws", None), "klippy", None)
+            query_fn = None
+            logging.debug(
+                f"ACE: Klippy RPC methods (query/object): "
+                f"{[m for m in dir(klippy) if 'query' in m or 'object' in m]}"
+            )
+            for candidate in ("query_objects", "objects_query", "queryObjects"):
+                fn = getattr(klippy, candidate, None)
+                if callable(fn):
+                    query_fn = fn
+                    break
+
+            if not callable(query_fn):
+                logging.debug("ACE: JSON-RPC query method not available; trying direct websocket query")
+                # Try direct printer.objects.query via websocket send_method
+                direct_ws = getattr(klippy, "_ws", None)
+                if callable(getattr(direct_ws, "send_method", None)):
+                    ace_fields = [
+                        "slots",
+                        "status",
+                        "dryer",
+                        "dryer_status",
+                        "temp",
+                        "enable_rfid",
+                        "fan_speed",
+                        "feed_assist_count",
+                        "cont_assist_time",
+                    ]
+                    objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode"]}
+                    for instance_id in self.ace_instances:
+                        key = f"ace_instance_{instance_id}"
+                        objects[key] = ace_fields
+
+                    def _query_cb(response, *_):
+                        try:
+                            result = response.get("result") if isinstance(response, dict) else None
+                            if isinstance(result, dict) and "status" in result:
+                                status_payload = result.get("status", {})
+                                logging.info(f"ACE: printer.objects.query result keys={list(status_payload.keys())}")
+                                # Debug instance payloads for visibility
+                                for instance_id in self.ace_instances:
+                                    key = f"ace_instance_{instance_id}"
+                                    if key in status_payload:
+                                        logging.debug(f"ACE: payload[{key}]={status_payload.get(key)}")
+                                self._process_rpc_status(status_payload)
+                                logging.info("ACE: Refreshed via direct printer.objects.query")
+                            else:
+                                logging.debug(f"ACE: printer.objects.query unexpected result: {result}")
+                        except Exception as e:
+                            logging.debug(f"ACE: printer.objects.query callback error: {e}")
+
+                    sent = direct_ws.send_method(
+                        "printer.objects.query",
+                        {"objects": objects},
+                        _query_cb
+                    )
+                    if sent:
+                        # Assume async callback will update; skip gcode
+                        return True
+
+                # Try to use cached subscription data before falling back to gcode
+                if hasattr(self, "_printer") and hasattr(self._printer, "data"):
+                    try:
+                        pdata = self._printer.data or {}
+                        payload = {}
+                        ace_state = pdata.get("ace_state")
+                        if isinstance(ace_state, dict):
+                            payload["ace_state"] = ace_state
+                        for instance_id in self.ace_instances:
+                            key = f"ace_instance_{instance_id}"
+                            if key in pdata:
+                                payload[key] = pdata.get(key, {})
+                            else:
+                                # Backward compatibility with legacy object names
+                                legacy_key = "ace" if instance_id == 0 else f"ace {instance_id}"
+                                if legacy_key in pdata:
+                                    payload[key] = pdata.get(legacy_key, {})
+                        if payload:
+                            self._process_rpc_status(payload)
+                            logging.info("ACE: Used cached subscription data for refresh")
+                            return True
+                    except Exception as e:
+                        logging.debug(f"ACE: Failed to use cached subscription data: {e}")
+                return False
+
+            ace_fields = [
+                "slots",
+                "status",
+                "dryer",
+                "dryer_status",
+                "temp",
+                "enable_rfid",
+                "fan_speed",
+                "feed_assist_count",
+                "cont_assist_time",
+            ]
+            objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode"]}
+            for instance_id in self.ace_instances:
+                key = f"ace_instance_{instance_id}"
+                objects[key] = ace_fields
+
+            result = query_fn(objects)
+            # Expect Moonraker-style {"status": {<object>: {...}}, "eventtime": ...}
+            if isinstance(result, dict):
+                payload = result.get("status") or result.get("result") or result
+                if isinstance(payload, dict):
+                    self._process_rpc_status(payload)
+                    logging.info("ACE: Refreshed via JSON-RPC")
+                    return True
+
+            logging.debug(f"ACE: Unexpected JSON-RPC response: {result}")
+        except Exception as e:
+            logging.warning(f"ACE: JSON-RPC query failed, fallback to gcode: {e}")
+
+        return False
+
+    def _process_rpc_status(self, status_payload):
+        """Process Moonraker objects.query payload to update UI without gcode chatter."""
+        try:
+            if not hasattr(self, "_ace_debug_logged"):
+                self._ace_debug_logged = set()
+
+            # Global/manager state
+            ace_state = status_payload.get("ace_state", {})
+            if isinstance(ace_state, dict) and "current_index" in ace_state:
+                current_index = ace_state.get("current_index", -1)
+                if current_index != self.current_loaded_slot:
+                    old_slot = self.current_loaded_slot
+                    self.current_loaded_slot = current_index
+                    logging.info(f"ACE: (RPC) Updated current_loaded_slot: {old_slot} → {current_index}")
+                    self.update_slot_loaded_states()
+
+                # Endless spool toggle
+                endless_enabled = ace_state.get("endless_spool_enabled")
+                if isinstance(endless_enabled, bool) and hasattr(self, "endless_spool_switch"):
+                    try:
+                        self.endless_spool_switch.handler_block_by_func(self.on_endless_spool_toggled)
+                        self.endless_spool_switch.set_active(endless_enabled)
+                        self.endless_spool_switch.handler_unblock_by_func(self.on_endless_spool_toggled)
+                        self.endless_spool_status.set_markup(
+                            '<span foreground="green"><b>Active</b></span>' if endless_enabled
+                            else '<span foreground="gray">Inactive</span>'
+                        )
+                        self.endless_spool_enabled = endless_enabled
+                        self._update_match_mode_sensitivity()
+                    except Exception:
+                        # Switch not connected yet; skip quietly
+                        pass
+
+                match_mode = ace_state.get("endless_spool_match_mode")
+                if isinstance(match_mode, str):
+                    self._set_match_mode_ui(match_mode)
+
+            # Per-instance slots
+            for instance_id in self.ace_instances:
+                key = f"ace_instance_{instance_id}"
+                instance_status = status_payload.get(key, {})
+                if not isinstance(instance_status, dict):
+                    logging.debug(f"ACE: No status dict for {key} in payload keys={list(status_payload.keys())}")
+                    continue
+
+                raw_slots = instance_status.get("slots")
+                slots_list = None
+                if isinstance(raw_slots, list):
+                    slots_list = raw_slots
+                elif isinstance(raw_slots, dict):
+                    slots_list = list(raw_slots.values())
+
+                if isinstance(slots_list, list):
+                    if slots_list and len(slots_list) > 0 and not isinstance(slots_list[0], dict):
+                        logging.debug(f"ACE: Unexpected slot element type for {key}: {type(slots_list[0])}")
+                    self.update_slots_from_data(instance_id, slots_list)
+                else:
+                    # Partial update (e.g., temp-only); skip without logging spam
+                    continue
+
+                # Dryer status handling for RPC path
+                if self.current_view == "dryer" and hasattr(self, "_dryer_controls"):
+                    controls = getattr(self, "_dryer_controls", {}).get(instance_id)
+                    if controls:
+                        dryer_data = instance_status.get("dryer_status") or instance_status.get("dryer") or {}
+                        target_temp = dryer_data.get("target_temp", 0)
+                        dryer_state = dryer_data.get("status", "stop")
+                        remain_time = dryer_data.get("remain_time", 0)
+                        current_temp = instance_status.get("temp", 0)
+
+                        if dryer_state == "drying":
+                            hours = remain_time // 3600
+                            minutes = (remain_time % 3600) // 60
+                            time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                            controls['status_label'].set_markup(f'<span foreground="green"><b>DRYING ({time_str})</b></span>')
+                        elif dryer_state == "stop":
+                            controls['status_label'].set_markup('<span foreground="gray"><b>STOPPED</b></span>')
+                        else:
+                            controls['status_label'].set_markup(f'<span foreground="red"><b>{dryer_state.upper()}</b></span>')
+
+                        controls['target_label'].set_text(f"Target: {target_temp}°C")
+                        controls['current_label'].set_text(f"Current: {current_temp}°C")
+        except Exception as e:
+            logging.error(f"ACE: Error processing JSON-RPC status payload: {e}", exc_info=True)
 
     def load_inventory_from_saved_variables(self):
         pass
@@ -362,10 +570,6 @@ class Panel(ScreenPanel):
         self.display_current_instance()
         self.content.show_all()
 
-        # Query current states from Klipper after UI is ready
-        self._send_gcode("ACE_GET_ENDLESS_SPOOL_MODE")
-        self._send_gcode("ACE_ENDLESS_SPOOL_STATUS INSTANCE=0")  # Query first instance status
-
     def _build_match_mode_popover(self):
         """Create popover for match mode selection (touch-friendly)."""
         # Destroy previous popover to avoid stale widgets
@@ -412,13 +616,9 @@ class Panel(ScreenPanel):
         if update_widget and hasattr(self, 'match_mode_button'):
             self.match_mode_button.set_label(label_map.get(mode, "Exact"))
             self.match_mode_button.set_size_request(170, 36)
-            # Rebuild popover so the currently selected option remains reachable
-            self._build_match_mode_popover()
-            if getattr(self, 'match_mode_popover', None):
-                try:
-                    self.match_mode_popover.popdown()
-                except Exception:
-                    pass
+            # Only rebuild popover if it doesn't exist yet
+            if not hasattr(self, 'match_mode_popover') or self.match_mode_popover is None:
+                self._build_match_mode_popover()
 
         # No separate status label; button already shows current mode
 
@@ -598,7 +798,7 @@ class Panel(ScreenPanel):
         color_box = Gtk.EventBox()
         color_box.set_size_request(60, 40)
         color_box.get_style_context().add_class("ace_color_preview")
-        display_color = slot_data['color'] if slot_data['status'] == 'ready' else [128, 128, 128]
+        display_color = slot_data['color'] if slot_data['status'] == 'ready' else [0, 0, 0]
         self.set_slot_color(color_box, display_color)
         slot_box.pack_start(color_box, False, False, 0)
 
@@ -608,7 +808,7 @@ class Panel(ScreenPanel):
         slot_label.set_justify(Gtk.Justification.CENTER)
 
         # Set initial text from inventory
-        if slot_data['status'] == 'ready' and slot_data['material'] and slot_data['temp'] > 0:
+        if slot_data['status'] == 'ready' and slot_data['material']:
             slot_label.set_text(f"{slot_data['material']}\n{slot_data['temp']}°C")
         else:
             # Keep two lines so rows stay aligned with loaded slots
@@ -633,7 +833,7 @@ class Panel(ScreenPanel):
         self.instance_data[instance_id]['slot_gear_buttons'].append(gear_btn)
 
         # Dim empty slots so they appear less prominent and disable load/unload on empties
-        is_ready = slot_data['status'] == 'ready' and slot_data['material'] and slot_data['temp'] > 0
+        is_ready = slot_data['status'] == 'ready' and slot_data['material']
         self._set_slot_visual_state(instance_id, local_slot, is_ready)
 
         return slot_btn
@@ -735,13 +935,12 @@ class Panel(ScreenPanel):
         self.show_slot_settings(None, instance_id, local_slot)
 
     def _slot_is_ready(self, instance_id, local_slot):
-        """Return True if slot has material, temp, and is marked ready."""
+        """Return True if slot has material and is marked ready."""
         try:
             inv = self.instance_data[instance_id]['inventory'][local_slot]
             return (
                 inv.get('status') == 'ready'
                 and bool(inv.get('material', '').strip())
-                and inv.get('temp', 0) > 0
             )
         except Exception:
             return False
@@ -848,11 +1047,8 @@ class Panel(ScreenPanel):
     def refresh_all_instances(self):
         """Query slot data from all ACE instances"""
         logging.info("ACE: Refreshing all instances...")
-        for instance_id in self.ace_instances:
-            self._send_gcode(f"ACE_QUERY_SLOTS INSTANCE={instance_id}")
-        # Also query current tool index
-        self._send_gcode("ACE_GET_CURRENT_INDEX")
-        # No delay needed - process_update handles responses as they arrive
+        self._try_refresh_via_rpc()
+        # No gcode fallback; RPC/subscription drives updates
 
     def refresh_status(self, widget):
         """Manual refresh button - query all instances"""
@@ -862,133 +1058,15 @@ class Panel(ScreenPanel):
     def process_update(self, action, data):
         """Process updates from Klipper"""
         try:
-            if action == "notify_gcode_response":
-                # Check for ACE_GET_STATUS responses
-                if '{"instance"' in data and '"temp"' in data and '"dryer_status"' in data:
-                    try:
-                        # Parse JSON response - strip all '//' prefixes
-                        json_str = data
-                        while json_str.startswith('// '):
-                            json_str = json_str[3:].strip()
-                        
-                        status_data = json.loads(json_str)
-                        instance_id = status_data.get('instance', 0)
-                        
-                        logging.info(f"ACE: Parsed status response for instance {instance_id}: {status_data}")
-                        
-                        # Update dryer panel if we're on it
-                        if self.current_view == "dryer" and instance_id in self._dryer_controls:
-                            controls = self._dryer_controls[instance_id]
-                            current_temp = status_data.get('temp', 0)
-                            
-                            # Extract dryer-specific status
-                            dryer_status = status_data.get('dryer_status', {})
-                            target_temp = dryer_status.get('target_temp', 0)
-                            dryer_state = dryer_status.get('status', 'stop')
-                            remain_time = dryer_status.get('remain_time', 0)
-                            
-                            # Update status label with remaining time if drying
-                            if dryer_state == 'drying':
-                                hours = remain_time // 3600
-                                minutes = (remain_time % 3600) // 60
-                                time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
-                                controls['status_label'].set_markup(f'<span foreground="green"><b>DRYING ({time_str})</b></span>')
-                            elif dryer_state == 'stop':
-                                controls['status_label'].set_markup('<span foreground="gray"><b>STOPPED</b></span>')
-                            else:
-                                # Show any other status (errors, unknown states) in red
-                                controls['status_label'].set_markup(f'<span foreground="red"><b>{dryer_state.upper()}</b></span>')
-                            
-                            # Update temperature labels
-                            controls['target_label'].set_text(f"Target: {target_temp}°C")
-                            controls['current_label'].set_text(f"Current: {current_temp}°C")
-                            
-                            logging.info(f"ACE: Updated dryer labels for instance {instance_id}: target={target_temp}, current={current_temp}, state={dryer_state}")
-                    except json.JSONDecodeError as e:
-                        logging.error(f"ACE: Failed to parse status JSON from '{data}': {e}")
-                response_str = str(data).strip()
+            if action == "notify_status_update":
+                if isinstance(data, dict):
+                    payload = data.get("status") or data
+                    if isinstance(payload, dict):
+                        self._process_rpc_status(payload)
+                        return
 
-                # Handle double slashes from Klipper responses
-                if response_str.startswith("// // "):
-                    response_str = response_str[3:]  # Remove first "// "
-
-                # Parse ACE_QUERY_SLOTS response with instance metadata
-                if response_str.startswith("// {") and '"instance"' in response_str:
-                    try:
-                        json_str = response_str[3:].strip()
-                        response_data = json.loads(json_str)
-
-                        if 'instance' in response_data and 'slots' in response_data:
-                            instance_id = response_data['instance']
-                            slot_data = response_data['slots']
-                            logging.info(f"ACE: ✓ Parsed instance {instance_id} data")
-                            self.update_slots_from_data(instance_id, slot_data)
-                    except json.JSONDecodeError as e:
-                        logging.error(f"ACE: JSON decode error: {e}")
-
-                # Parse current tool index - handle "Current tool index: N" format
-                elif "Current tool index:" in response_str:  # Changed from startswith to 'in'
-                    try:
-                        # Extract everything after "Current tool index:"
-                        # This handles both "// Current tool index: N" and "// // Current tool index: N"
-                        if "Current tool index:" in response_str:
-                            index_part = response_str.split("Current tool index:")[-1].strip()
-                            current_index = int(index_part)
-
-                            logging.info(f"ACE: ✓ Received current tool index: {current_index}")
-
-                            if current_index != self.current_loaded_slot:
-                                old_slot = self.current_loaded_slot
-                                self.current_loaded_slot = current_index
-                                logging.info(f"ACE: ✓✓ Updated current_loaded_slot: {old_slot} → {current_index}")
-                                self.update_slot_loaded_states()
-                            else:
-                                logging.info(f"ACE: Tool index unchanged (still {current_index})")
-                    except (ValueError, IndexError) as e:
-                        logging.error(f"ACE: Could not parse tool index from '{response_str}': {e}")
-
-                # Parse endless spool status response
-                elif "endless spool" in response_str.lower():
-                    try:
-                        response_lower = response_str.lower()
-                        if ": true" in response_lower or response_lower.endswith("true"):
-                            if hasattr(self, 'endless_spool_switch'):
-                                self.endless_spool_enabled = True
-                                # Block signal to prevent triggering on_endless_spool_toggled
-                                self.endless_spool_switch.handler_block_by_func(self.on_endless_spool_toggled)
-                                self.endless_spool_switch.set_active(True)
-                                self.endless_spool_switch.handler_unblock_by_func(self.on_endless_spool_toggled)
-                                self.endless_spool_status.set_markup('<span foreground="green"><b>Active</b></span>')
-                                self._update_match_mode_sensitivity()
-                            logging.info(f"ACE: Endless spool initialized to ENABLED (response: {response_str})")
-                        elif ": false" in response_lower or response_lower.endswith("false"):
-                            if hasattr(self, 'endless_spool_switch'):
-                                self.endless_spool_enabled = False
-                                # Block signal to prevent triggering on_endless_spool_toggled
-                                self.endless_spool_switch.handler_block_by_func(self.on_endless_spool_toggled)
-                                self.endless_spool_switch.set_active(False)
-                                self.endless_spool_switch.handler_unblock_by_func(self.on_endless_spool_toggled)
-                                self.endless_spool_status.set_markup('<span foreground="gray">Inactive</span>')
-                                self._update_match_mode_sensitivity()
-                            logging.info(f"ACE: Endless spool initialized to DISABLED (response: {response_str})")
-                    except Exception as e:
-                        logging.error(f"ACE: Error parsing endless spool status: {e}")
-
-                # Parse endless spool match mode response
-                if ("Endless spool mode: " in response_str):
-                    try:
-                        response_upper = response_str.upper()
-                        if "NEXT" in response_upper:
-                            self._set_match_mode_ui("next")
-                            logging.info(f"ACE: Match mode initialized to NEXT (response: {response_str})")
-                        elif "MATERIAL" in response_upper:
-                            self._set_match_mode_ui("material")
-                            logging.info(f"ACE: Match mode initialized to MATERIAL (response: {response_str})")
-                        elif "EXACT" in response_upper:
-                            self._set_match_mode_ui("exact")
-                            logging.info(f"ACE: Match mode initialized to EXACT (response: {response_str})")
-                    except Exception as e:
-                        logging.error(f"ACE: Error parsing match mode: {e}")
+            # Legacy gcode response parsing removed - all data now comes via RPC subscriptions
+            # (status, slots, current_index, endless_spool state, match_mode)
 
         except Exception as e:
             logging.error(f"ACE: Error in process_update: {e}", exc_info=True)
@@ -1012,7 +1090,7 @@ class Panel(ScreenPanel):
 
             material = slot.get('material', '')
             temp = slot.get('temp', 0)
-            color = slot.get('color', [128, 128, 128])
+            color = slot.get('color', [0, 0, 0])
             status = slot.get('status', 'empty')
 
             logging.info(
@@ -1030,11 +1108,7 @@ class Panel(ScreenPanel):
                     i < len(instance['slot_color_boxes'])):
 
                 # Check explicitly
-                has_valid_data = (
-                    status == 'ready' and
-                    material.strip() != '' and
-                    temp > 0
-                )
+                has_valid_data = status not in ("empty", "")
                 logging.info(
                     f"ACE: Slot {i} has_valid_data={has_valid_data} "
                     f"(status={status}, material='{material}', temp={temp})"
@@ -1051,9 +1125,18 @@ class Panel(ScreenPanel):
                     )
 
                 if has_valid_data:
-                    instance['slot_labels'][i].set_text(
-                        f"{material}\n{temp}°C"
-                    )
+                    material_stripped = material.strip()
+                    display_material = material_stripped or status.replace("_", " ").title()
+                    temp_text = f"{temp}°C" if temp else ""
+                    status_suffix = ""
+                    # Only show status suffix if we're showing actual material (not status fallback)
+                    if status not in ("ready", "", "empty") and material_stripped:
+                        status_suffix = f" ({status.replace('_', ' ').title()})"
+                    second_line = f"{temp_text}{status_suffix}".strip()
+                    if not second_line:
+                        second_line = " "
+                    label_text = f"{display_material}\n{second_line}"
+                    instance['slot_labels'][i].set_text(label_text)
                     self.set_slot_color(
                         instance['slot_color_boxes'][i], color
                     )
@@ -1066,7 +1149,7 @@ class Panel(ScreenPanel):
                     # Keep two-line text and gray color for empty slots
                     instance['slot_labels'][i].set_text("Empty\n ")
                     self.set_slot_color(
-                        instance['slot_color_boxes'][i], [128, 128, 128]
+                        instance['slot_color_boxes'][i], [0, 0, 0]
                     )
                     self._set_slot_visual_state(instance_id, i, False)
                     logging.info(f"ACE: ✗ Slot {i} marked Empty in UI")
@@ -1157,14 +1240,10 @@ class Panel(ScreenPanel):
         self._update_dryer_frame_labels()
         logging.info(f"ACE: Dryer panel shown. Controls created for: {list(self._dryer_controls.keys())}")
         
-        # Query status immediately for instant display
-        for instance_id in self.ace_instances:
-            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-            cmd = f"ACE_GET_STATUS{instance_param}"
-            logging.info(f"ACE: Querying status with command: '{cmd}' for instance {instance_id}")
-            self._send_gcode(cmd)
+        # Query status immediately via RPC
+        self._try_refresh_via_rpc()
         
-        # Start periodic refresh of dryer status (every 3 seconds)
+        # Start periodic refresh of dryer status (every 3 seconds) via RPC
         if hasattr(self, '_dryer_refresh_timer') and self._dryer_refresh_timer:
             GLib.source_remove(self._dryer_refresh_timer)
         self._dryer_refresh_timer = GLib.timeout_add_seconds(3, self._periodic_dryer_refresh)
@@ -1172,11 +1251,7 @@ class Panel(ScreenPanel):
     def _periodic_dryer_refresh(self):
         """Periodically refresh dryer panel labels (not full rebuild)"""
         if self.current_view == "dryer":
-            # Query all ACE instances for status updates
-            for instance_id in self.ace_instances:
-                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-                self._send_gcode(f"ACE_GET_STATUS{instance_param}")
-            
+            self._try_refresh_via_rpc()
             return True  # Continue timer
         else:
             # Stop timer if we left the dryer panel
@@ -1720,7 +1795,7 @@ class Panel(ScreenPanel):
         """Get dryer status from printer data for specific ACE instance"""
         try:
             # Try to get status from printer object
-            ace_name = f"ace {instance_id}" if instance_id > 0 else "ace"
+            ace_name = f"ace_instance_{instance_id}"
 
             if hasattr(self._printer, 'lookup_object'):
                 ace_obj = self._printer.lookup_object(ace_name, None)
@@ -1771,9 +1846,6 @@ class Panel(ScreenPanel):
         )
 
         self._send_gcode(gcode)
-        # Query status immediately for instant feedback
-        instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-        self._send_gcode(f"ACE_GET_STATUS{instance_param}")
         self._screen.show_popup_message(
             f"Starting dryer on ACE {instance_id}\n"
             f"{temp}°C for {duration} minutes", 2
@@ -1785,8 +1857,6 @@ class Panel(ScreenPanel):
             f" INSTANCE={instance_id}" if instance_id > 0 else ""
         )
         self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
-        # Query status immediately for instant feedback
-        self._send_gcode(f"ACE_GET_STATUS{instance_param}")
         self._screen.show_popup_message(
             f"Stopping dryer on ACE {instance_id}", 1
         )
@@ -1871,12 +1941,7 @@ class Panel(ScreenPanel):
                 self._send_gcode(
                     f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
                 )
-            
-            # Query status immediately for instant feedback
-            for instance_id in self.ace_instances:
-                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-                self._send_gcode(f"ACE_GET_STATUS{instance_param}")
-            
+
             self._screen.show_popup_message(
                 f"Starting all {len(self.ace_instances)} dryers", 1
             )
@@ -1897,9 +1962,6 @@ class Panel(ScreenPanel):
             self._send_gcode(
                 f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
             )
-            # Query status immediately for instant feedback
-            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-            self._send_gcode(f"ACE_GET_STATUS{instance_param}")
             
             self._screen.show_popup_message(
                 f"Starting dryer on ACE {instance_id}\n{temp}°C for {duration} minutes", 2
@@ -1914,12 +1976,7 @@ class Panel(ScreenPanel):
                     f" INSTANCE={instance_id}" if instance_id > 0 else ""
                 )
                 self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
-            
-            # Query status immediately for instant feedback
-            for instance_id in self.ace_instances:
-                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-                self._send_gcode(f"ACE_GET_STATUS{instance_param}")
-            
+
             self._screen.show_popup_message(
                 f"Stopping all {len(self.ace_instances)} dryers", 1
             )
@@ -1930,9 +1987,6 @@ class Panel(ScreenPanel):
                 f" INSTANCE={instance_id}" if instance_id > 0 else ""
             )
             self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
-            # Query status immediately for instant feedback
-            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-            self._send_gcode(f"ACE_GET_STATUS{instance_param}")
             
             self._screen.show_popup_message(
                 f"Stopping dryer on ACE {instance_id}", 1
@@ -2411,9 +2465,9 @@ class Panel(ScreenPanel):
             logging.error("ACE: Save blocked - no material selected")
             return
 
-        if temp <= 0:
+        if temp < 0 or temp > 300:
             self._screen.show_popup_message(
-                f"ERROR: Please set a valid temperature!\nCurrent: {temp}°C"
+                f"ERROR: Temperature must be between 0-300°C!\nCurrent: {temp}°C"
             )
             logging.error(f"ACE: Save blocked - invalid temp={temp}")
             return

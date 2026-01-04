@@ -102,6 +102,15 @@ class TestStartStopMonitoring:
         # Should not raise exception
         self.reactor.unregister_timer.assert_not_called()
 
+    def test_stop_monitoring_swallows_unregister_errors(self):
+        """Stop monitoring should ignore unregister errors."""
+        self.monitor.start_monitoring()
+        self.reactor.unregister_timer.side_effect = Exception("boom")
+
+        # Should not raise and still clear timer handle
+        self.monitor.stop_monitoring()
+        assert self.monitor._monitoring_timer is None
+
 
 class TestSetDetectionActive:
     """Test enabling/disabling detection."""
@@ -1484,9 +1493,193 @@ class TestRunoutHandlingEdgeCases:
                     # Should not raise
                     self.monitor._handle_runout_detected(0)
         
-        # Should have shown prompt with defaults
+# Should have shown prompt with defaults
         script_calls = [call[0][0] for call in self.gcode.run_script_from_command.call_args_list]
         assert any('prompt_begin' in cmd for cmd in script_calls)
+
+
+class TestMonitorRunoutEdgeCases:
+    """Edge cases and error handling paths for _monitor_runout."""
+
+    def _build_monitor(self, print_state='printing', tool_index=0, sensor_state=True):
+        self.printer = Mock()
+        self.gcode = Mock()
+        self.reactor = Mock()
+        self.reactor.NEVER = 999
+        self.endless_spool = Mock()
+        self.manager = Mock()
+        self.manager.toolchange_in_progress = False
+        self.manager.runout_handling_in_progress = False
+        self.manager.get_switch_state = Mock(return_value=sensor_state)
+
+        self.save_vars = Mock()
+        self.save_vars.allVariables = {
+            'ace_current_index': tool_index,
+            'ace_filament_pos': 'bowden'
+        }
+        self.print_stats = Mock()
+        self.print_stats.get_status = Mock(return_value={'state': print_state})
+
+        def lookup(name, default=None):
+            if name == 'print_stats':
+                return self.print_stats
+            if name == 'save_variables':
+                return self.save_vars
+            return default
+
+        self.printer.lookup_object = Mock(side_effect=lookup)
+
+        monitor = RunoutMonitor(
+            self.printer,
+            self.gcode,
+            self.reactor,
+            self.endless_spool,
+            self.manager,
+        )
+        return monitor
+
+    def test_print_stats_exception_defaults_state(self):
+        """print_stats errors should fall back to idle handling."""
+        monitor = self._build_monitor()
+        monitor.runout_detection_active = False
+        self.print_stats.get_status.side_effect = Exception("bad stats")
+
+        next_time = monitor._monitor_runout(0.0)
+
+        assert next_time == 0.2
+        assert monitor.last_printing_active is False
+        assert monitor.last_print_state == ""
+
+    def test_print_start_logs_macro_sync_failure(self):
+        """Print start should log macro sync failures."""
+        monitor = self._build_monitor(print_state='printing', sensor_state=True)
+        monitor.runout_detection_active = False
+        self.gcode.run_script_from_command.side_effect = Exception("macro fail")
+
+        next_time = monitor._monitor_runout(0.0)
+
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert any("could not sync macro state" in msg.lower() for msg in log_messages)
+        assert monitor.runout_detection_active is True
+        assert next_time == 0.05
+
+    def test_debug_autorecovery_enables_detection(self):
+        """Debug block should auto-recover when detection was disabled."""
+        monitor = self._build_monitor(print_state='printing', sensor_state=True)
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+        monitor.runout_detection_active = False
+        monitor.monitor_debug_counter = 1200 * 15 - 1
+
+        next_time = monitor._monitor_runout(0.0)
+
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert any("autorecovery" in msg.lower() for msg in log_messages)
+        assert monitor.runout_detection_active is True
+        assert monitor.monitor_debug_counter == 0
+        assert next_time == 0.05
+
+    def test_print_stop_restores_detection_and_logs_macro_error(self):
+        """Print stop should restore detection when disabled and log macro errors."""
+        monitor = self._build_monitor(print_state='complete', sensor_state=False)
+        monitor.runout_detection_active = True
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+        self.gcode.run_script_from_command.side_effect = Exception("stop sync fail")
+
+        next_time = monitor._monitor_runout(0.5)
+
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert any("could not sync macro state on print stop" in msg.lower() for msg in log_messages)
+        assert next_time == 0.7
+
+    def test_baseline_enables_detection_when_sensor_present(self):
+        """Baseline init should enable detection when sensor reports filament."""
+        monitor = self._build_monitor(print_state='printing', sensor_state=True)
+        monitor.runout_detection_active = True
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+        monitor.prev_toolhead_sensor_state = None
+
+        next_time = monitor._monitor_runout(1.0)
+
+        assert monitor.prev_toolhead_sensor_state is True
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert next_time == 1.05
+
+    def test_baseline_macro_sync_failure_is_logged(self):
+        """Baseline sync failures should be reported."""
+        monitor = self._build_monitor(print_state='printing', sensor_state=False)
+        monitor.runout_detection_active = True
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+        monitor.prev_toolhead_sensor_state = None
+        self.gcode.run_script_from_command.side_effect = Exception("baseline fail")
+
+        monitor._monitor_runout(2.0)
+
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert any("could not sync macro state" in msg.lower() for msg in log_messages)
+
+    def test_command_error_shutdown_disables_monitor(self):
+        """command_error with shutdown should stop monitoring."""
+        class CmdError(Exception):
+            pass
+
+        monitor = self._build_monitor(print_state='printing', sensor_state=True)
+        monitor.printer.command_error = CmdError
+        monitor.runout_detection_active = True
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+        monitor.prev_toolhead_sensor_state = True
+        self.manager.get_switch_state.return_value = False
+        monitor._handle_runout_detected = Mock(side_effect=CmdError("shutdown now"))
+
+        result = monitor._monitor_runout(3.0)
+
+        assert result == self.reactor.NEVER
+        assert monitor.runout_detection_active is False
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert any("printer shutdown" in msg.lower() for msg in log_messages)
+
+    def test_command_error_non_shutdown_returns_slow_poll(self):
+        """Non-shutdown command_error should back off polling."""
+        class CmdError(Exception):
+            pass
+
+        monitor = self._build_monitor(print_state='printing', sensor_state=True)
+        monitor.printer.command_error = CmdError
+        monitor.runout_detection_active = True
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+        monitor.prev_toolhead_sensor_state = True
+        self.manager.get_switch_state.return_value = False
+        monitor._handle_runout_detected = Mock(side_effect=CmdError("temporary failure"))
+
+        result = monitor._monitor_runout(4.0)
+
+        assert result == 5.0
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert any("monitor command error" in msg.lower() for msg in log_messages)
+
+    def test_generic_exception_returns_slow_poll(self):
+        """Generic exceptions should be surfaced as monitor errors."""
+        monitor = self._build_monitor(print_state='printing', sensor_state=True)
+        class CmdError(Exception):
+            pass
+        monitor.printer.command_error = CmdError
+        monitor.runout_detection_active = True
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+        monitor.prev_toolhead_sensor_state = True
+        self.manager.get_switch_state.return_value = False
+        monitor._handle_runout_detected = Mock(side_effect=RuntimeError("boom"))
+
+        result = monitor._monitor_runout(5.0)
+
+        assert result == 6.0
+        log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
+        assert any("monitor error" in msg.lower() for msg in log_messages)
 
 
 if __name__ == '__main__':

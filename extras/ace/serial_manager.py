@@ -26,9 +26,16 @@ class AceSerialManager:
 
     QUEUE_MAXSIZE = 1024
     WINDOW_SIZE = 4
-    DEFAULT_TIMEOUT_S = 2.0
+    DEFAULT_TIMEOUT_S = 5.0
 
-    def __init__(self, gcode, reactor, instance_num=0, ace_enabled=True, status_debug_logging=False):
+    def __init__(
+            self,
+            gcode,
+            reactor,
+            instance_num=0,
+            ace_enabled=True,
+            status_debug_logging=False,
+            supervision_enabled=True):
         """
         Initialize serial manager.
 
@@ -38,6 +45,7 @@ class AceSerialManager:
             instance_num: ACE instance number for logging
             ace_enabled: Initial ACE Pro enabled state
             status_debug_logging: Enable detailed status logging for debugging
+            supervision_enabled: Enable communication health supervision
         """
         self._port = None
         self._usb_location = None
@@ -86,6 +94,7 @@ class AceSerialManager:
 
         self._ace_pro_enabled = ace_enabled
         self._status_debug_logging = bool(status_debug_logging)
+        self._supervision_enabled = bool(supervision_enabled)
 
         # Connection stability tracking
         # Rate-based detection: unstable if too many reconnects in short window
@@ -101,10 +110,21 @@ class AceSerialManager:
         self.RECONNECT_BACKOFF_MIN = 5.0     # Minimum backoff delay
         self.RECONNECT_BACKOFF_MAX = 30.0    # Maximum backoff delay (30 seconds)
         self.RECONNECT_BACKOFF_FACTOR = 1.5  # Multiply backoff on each failure
-        
+        self.TOPOLOGY_RELEARN_THRESHOLD = 1  # After N mismatches, accept new topology
+
         # Expected topology positions for validation
         self._expected_topology_positions = None  # Set after first successful enumeration
         self._topology_validation_failed_count = 0
+
+        # Communication health supervision
+        # Track timeouts and unsolicited messages to detect out-of-sync communication
+        self.COMM_SUPERVISION_WINDOW = 30.0     # Monitor last 30 seconds
+        self.COMM_TIMEOUT_THRESHOLD = 15        # 15+ timeouts in window (AND condition)
+        self.COMM_UNSOLICITED_THRESHOLD = 15    # 15+ unsolicited in window (AND condition)
+        self._comm_timeout_timestamps = []      # List of timeout event times
+        self._comm_unsolicited_timestamps = []  # List of unsolicited message times
+        self._last_supervision_check = 0.0      # Last time we checked health
+        self.SUPERVISION_CHECK_INTERVAL = 5.0   # Check every 5 seconds
 
     def enable_ace_pro(self):
         """Enable ACE Pro and reconnect if not connected."""
@@ -142,7 +162,7 @@ class AceSerialManager:
         Examples:
             "1-1.4.3:1.0" → (1, 1, 4, 3)
             "acm.2" → (999998, 2)
-        
+
         ACM fallback locations sort after USB locations but before
         unrecognized devices (999999).
         """
@@ -150,7 +170,7 @@ class AceSerialManager:
             return (999999,)
 
         location_str = str(location_str)
-        
+
         # Handle ACM fallback format (e.g., "acm.2")
         if location_str.startswith('acm.'):
             try:
@@ -158,7 +178,7 @@ class AceSerialManager:
                 return (999998, acm_num)  # Sort after USB, before unknown
             except ValueError:
                 return (999999,)
-        
+
         # Strip interface suffix (e.g., ":1.0")
         location_str = location_str.split(':')[0]
         parts = location_str.replace('-', '.').split('.')
@@ -204,7 +224,7 @@ class AceSerialManager:
             sort_key = self._parse_usb_location(location)
             matches.append((sort_key, location, portinfo.device))
 
-            self.gcode.respond_info(
+            logging.info(
                 f"ACE[{self.instance_num}] USB device found: {portinfo.device} "
                 f"at location '{location}' (sort_key={sort_key})"
             )
@@ -223,20 +243,36 @@ class AceSerialManager:
                         f"Waiting for all ACEs to enumerate..."
                     )
                     return None
-                
+
                 self._expected_topology_positions = [self._parse_usb_location(loc) for _, loc, _ in matches]
-                self.gcode.respond_info(
+                logging.info(
                     f"ACE[{self.instance_num}]: Stored topology positions: {self._expected_topology_positions}"
                 )
-            
-            self.gcode.respond_info(
+
+            # Prefer a port whose topology matches the stored signature for this instance
+            selected_dev = None
+            if self._expected_topology_positions and instance < len(self._expected_topology_positions):
+                expected_topo = self._expected_topology_positions[instance]
+                for sort_key, loc, dev in matches:
+                    if sort_key == expected_topo:
+                        selected_dev = dev
+                        break
+
+            logging.info(
                 f"ACE[{self.instance_num}] USB enumeration order:"
             )
             for idx, (sort_key, loc, dev) in enumerate(matches):
-                marker = " <- SELECTED" if idx == instance else ""
-                self.gcode.respond_info(
+                marker = ""
+                if selected_dev and dev == selected_dev:
+                    marker = " <- SELECTED (topology match)"
+                elif idx == instance and not selected_dev:
+                    marker = " <- SELECTED"
+                logging.info(
                     f"  [{idx}] {dev} at {loc}{marker}"
                 )
+
+            if selected_dev:
+                return selected_dev
 
         if len(matches) > instance:
             return matches[instance][2]
@@ -259,12 +295,12 @@ class AceSerialManager:
     def get_usb_location(self):
         """Get current USB location."""
         return getattr(self, '_usb_location', None)
-    
+
     def get_usb_topology_position(self):
         """
         Get normalized topology position (depth in daisy chain).
         Returns the number of hops from root, ignoring which root port.
-        
+
         Examples:
             "2-2.3" -> 2 (root -> hub -> port)
             "2-2.4.3" -> 3 (root -> hub -> port -> port)
@@ -273,41 +309,47 @@ class AceSerialManager:
         location = self.get_usb_location()
         if not location:
             return None
-        
+
         # Count the number of dots/hyphens = depth in USB tree
         # Strip the controller number prefix (before first hyphen)
         if '-' in location:
             topo = location.split('-', 1)[1]  # e.g., "2.3" or "2.4.3"
             depth = topo.count('.') + 1  # Count ports in chain
             return depth
-        
+
         return None
-    
+
     def _validate_topology_position(self, instance):
         """
         Validate that this instance is connected to the correct physical ACE.
         Uses USB topology depth to verify position in daisy chain.
-        
+
         Returns:
             bool: True if topology position is correct, False otherwise
         """
         current_topo = self._parse_usb_location(self._usb_location)
-        
+
         if self._expected_topology_positions is None:
             # First connection - store it but validate the order is ascending
             # Instance 0 should be shallowest (closest to root), instance 1 deeper, etc.
             # We can't fully validate yet, but we can check relative to what we have
-            self.gcode.respond_info(
+            logging.info(
                 f'ACE[{instance}]: First connection - storing topology {current_topo}'
             )
             return True
-        
+
         if instance >= len(self._expected_topology_positions):
-            # Instance number out of range
+            # Instance number out of range - pad the list with None
+            while len(self._expected_topology_positions) <= instance:
+                self._expected_topology_positions.append(None)
             return True
-        
+
         expected_topo = self._expected_topology_positions[instance]
-        
+
+        # If no expected topology (padded with None), accept without validation
+        if expected_topo is None:
+            return True
+
         # Compare topology positions (they should match)
         if current_topo != expected_topo:
             self._topology_validation_failed_count += 1
@@ -316,8 +358,17 @@ class AceSerialManager:
                 f'expected {expected_topo}, got {current_topo} '
                 f'(failure #{self._topology_validation_failed_count})'
             )
+            if self._topology_validation_failed_count >= self.TOPOLOGY_RELEARN_THRESHOLD:
+                # Clear all topology expectations to force re-enumeration
+                self._expected_topology_positions = None
+                self.gcode.respond_info(
+                    f'ACE[{instance}]: Topology expectations cleared after '
+                    f'{self._topology_validation_failed_count} failures - will re-enumerate'
+                )
+                self._topology_validation_failed_count = 0
+                return False  # Fail this connection attempt to trigger re-enumeration
             return False
-        
+
         # Reset failure counter on success
         self._topology_validation_failed_count = 0
         return True
@@ -343,7 +394,7 @@ class AceSerialManager:
                 return self.reactor.NEVER
 
             if self.auto_connect(self.instance_num, self._baud):
-                self.gcode.respond_info(f'ACE[{self.instance_num}]: Connected')
+                logging.info(f'ACE[{self.instance_num}]: Connected')
                 # Reset backoff on successful connect
                 self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
                 return self.reactor.NEVER
@@ -352,7 +403,7 @@ class AceSerialManager:
                 # (only track failures, not the initial attempt)
                 now = self.reactor.monotonic()
                 self._reconnect_timestamps.append(now)
-                
+
                 # Prune old timestamps outside the instability window
                 cutoff = now - self.INSTABILITY_WINDOW
                 self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
@@ -373,15 +424,15 @@ class AceSerialManager:
                 return eventtime + current_backoff
 
         initial_delay = self._reconnect_backoff
-        self.gcode.respond_info(
+        logging.info(
             f'ACE[{self.instance_num}]: Starting connection (first attempt in {initial_delay:.0f}s)'
         )
         self.connect_timer = self.reactor.register_timer(
             connect_callback,
-            self.reactor.NOW + initial_delay
+            self.reactor.monotonic() + initial_delay
         )
 
-    def reconnect(self, delay=5):
+    def reconnect(self, delay=None):
         """Disconnect and schedule reconnection (only if ACE enabled)."""
         if not self._ace_pro_enabled:
             self.gcode.respond_info(
@@ -401,8 +452,9 @@ class AceSerialManager:
         )
         self.disconnect()
 
-        # Use backoff delay instead of fixed delay parameter
-        initial_delay = self._reconnect_backoff
+        # Use provided delay parameter, or default to current backoff
+        initial_delay = delay if delay is not None else self._reconnect_backoff
+        self.gcode.respond_info(f'ACE[{self.instance_num}]: Scheduling reconnect in {initial_delay:.0f}s')
 
         def _reconnect_callback(eventtime):
             if not self._ace_pro_enabled:
@@ -420,11 +472,11 @@ class AceSerialManager:
                 # Track failed connection attempt for stability detection
                 now = self.reactor.monotonic()
                 self._reconnect_timestamps.append(now)
-                
+
                 # Prune old timestamps outside the instability window
                 cutoff = now - self.INSTABILITY_WINDOW
                 self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
-                
+
                 # Increase backoff delay on failure (exponential backoff)
                 current_backoff = self._reconnect_backoff
                 next_backoff = self._reconnect_backoff * self.RECONNECT_BACKOFF_FACTOR
@@ -445,8 +497,16 @@ class AceSerialManager:
         )
         self.connect_timer = self.reactor.register_timer(
             _reconnect_callback,
-            self.reactor.NOW + initial_delay
+            self.reactor.monotonic() + initial_delay
         )
+
+    def ensure_connect_timer(self):
+        """Ensure a reconnect timer is scheduled if disconnected."""
+        if self._ace_pro_enabled and not self.is_connected() and self.connect_timer is None:
+            self.gcode.respond_info(
+                f'ACE[{self.instance_num}]: No active connect timer, scheduling reconnect'
+            )
+            self.reconnect(self._reconnect_backoff)
 
     def dwell(self, delay=1.0):
         """Sleep in reactor time."""
@@ -464,7 +524,7 @@ class AceSerialManager:
         self._baud = baud
         self._usb_location = self._get_usb_location_for_port(port)
 
-        self.gcode.respond_info('Try connecting to ' + str(port))
+        logging.info('Try connecting to ' + str(port))
         connected = self.connect(port, baud)
         self.serial_name = port
 
@@ -474,10 +534,10 @@ class AceSerialManager:
             )
             return False
 
-        self.gcode.respond_info(
+        logging.info(
             f'ACE[{instance}]: auto_connect: Connected to {port}, sending get_info request'
         )
-        
+
         # Validate we're connected to the correct physical ACE
         if not self._validate_topology_position(instance):
             self.gcode.respond_info(
@@ -485,13 +545,23 @@ class AceSerialManager:
             )
             self.disconnect()
             return False
-        
+
         self.send_request(
             request={"method": "get_info"},
-            callback=lambda response: self.gcode.respond_info(f"ACE[{instance}]: {response}")
+            callback=lambda response: self._log_info_response(response)
         )
 
         return True
+
+    def _log_info_response(self, response):
+        """
+        Log get_info response with port and USB topology context.
+        """
+        port = self.serial_name or self._port or "unknown"
+        topo = self._usb_location or "unknown"
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: {response} (port={port}, usb={topo})"
+        )
 
     def connect(self, port, baud):
         """
@@ -514,7 +584,12 @@ class AceSerialManager:
             if self._serial.is_open:
                 self._connected = True
                 logging.info(f'ACE[{self.instance_num}]: Serial port {port} opened')
-                self._request_id = 0
+                # DON'T reset _request_id on reconnect - old responses may still arrive
+                # Resetting to 0 would cause ID collisions with stale ACE responses
+
+                # Flush buffers to discard any stale data from previous session
+                self._serial.reset_input_buffer()
+                self._serial.reset_output_buffer()
 
                 if self.writer_timer is None:
                     self.writer_timer = self.reactor.register_timer(self._writer, self.reactor.NOW)
@@ -529,6 +604,10 @@ class AceSerialManager:
 
                 # Record connection time for stability grace period tracking
                 self._last_connected_time = self.reactor.monotonic()
+
+                # Clear supervision counters on successful connection
+                self._comm_timeout_timestamps = []
+                self._comm_unsolicited_timestamps = []
 
                 # Call on_connect callback if registered
                 if self.on_connect_callback:
@@ -559,6 +638,10 @@ class AceSerialManager:
         self.read_buffer = bytearray()
         self.clear_queues()
 
+        # Clear supervision counters on disconnect
+        self._comm_timeout_timestamps = []
+        self._comm_unsolicited_timestamps = []
+
         # Stop writer timer
         if self.writer_timer:
             try:
@@ -582,7 +665,7 @@ class AceSerialManager:
                 pass
             self.connect_timer = None
 
-        self.gcode.respond_info(
+        logging.info(
             f"ACE[{self.instance_num}]: Disconnected - all timers stopped"
         )
 
@@ -640,6 +723,78 @@ class AceSerialManager:
 
         return True
 
+    def _track_comm_timeout(self):
+        """Record a timeout event for communication health supervision."""
+        now = self.reactor.monotonic()
+        self._comm_timeout_timestamps.append(now)
+        # Prune old timestamps outside window
+        cutoff = now - self.COMM_SUPERVISION_WINDOW
+        self._comm_timeout_timestamps = [t for t in self._comm_timeout_timestamps if t > cutoff]
+
+    def _track_comm_unsolicited(self):
+        """Record an unsolicited message event for communication health supervision."""
+        now = self.reactor.monotonic()
+        self._comm_unsolicited_timestamps.append(now)
+        # Prune old timestamps outside window
+        cutoff = now - self.COMM_SUPERVISION_WINDOW
+        self._comm_unsolicited_timestamps = [t for t in self._comm_unsolicited_timestamps if t > cutoff]
+
+    def _check_communication_health(self):
+        """
+        Check if communication is healthy based on recent timeouts and unsolicited messages.
+
+        Returns:
+            tuple: (is_healthy, reason) where is_healthy is bool and reason is string
+        """
+        now = self.reactor.monotonic()
+
+        # Prune old events
+        cutoff = now - self.COMM_SUPERVISION_WINDOW
+        self._comm_timeout_timestamps = [t for t in self._comm_timeout_timestamps if t > cutoff]
+        self._comm_unsolicited_timestamps = [t for t in self._comm_unsolicited_timestamps if t > cutoff]
+
+        timeout_count = len(self._comm_timeout_timestamps)
+        unsolicited_count = len(self._comm_unsolicited_timestamps)
+
+        # Check thresholds - BOTH conditions must be met
+        if timeout_count >= self.COMM_TIMEOUT_THRESHOLD and unsolicited_count >= self.COMM_UNSOLICITED_THRESHOLD:
+            return False, f"{timeout_count} timeouts AND {unsolicited_count} unsolicited messages in last {self.COMM_SUPERVISION_WINDOW}s"
+
+        return True, "healthy"
+
+    def _supervision_check_and_recover(self):
+        """
+        Periodically check communication health and force reconnection if unhealthy.
+        Called from writer timer.
+        """
+        # Skip if supervision is disabled
+        if not self._supervision_enabled:
+            return
+
+        now = self.reactor.monotonic()
+
+        # Only check at intervals to avoid too frequent checks
+        if now - self._last_supervision_check < self.SUPERVISION_CHECK_INTERVAL:
+            return
+
+        self._last_supervision_check = now
+
+        # Only supervise if connected
+        if not self.is_connected():
+            return
+
+        is_healthy, reason = self._check_communication_health()
+
+        if not is_healthy:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Communication unhealthy ({reason}), forcing reconnection"
+            )
+            # Clear the tracking counters before reconnecting
+            self._comm_timeout_timestamps = []
+            self._comm_unsolicited_timestamps = []
+            # Force disconnect and let auto-reconnect handle it
+            self.disconnect()
+
     def get_connection_status(self):
         """
         Get detailed connection status for monitoring.
@@ -652,6 +807,11 @@ class AceSerialManager:
                 - time_connected: float - seconds since last connect
                 - last_connected_time: float (monotonic)
         """
+        # If we are disconnected and somehow have no reconnect timer (e.g. after
+        # an exception path), make sure a timer is scheduled so we don't get
+        # stuck showing a static "next retry" message.
+        self.ensure_connect_timer()
+
         now = self.reactor.monotonic()
         recent_count = self._get_recent_reconnect_count()
 
@@ -659,12 +819,34 @@ class AceSerialManager:
         if self._last_connected_time > 0:
             time_connected = now - self._last_connected_time
 
+        # Get supervision health statistics
+        now = self.reactor.monotonic()
+        cutoff = now - self.COMM_SUPERVISION_WINDOW
+        self._comm_timeout_timestamps = [t for t in self._comm_timeout_timestamps if t > cutoff]
+        self._comm_unsolicited_timestamps = [t for t in self._comm_unsolicited_timestamps if t > cutoff]
+
+        timeout_count = len(self._comm_timeout_timestamps)
+        unsolicited_count = len(self._comm_unsolicited_timestamps)
+        time_since_check = now - self._last_supervision_check
+
         return {
             "connected": self.is_connected(),
             "stable": self.is_connection_stable(),
             "recent_reconnects": recent_count,
             "time_connected": time_connected,
             "last_connected_time": self._last_connected_time,
+            "next_retry": self._reconnect_backoff if not self.is_connected() else 0.0,
+            "port": self._port or "unknown",
+            "usb_topology": self._usb_location or "unknown",
+            "supervision": {
+                "timeout_count": timeout_count,
+                "timeout_threshold": self.COMM_TIMEOUT_THRESHOLD,
+                "unsolicited_count": unsolicited_count,
+                "unsolicited_threshold": self.COMM_UNSOLICITED_THRESHOLD,
+                "window_seconds": self.COMM_SUPERVISION_WINDOW,
+                "check_interval": self.SUPERVISION_CHECK_INTERVAL,
+                "time_since_check": time_since_check,
+            }
         }
 
     # ========== CRC Calculation ==========
@@ -783,88 +965,6 @@ class AceSerialManager:
 
     # ========== Frame Reading and Parsing ==========
 
-    def read_frames(self, eventtime):
-        """
-        Read and parse frames from serial.
-
-        Returns:
-            list: Parsed frame dicts, or empty list if no complete frames
-        """
-        frames = []
-
-        try:
-            raw = self._serial.read(size=4096)
-        except SerialException:
-            self.gcode.respond_info(
-                f"[{self.instance_num}] Unable to read from serial\n" +
-                traceback.format_exc()
-            )
-            return frames
-
-        if raw:
-            self.read_buffer += raw
-
-        # Parse complete frames from buffer
-        while True:
-            buf = self.read_buffer
-            if len(buf) < 7:
-                break
-
-            # Check for frame header
-            if not (buf[0] == 0xFF and buf[1] == 0xAA):
-                hdr = buf.find(bytes([0xFF, 0xAA]))
-                if hdr == -1:
-                    self.gcode.respond_info(
-                        f"[{self.instance_num}] Resync: dropped {len(buf)} bytes"
-                    )
-                    self.read_buffer = bytearray()
-                    break
-                else:
-                    self.gcode.respond_info(f"[{self.instance_num}] Resync: skipping {hdr} bytes")
-                    self.read_buffer = buf[hdr:]
-                    buf = self.read_buffer
-                    if len(buf) < 7:
-                        break
-
-            # Parse frame length
-            payload_len = struct.unpack('<H', buf[2:4])[0]
-            frame_len = 2 + 2 + payload_len + 2 + 1
-
-            if len(buf) < frame_len:
-                break
-
-            # Validate terminator
-            terminator_idx = 4 + payload_len + 2
-            if buf[terminator_idx] != 0xFE:
-                next_hdr = buf.find(bytes([0xFF, 0xAA]), 1)
-                if next_hdr == -1:
-                    self.read_buffer = bytearray()
-                else:
-                    self.read_buffer = buf[next_hdr:]
-                self.gcode.respond_info(f"[{self.instance_num}] Invalid frame tail")
-                continue
-
-            # Extract and validate CRC
-            frame = bytes(buf[:frame_len])
-            self.read_buffer = bytearray(buf[frame_len:])
-
-            payload = frame[4:4 + payload_len]
-            crc_rx = frame[4 + payload_len:4 + payload_len + 2]
-            crc_calc = struct.pack('<H', self._calc_crc(payload))
-
-            if crc_rx != crc_calc:
-                self.gcode.respond_info("ACE: Invalid CRC")
-                continue
-
-            # Parse JSON payload
-            try:
-                ret = json.loads(payload.decode('utf-8'))
-                frames.append(ret)
-            except Exception as e:
-                self.gcode.respond_info(f"[{self.instance_num}] JSON decode error: {e}")
-
-        return frames
-
     # ========== Processing Loop Integration ==========
 
     def has_pending_requests(self):
@@ -946,7 +1046,7 @@ class AceSerialManager:
                 self._heartbeat_tick,
                 self.reactor.NOW
             )
-            self.gcode.respond_info(
+            logging.info(
                 f"ACE[{self.instance_num}]: Heartbeat started "
                 f"(interval={self.heartbeat_interval}s)"
             )
@@ -961,7 +1061,7 @@ class AceSerialManager:
                     f"ACE[{self.instance_num}]: Error stopping heartbeat: {e}"
                 )
             self.heartbeat_timer = None
-            self.gcode.respond_info(
+            logging.info(
                 f"ACE[{self.instance_num}]: Heartbeat stopped"
             )
 
@@ -1001,7 +1101,13 @@ class AceSerialManager:
 
             with self._lock:
                 for rid, t0 in list(self.inflight.items()):
-                    if (now - t0) > self.timeout_s:
+                    elapsed = now - t0
+                    if elapsed > self.timeout_s:
+                        self.gcode.respond_info(
+                            f"ACE[{self.instance_num}]: Request ID={rid} TIMEOUT after {elapsed:.1f}s"
+                        )
+                        # Track timeout for communication health supervision
+                        self._track_comm_timeout()
                         cb = self._callback_map.pop(rid, None)
                         if cb:
                             try:
@@ -1020,16 +1126,9 @@ class AceSerialManager:
 
                 req, cb = self.get_pending_request()
                 if req is None:
-                    # Opportunistic status request if idle
-                    now = self.reactor.monotonic()
-                    if not self.inflight and (now - self._last_status_request_time > 1.5):
-                        def _status_cb(response):
-                            pass  # Optionally update status
-                        req = {"method": "get_status"}
-                        cb = _status_cb
-                        self._last_status_request_time = now
-                    else:
-                        break
+                    # No pending requests - writer loop idle
+                    # Heartbeat timer handles periodic status updates
+                    break
 
                 with self._lock:
                     rid = self._request_id
@@ -1043,6 +1142,12 @@ class AceSerialManager:
             logging.info(f'ACE[{self.instance_num}]: Write error {str(e)}')
             self.gcode.respond_info(str(e))
 
+        # Check communication health and force reconnection if needed
+        try:
+            self._supervision_check_and_recover()
+        except Exception as e:
+            logging.warning(f"ACE[{self.instance_num}]: Supervision check error: {e}")
+
         return eventtime + 0.1
 
     def _reader(self, eventtime):
@@ -1051,24 +1156,24 @@ class AceSerialManager:
             raw = self._serial.read(size=4096)
         except SerialException:
             self.gcode.respond_info(
-                f"[{self.instance_num}] Unable to communicate with ACE\n" +
+                f"ACE[{self.instance_num}]: Unable to communicate with ACE\n" +
                 traceback.format_exc()
             )
 
             if not self._ace_pro_enabled:
                 self.gcode.respond_info(
-                    f"[{self.instance_num}] ACE Pro disabled - not scheduling reconnect"
+                    f"ACE[{self.instance_num}]: ACE Pro disabled - not scheduling reconnect"
                 )
                 return self.reactor.NEVER  # Stop this timer too
 
             # Try to reconnect
             if self.connect_timer is None:
-                self.gcode.respond_info(f"[{self.instance_num}] Scheduling reconnect")
-                self.reconnect(5.0)
+                self.gcode.respond_info(f"ACE[{self.instance_num}]: Scheduling reconnect")
+                self.reconnect()
                 return self.reactor.NOW + 1.5
             else:
                 self.gcode.respond_info(
-                    f"[{self.instance_num}] Scheduling reconnect (already scheduled)"
+                    f"ACE[{self.instance_num}]: Scheduling reconnect (already scheduled)"
                 )
             return self.reactor.NEVER
 
@@ -1086,12 +1191,12 @@ class AceSerialManager:
                 hdr = buf.find(bytes([0xFF, 0xAA]))
                 if hdr == -1:
                     self.gcode.respond_info(
-                        f"[{self.instance_num}] Resync: dropped junk ({len(buf)} bytes)"
+                        f"ACE[{self.instance_num}]: Resync: dropped junk ({len(buf)} bytes)"
                     )
                     self.read_buffer = bytearray()
                     break
                 else:
-                    self.gcode.respond_info(f"[{self.instance_num}] Resync: skipping {hdr} bytes")
+                    self.gcode.respond_info(f"ACE[{self.instance_num}]: Resync: skipping {hdr} bytes")
                     self.read_buffer = buf[hdr:]
                     buf = self.read_buffer
                     if len(buf) < 7:
@@ -1110,7 +1215,7 @@ class AceSerialManager:
                     self.read_buffer = bytearray()
                 else:
                     self.read_buffer = buf[next_hdr:]
-                self.gcode.respond_info(f"[{self.instance_num}] Invalid frame tail, resyncing")
+                self.gcode.respond_info(f"ACE[{self.instance_num}]: Invalid frame tail, resyncing")
                 continue
 
             frame = bytes(buf[:frame_len])
@@ -1121,13 +1226,13 @@ class AceSerialManager:
             crc_calc = struct.pack('<H', self._calc_crc(payload))
 
             if crc_rx != crc_calc:
-                self.gcode.respond_info("Invalid CRC")
+                self.gcode.respond_info(f"ACE[{self.instance_num}]: Invalid CRC")
                 continue
 
             try:
                 ret = json.loads(payload.decode('utf-8'))
             except Exception as e:
-                self.gcode.respond_info(f"[{self.instance_num}] JSON decode error: {e}")
+                self.gcode.respond_info(f"ACE[{self.instance_num}]: JSON decode error: {e}")
                 continue
 
             if self._status_debug_logging:
@@ -1138,9 +1243,14 @@ class AceSerialManager:
                 try:
                     cb(response=ret)
                 except Exception as e:
-                    logging.info(f"[{self.instance_num}] Callback error: {str(e)}")
+                    self.gcode.respond_info(f"ACE[{self.instance_num}]: Callback error: {e}")
             else:
-                self.gcode.respond_info(f"ACE[{self.instance_num}] unsolicited: {ret}")
+                # Log unsolicited messages (no matching callback found)
+                response_id = ret.get('id', 'no-id')
+                response_str = json.dumps(ret)
+                self.gcode.respond_info(f"ACE[{self.instance_num}]: UNSOLICITED (ID={response_id}, current_id={self._request_id}): {response_str}")
+                # Track unsolicited message for communication health supervision
+                self._track_comm_unsolicited()
 
         return eventtime + 0.05
 
@@ -1255,5 +1365,3 @@ class AceSerialManager:
                     f"(Δ{temp_delta:+.1f}°C)"
                 )
         self.last_temp = current_temp
-
-

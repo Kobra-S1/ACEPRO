@@ -1,0 +1,90 @@
+--- a/screen.py
++++ b/screen.py
+@@ -317,8 +317,87 @@
+         for led in self.printer.get_leds():
+             requested_updates['objects'][led] = ["color_data"]
+ 
++        ace_objects = self._ace_subscription_objects()
++        if ace_objects:
++            requested_updates['objects'].update(ace_objects)
++
+         self._ws.klippy.object_subscription(requested_updates)
+ 
++    def _ace_subscription_objects(self):
++        objects = {}
++        instances = self._detect_ace_instances_from_config()
++        if not instances:
++            return objects
++
++        ace_fields = [
++            "slots",
++            "status",
++            "dryer",
++            "dryer_status",
++            "temp",
++            "enable_rfid",
++            "fan_speed",
++            "feed_assist_count",
++            "cont_assist_time",
++        ]
++        objects["ace_state"] = [
++            "ace_instances",
++            "current_index",
++            "endless_spool_enabled",
++            "endless_spool_match_mode",
++        ]
++        for instance_id in instances:
++            key = f"ace_instance_{instance_id}"
++            objects[key] = ace_fields
++
++        logging.debug(
++            "ACE subscription enabled for: %s",
++            ", ".join(sorted(objects.keys())),
++        )
++        return objects
++
++    def _detect_ace_instances_from_config(self):
++        printer = getattr(self, "printer", None)
++        if printer is None:
++            return []
++
++        instances = set()
++        try:
++            get_section = getattr(printer, "get_config_section", None)
++            if callable(get_section):
++                ace_section = get_section("ace")
++                if isinstance(ace_section, dict):
++                    ace_count = ace_section.get("ace_count")
++                    if ace_count is not None:
++                        try:
++                            return list(range(int(ace_count)))
++                        except (ValueError, TypeError):
++                            logging.debug(
++                                "ACE: Unable to parse ace_count='%s'",
++                                ace_count,
++                            )
++
++            get_sections = getattr(printer, "get_config_section_list", None)
++            if callable(get_sections):
++                for section in get_sections():
++                    if section == "ace":
++                        instances.add(0)
++                    elif section.startswith("ace "):
++                        try:
++                            instances.add(int(section.split()[1]))
++                        except (ValueError, IndexError):
++                            logging.debug(
++                                "ACE: Unable to parse instance number from section '%s'",
++                                section,
++                            )
++        except Exception:
++            logging.debug(
++                "ACE: Failed to detect ACE instances from config",
++                exc_info=True,
++            )
++
++        return sorted(instances)
++
+     @staticmethod
+     def _load_panel(panel):
+         logging.debug(f"Loading panel: {panel}")

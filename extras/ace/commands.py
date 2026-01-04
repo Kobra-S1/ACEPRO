@@ -7,6 +7,8 @@ instances based on INSTANCE parameter or tool mapping.
 
 import json
 import traceback
+import logging
+
 from .config import (
     ACE_INSTANCES,
     INSTANCE_MANAGERS,
@@ -65,6 +67,76 @@ def ace_get_instance(gcmd):
     if ace is None:
         raise gcmd.error("No ACE instances configured")
     return ace
+
+
+def rgb_to_mainsail_color(r, g, b):
+    """
+    Map RGB values to closest Mainsail color name using HSV heuristics.
+
+    Returns one of: 'primary', 'secondary', 'accent', 'info', 'success', 'error', 'warning'
+
+    Algorithm:
+    1. Check for grayscale/low saturation → 'secondary'
+    2. Use Hue to determine color family:
+       - Red (0-30°, 330-360°) → 'error'
+       - Orange/Yellow (30-60°) → 'warning'
+       - Green (60-150°) → 'success'
+       - Cyan (150-210°) → 'info'
+       - Blue (210-270°) → 'primary'
+       - Magenta (270-330°) → 'accent'
+    """
+    # Normalize to 0-1 range
+    r_norm = r / 255.0
+    g_norm = g / 255.0
+    b_norm = b / 255.0
+
+    # Calculate HSV
+    max_val = max(r_norm, g_norm, b_norm)
+    min_val = min(r_norm, g_norm, b_norm)
+    delta = max_val - min_val
+
+    # Value (brightness)
+    value = max_val
+
+    # Saturation
+    saturation = 0 if max_val == 0 else delta / max_val
+
+    # Check for grayscale (low saturation)
+    # Increased threshold to 30% to catch bluish-grey, greenish-grey, etc.
+    if saturation < 0.30:
+        # Very bright = white (no color class, shows as terminal default)
+        if value > 0.85:
+            return None  # White - use terminal default color
+        # Very dark = black
+        elif value < 0.15:
+            return 'secondary'  # Black/dark gray
+        # Mid-range = gray
+        else:
+            return 'secondary'  # Gray
+
+    # Calculate Hue (0-360)
+    if delta == 0:
+        hue = 0
+    elif max_val == r_norm:
+        hue = 60 * (((g_norm - b_norm) / delta) % 6)
+    elif max_val == g_norm:
+        hue = 60 * (((b_norm - r_norm) / delta) + 2)
+    else:
+        hue = 60 * (((r_norm - g_norm) / delta) + 4)
+
+    # Map hue to Mainsail color
+    if hue < 30 or hue >= 330:
+        return 'error'      # Red
+    elif hue < 60:
+        return 'warning'    # Orange/Yellow
+    elif hue < 150:
+        return 'success'    # Green
+    elif hue < 210:
+        return 'info'       # Cyan
+    elif hue < 270:
+        return 'primary'    # Blue
+    else:
+        return 'accent'     # Magenta/Pink
 
 
 def ace_get_manager(instance_num=0):
@@ -155,16 +227,16 @@ def cmd_ACE_GET_STATUS(gcmd):
             """Format all status information in a readable, grouped format."""
             lines = []
             lines.append(f"=== ACE Instance {inst_num} Status ===")
-            
+
             # Track which keys we've explicitly handled
             handled_keys = set()
-            
+
             # Main status and temperature
             lines.append(f"Status: {result.get('status', 'unknown')}")
             handled_keys.add('status')
             lines.append(f"Current Temperature: {result.get('temp', 0)}°C")
             handled_keys.add('temp')
-            
+
             # Dryer status (all on one line) - check both 'dryer' and 'dryer_status'
             dryer = result.get('dryer_status') or result.get('dryer', {})
             if dryer:
@@ -172,7 +244,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                 handled_keys.add('dryer')
                 dryer_parts = []
                 dryer_handled = set()
-                
+
                 # Known dryer fields
                 if 'status' in dryer:
                     dryer_parts.append(f"status={dryer['status']}")
@@ -186,15 +258,15 @@ def cmd_ACE_GET_STATUS(gcmd):
                 if 'remain_time' in dryer:
                     dryer_parts.append(f"remain_time={dryer['remain_time']}min")
                     dryer_handled.add('remain_time')
-                
+
                 # Any unknown dryer fields
                 for key, value in dryer.items():
                     if key not in dryer_handled:
                         dryer_parts.append(f"{key}={value}")
-                
+
                 dryer_line = f"Dryer: {', '.join(dryer_parts)}"
                 lines.append(dryer_line)
-            
+
             # RFID and fan status
             if 'enable_rfid' in result:
                 lines.append(f"RFID Enabled: {result['enable_rfid']}")
@@ -202,7 +274,7 @@ def cmd_ACE_GET_STATUS(gcmd):
             if 'fan_speed' in result:
                 lines.append(f"Fan Speed: {result['fan_speed']} RPM")
                 handled_keys.add('fan_speed')
-            
+
             # Feed assist status
             if 'feed_assist_count' in result:
                 lines.append(f"Feed Assist Count: {result['feed_assist_count']}")
@@ -210,7 +282,7 @@ def cmd_ACE_GET_STATUS(gcmd):
             if 'cont_assist_time' in result:
                 lines.append(f"Continuous Assist Time: {result['cont_assist_time']}s")
                 handled_keys.add('cont_assist_time')
-            
+
             # Slot information (one line per slot)
             slots = result.get('slots', [])
             if slots:
@@ -219,14 +291,14 @@ def cmd_ACE_GET_STATUS(gcmd):
                 for slot in slots:
                     slot_handled = set()
                     slot_parts = []
-                    
+
                     # Get slot index for inventory lookup
                     slot_idx = slot.get('index')
                     inv_data = {}
                     if ace_instance is not None and slot_idx is not None:
                         if 0 <= slot_idx < len(ace_instance.inventory):
                             inv_data = ace_instance.inventory[slot_idx]
-                    
+
                     # Known slot fields in preferred order
                     if 'index' in slot:
                         idx = slot['index']
@@ -279,7 +351,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                                 # Multiple colors - show count
                                 slot_parts.append(f"colors={len(colors)}_colors")
                         slot_handled.add('colors')
-                    
+
                     # Add RFID temperature data from inventory (if available)
                     if inv_data:
                         extruder_temp = inv_data.get('extruder_temp')
@@ -288,18 +360,18 @@ def cmd_ACE_GET_STATUS(gcmd):
                             t_max = extruder_temp.get('max', 0)
                             if t_min > 0 or t_max > 0:
                                 slot_parts.append(f"extruder_temp={t_min}-{t_max}°C")
-                        
+
                         hotbed_temp = inv_data.get('hotbed_temp')
                         if hotbed_temp and isinstance(hotbed_temp, dict):
                             b_min = hotbed_temp.get('min', 0)
                             b_max = hotbed_temp.get('max', 0)
                             if b_min > 0 or b_max > 0:
                                 slot_parts.append(f"hotbed_temp={b_min}-{b_max}°C")
-                        
+
                         diameter = inv_data.get('diameter')
                         if diameter is not None and diameter > 0:
                             slot_parts.append(f"diameter={diameter}mm")
-                        
+
                         total = inv_data.get('total')
                         current = inv_data.get('current')
                         if total is not None and total > 0:
@@ -307,7 +379,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                                 slot_parts.append(f"spool={current}/{total}m")
                             else:
                                 slot_parts.append(f"spool_total={total}m")
-                    
+
                     # Any unknown slot fields
                     for key, value in slot.items():
                         if key not in slot_handled:
@@ -315,10 +387,10 @@ def cmd_ACE_GET_STATUS(gcmd):
                                 slot_parts.append(f"{key}={json.dumps(value)}")
                             else:
                                 slot_parts.append(f"{key}={value}")
-                    
+
                     slot_line = f"  Slot: {', '.join(slot_parts)}"
                     lines.append(slot_line)
-            
+
             # Catch any unknown top-level keys
             unknown_keys = []
             for key, value in result.items():
@@ -327,12 +399,12 @@ def cmd_ACE_GET_STATUS(gcmd):
                         unknown_keys.append(f"{key}={json.dumps(value)}")
                     else:
                         unknown_keys.append(f"{key}={value}")
-            
+
             if unknown_keys:
                 lines.append("\nAdditional Fields:")
                 for item in unknown_keys:
                     lines.append(f"  {item}")
-            
+
             return "\n".join(lines)
 
         if instance_num is not None:
@@ -342,7 +414,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                 if response and response.get("code") == 0:
                     result = response.get("result", {})
                     inst_num = ace.instance_num if hasattr(ace, "instance_num") else 0
-                    
+
                     if verbose:
                         # Verbose output: all information nicely formatted
                         formatted = format_verbose_status(result, inst_num, ace)
@@ -373,7 +445,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                 def status_callback(response):
                     if response and response.get("code") == 0:
                         result = response.get("result", {})
-                        
+
                         if verbose:
                             # Verbose output: all information nicely formatted
                             formatted = format_verbose_status(result, inst_num, ace)
@@ -406,11 +478,11 @@ def cmd_ACE_GET_CONNECTION_STATUS(gcmd):
     try:
         lines = []
         lines.append("=== ACE Connection Status ===")
-        
+
         for inst_num in sorted(ACE_INSTANCES.keys()):
             ace = ACE_INSTANCES[inst_num]
             status = ace.serial_mgr.get_connection_status()
-            
+
             # Build status line
             if status["connected"]:
                 if status["stable"]:
@@ -419,42 +491,84 @@ def cmd_ACE_GET_CONNECTION_STATUS(gcmd):
                     conn_state = f"Connected (stabilizing, {status['time_connected']:.0f}s)"
             else:
                 conn_state = "Disconnected"
-            
-            # Add reconnect info if any recent attempts
+
+            # Port and topology info
+            port = status.get("port", "unknown")
+            topology = status.get("usb_topology", "unknown")
+            port_info = f" (port={port}, usb={topology})"
+
+            lines.append(f"ACE[{inst_num}]: {conn_state}{port_info}")
+
+            # Layer 1: Serial Communication Health Supervision
+            sup = status.get("supervision", {})
+            timeout_cnt = sup.get("timeout_count", 0)
+            timeout_thr = sup.get("timeout_threshold", 0)
+            unsol_cnt = sup.get("unsolicited_count", 0)
+            unsol_thr = sup.get("unsolicited_threshold", 0)
+            sup_window = sup.get("window_seconds", 30)
+            sup_enabled = ace.serial_mgr._supervision_enabled
+
+            health_status = "healthy" if (timeout_cnt < timeout_thr or unsol_cnt < unsol_thr) else "UNHEALTHY"
+            sup_status = "enabled" if sup_enabled else "disabled"
+            lines.append(
+                f"  ├─ Layer 1 - Serial Health: {health_status} ({sup_status}) - "
+                f"{timeout_cnt}/{timeout_thr} timeouts, {unsol_cnt}/{unsol_thr} unsolicited (last {int(sup_window)}s)"
+            )
+
+            # Layer 2: Exponential Backoff
             reconnects = status["recent_reconnects"]
-            threshold = ace.serial_mgr.INSTABILITY_THRESHOLD
-            window = ace.serial_mgr.INSTABILITY_WINDOW
-            
-            if reconnects > 0:
-                reconnect_info = f", {reconnects}/{threshold} reconnects in {int(window)}s"
-            else:
-                reconnect_info = ""
-            
-            # Current backoff delay
             backoff = ace.serial_mgr._reconnect_backoff
-            backoff_info = f", next retry: {backoff:.0f}s" if not status["connected"] else ""
-            
-            lines.append(f"ACE[{inst_num}]: {conn_state}{reconnect_info}{backoff_info}")
-        
+            backoff_min = ace.serial_mgr.RECONNECT_BACKOFF_MIN
+            backoff_max = ace.serial_mgr.RECONNECT_BACKOFF_MAX
+            backoff_window = ace.serial_mgr.INSTABILITY_WINDOW
+
+            if status["connected"]:
+                backoff_status = f"current={backoff:.1f}s (reset on next failure)"
+            else:
+                backoff_status = f"next retry in {backoff:.1f}s (min={backoff_min:.0f}s, max={backoff_max:.0f}s)"
+
+            lines.append(
+                f"  ├─ Layer 2 - Backoff: {backoff_status}, "
+                f"{reconnects} failures (last {int(backoff_window)}s)"
+            )
+
+            # Layer 3: Manager Stability Supervision
+            threshold = ace.serial_mgr.INSTABILITY_THRESHOLD
+            grace_period = ace.serial_mgr.STABILITY_GRACE_PERIOD
+
+            if reconnects >= threshold:
+                stability_status = f"UNSTABLE ({reconnects}/{threshold} reconnects)"
+            elif status["connected"] and status["time_connected"] < grace_period:
+                stability_status = f"stabilizing ({status['time_connected']:.0f}s/{int(grace_period)}s)"
+            elif status["connected"]:
+                stability_status = "stable"
+            else:
+                stability_status = f"disconnected ({reconnects}/{threshold} reconnects)"
+
+            lines.append(
+                f"  └─ Layer 3 - Manager: {stability_status}"
+            )
+
         gcmd.respond_info("\n".join(lines))
-        
+
     except Exception as e:
         gcmd.respond_info(f"ACE_GET_CONNECTION_STATUS error: {e}")
 
 
 def cmd_ACE_RECONNECT(gcmd):
-    """Reconnect ACE serial connection. [INSTANCE=] - omit to reconnect all instances."""
+    """Reconnect ACE serial connection. [INSTANCE=] [DELAY=5] - omit INSTANCE to reconnect all."""
     try:
         instance_num = gcmd.get_int("INSTANCE", None)
+        delay = gcmd.get_float("DELAY", 5.0)
 
         if instance_num is not None:
             ace = ace_get_instance(gcmd)
-            ace.serial_mgr.reconnect(delay=1.0)
-            gcmd.respond_info(f"ACE[{instance_num}]: Disconnected, reconnecting in 1s...")
+            ace.serial_mgr.reconnect(delay=delay)
+            gcmd.respond_info(f"ACE[{instance_num}]: Disconnected, reconnecting in {delay:.1f}s...")
         else:
             def reconnect_instance(inst_num, manager, ace):
-                ace.serial_mgr.reconnect(delay=1.0)
-                gcmd.respond_info(f"ACE[{inst_num}]: Disconnected, reconnecting in 1s...")
+                ace.serial_mgr.reconnect(delay=delay)
+                gcmd.respond_info(f"ACE[{inst_num}]: Disconnected, reconnecting in {delay:.1f}s...")
 
             for_each_instance(reconnect_instance)
 
@@ -591,17 +705,14 @@ def cmd_ACE_SET_SLOT(gcmd):
             manager = ace_get_manager(ace.instance_num)
             manager._sync_inventory_to_persistent(ace.instance_num)
             gcmd.respond_info(f"Slot {idx} set to empty")
-            # Emit inventory update for KlipperScreen
-            response = {"instance": ace.instance_num, "slots": ace.inventory}
-            gcmd.respond_info(f"// {json.dumps(response)}")
             return
 
         color_str = gcmd.get("COLOR", None)
         material = gcmd.get("MATERIAL", "")
         temp = gcmd.get_int("TEMP", 0)
 
-        if not color_str or not material or temp <= 0:
-            raise gcmd.error("COLOR, MATERIAL, and TEMP must be set unless EMPTY=1")
+        if not color_str or not material or temp < 0:
+            raise gcmd.error("COLOR, MATERIAL, and TEMP (0-300) must be set unless EMPTY=1")
 
         # Parse color - check for named color first, then R,G,B format
         color_upper = color_str.upper()
@@ -623,9 +734,6 @@ def cmd_ACE_SET_SLOT(gcmd):
         manager = ace_get_manager(ace.instance_num)
         manager._sync_inventory_to_persistent(ace.instance_num)
         gcmd.respond_info(f"Slot {idx}: color={color}, material={material}, temp={temp}")
-        # Emit inventory update for KlipperScreen
-        response = {"instance": ace.instance_num, "slots": ace.inventory}
-        gcmd.respond_info(f"// {json.dumps(response)}")
     except Exception as e:
         gcmd.respond_info(f"ACE_SET_SLOT error: {e}")
 
@@ -660,7 +768,9 @@ def cmd_ACE_START_DRYING(gcmd):
 
             def callback(response):
                 if response and response.get("code") == 0:
-                    gcmd.respond_info(f"ACE[{instance_num}]: Dryer started: {temperature}°C for {duration}min")
+                    if not getattr(ace, "_dryer_start_logged", False):
+                        gcmd.respond_info(f"ACE[{instance_num}]: Dryer started: {temperature}°C for {duration}min")
+                        ace._dryer_start_logged = True
                 else:
                     msg = response.get("msg", "Unknown error") if response else ""
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer start failed: {msg}")
@@ -679,7 +789,9 @@ def cmd_ACE_START_DRYING(gcmd):
 
                 def callback(response):
                     if response and response.get("code") == 0:
-                        gcmd.respond_info(f"ACE[{inst_num}]: Dryer started: {temperature}°C for {duration}min")
+                        if not getattr(ace, "_dryer_start_logged", False):
+                            gcmd.respond_info(f"ACE[{inst_num}]: Dryer started: {temperature}°C for {duration}min")
+                            ace._dryer_start_logged = True
                     else:
                         msg = response.get("msg", "Unknown error") if response else ""
                         gcmd.respond_info(f"ACE[{inst_num}]: Dryer start failed: {msg}")
@@ -708,6 +820,7 @@ def cmd_ACE_STOP_DRYING(gcmd):
             def callback(response):
                 if response and response.get("code") == 0:
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer stopped")
+                    ace._dryer_start_logged = False
                 else:
                     msg = response.get("msg", "Unknown error") if response else ""
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer stop failed: {msg}")
@@ -796,19 +909,172 @@ def cmd_ACE_SET_PURGE_AMOUNT(gcmd):
 
 
 def cmd_ACE_QUERY_SLOTS(gcmd):
-    """Query slot inventory. [INSTANCE=] or [TOOL=] - omit both to query all instances."""
+    """Query slot inventory. [INSTANCE=] or [TOOL=] - omit both to query all instances. VERBOSE=1 for full details."""
     params = gcmd.get_command_parameters()
+    verbose = gcmd.get_int("VERBOSE", 0)
+
+    def format_slot(idx, slot, verbose, inst_num=0, ace_connected=True):
+        status = slot.get('status', 'empty')
+        material = slot.get('material', '')
+        color = slot.get("color", [0, 0, 0])
+        temp = slot.get('temp', 0)
+        rfid = slot.get('rfid', False)
+        sku = slot.get('sku', '')
+        brand = slot.get('brand', '')
+        extruder_temp = slot.get('extruder_temp', {})
+        hotbed_temp = slot.get('hotbed_temp', {})
+
+        # If ACE is not connected, show ??? for non-empty slots to indicate uncertain status
+        if not ace_connected and status != 'empty':
+            status = '???'
+
+        # Calculate tool number: instance 0 slot 0 = T0, instance 1 slot 0 = T4, etc.
+        tool_num = (inst_num * 4) + idx
+
+        # Plain text values for padding calculations
+        status_text = '-----' if status == 'empty' else status
+        # Show "???" for missing/unknown material on loaded slots, "Empty" only for empty slots
+        if status == 'empty':
+            material_text = 'Empty'
+        elif not material or material == 'Unknown':
+            material_text = '???'
+        else:
+            material_text = material
+        rfid_text = "RFID" if rfid else "----"
+        sku_text = sku if sku else '---'
+        brand_text = brand if brand else '---'
+        r, g, b = color[0], color[1], color[2]
+        rgb_text = f"RGB({r},{g},{b})"
+        # Map RGB to closest Mainsail color for circle indicator
+        color_name = rgb_to_mainsail_color(r, g, b)
+        temp_text = f"{temp}°C"
+
+        # Format temperature ranges
+        if extruder_temp and isinstance(extruder_temp, dict):
+            ext_min = extruder_temp.get('min', 0)
+            ext_max = extruder_temp.get('max', 0)
+            extruder_range = f"{ext_min}-{ext_max}°C" if ext_min or ext_max else "---"
+        else:
+            extruder_range = "---"
+
+        if hotbed_temp and isinstance(hotbed_temp, dict):
+            bed_min = hotbed_temp.get('min', 0)
+            bed_max = hotbed_temp.get('max', 0)
+            bed_range = f"{bed_min}-{bed_max}°C" if bed_min or bed_max else "---"
+        else:
+            bed_range = "---"
+
+        # Apply padding to plain text first
+        status_padded = status_text.ljust(6)
+        rfid_padded = rfid_text.ljust(8)
+        sku_padded = sku_text.ljust(12)
+        brand_padded = brand_text.ljust(12)
+        material_padded = material_text.ljust(15)
+        # Add colored circle before RGB text (circle + space + RGB = needs less padding)
+        rgb_with_circle = f"⬤ {rgb_text}"
+        rgb_padded = rgb_with_circle.ljust(18)  # Extra space for circle
+        temp_padded = temp_text.rjust(6)
+        extruder_padded = extruder_range.ljust(12)
+        bed_padded = bed_range.ljust(12)
+
+        # Wrap padded text with color tags (preserving the padding)
+        if status == 'empty':
+            status_display = f'<span class=secondary--text>{status_padded}</span>'
+        elif status == 'ready':
+            status_display = f'<span class=success--text>{status_padded}</span>'
+        elif status == 'active':
+            status_display = f'<span class=info--text>{status_padded}</span>'
+        else:
+            status_display = status_padded
+
+        if status == 'empty':
+            material_display = f'<span class=secondary--text>{material_padded}</span>'
+        elif material.startswith('PLA'):
+            material_display = f'<span class=success--text>{material_padded}</span>'
+        elif material in ('PETG',):
+            material_display = f'<span class=info--text>{material_padded}</span>'
+        elif material in ('ABS', 'ASA'):
+            material_display = f'<span class=warning--text>{material_padded}</span>'
+        elif material in ('TPU',):
+            material_display = f'<span class=accent--text>{material_padded}</span>'
+        elif material == 'Unknown':
+            # Bright warning color for missing material data
+            material_display = f'<span class=warning--text>{material_padded}</span>'
+        else:
+            material_display = material_padded
+
+        rfid_display = f'<span class=accent--text>{rfid_padded}</span>' if rfid else rfid_padded
+
+        # Color the RGB display with circle using mapped color
+        if status == 'empty':
+            rgb_display = f'<span class=secondary--text>{rgb_padded}</span>'
+        elif color_name is None:
+            # No color class = white, use terminal default
+            rgb_display = rgb_padded
+        else:
+            rgb_display = f'<span class={color_name}--text>{rgb_padded}</span>'
+
+        if temp == 0:
+            temp_display = f'<span class=info--text>{temp_padded}</span>'
+        else:
+            temp_display = f'<span class=error--text>{temp_padded}</span>'
+
+        # Format with consistent column widths
+        line1 = (
+            f"  [{idx}] T{tool_num} | {status_display} | {rfid_display} | {sku_padded} | "
+            f"{brand_padded} | {material_display} | {rgb_display} | {temp_display} | "
+            f"{extruder_padded} | {bed_padded}"
+        )
+
+        # Line 2: Additional RFID metadata (only if VERBOSE=1 and data present)
+        if verbose:
+            extra_parts = []
+            if "sku" in slot:
+                extra_parts.append(f"sku={slot.get('sku')}")
+            if "brand" in slot:
+                extra_parts.append(f"brand={slot.get('brand')}")
+            for key in ("icon_type", "extruder_temp", "hotbed_temp", "diameter", "total", "current"):
+                if key in slot:
+                    extra_parts.append(f"{key}={slot.get(key)}")
+
+            if extra_parts:
+                line2 = "     " + ", ".join(extra_parts)
+                return line1 + "\n" + line2
+
+        return line1
+
+    # Table header and separator (defined once)
+    header_line = ("  [#] T# | Status | RFID     | SKU          | Brand        | "
+                   "Material        |         Color       |   Temp | Extruder     | Bed")
+    separator_line = ("  -------+--------+----------+--------------+--------------+"
+                      "-----------------+---------------------+--------+--------------+------------")
+
+    def format_instance_slots(ace, inst_num):
+        """Format slots for a single ACE instance."""
+        ace_connected = ace.serial_mgr.is_connected() if hasattr(ace, 'serial_mgr') else False
+        conn_indicator = "" if ace_connected else " <span class=error--text>[DISCONNECTED - cached data]</span>"
+
+        lines = []
+        lines.append(f"<span class=warning--text>=== ACE Instance {inst_num} Slots ===</span>{conn_indicator}")
+        lines.append(header_line)
+        lines.append(separator_line)
+        for idx, slot in enumerate(ace.inventory):
+            lines.append(format_slot(idx, slot, verbose, inst_num, ace_connected))
+        return lines
 
     if "INSTANCE" not in params and "TOOL" not in params:
+        # Query all instances
+        lines = []
         for inst_num in sorted(ACE_INSTANCES.keys()):
             ace = ACE_INSTANCES[inst_num]
-            response = {"instance": inst_num, "slots": ace.inventory}
-            gcmd.respond_info(f"// {json.dumps(response)}")
+            lines.extend(format_instance_slots(ace, inst_num))
+        gcmd.respond_info("\n".join(lines))
     else:
+        # Query single instance
         ace = ace_get_instance(gcmd)
         inst_num = ace.instance_num if hasattr(ace, "instance_num") else 0
-        response = {"instance": inst_num, "slots": ace.inventory}
-        gcmd.respond_info(f"// {json.dumps(response)}")
+        lines = format_instance_slots(ace, inst_num)
+        gcmd.respond_info("\n".join(lines))
 
 
 def cmd_ACE_ENABLE_ENDLESS_SPOOL(gcmd):
@@ -822,7 +1088,7 @@ def cmd_ACE_ENABLE_ENDLESS_SPOOL(gcmd):
     gcode = printer.lookup_object("gcode")
     gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=ace_endless_spool_enabled VALUE=True")
 
-    gcode.respond_info("ACE: Endless spool ENABLED (persisted)")
+    logging.info("ACE: Endless spool ENABLED (persisted)")
 
 
 def cmd_ACE_DISABLE_ENDLESS_SPOOL(gcmd):
@@ -836,13 +1102,13 @@ def cmd_ACE_DISABLE_ENDLESS_SPOOL(gcmd):
     gcode = printer.lookup_object("gcode")
     gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=ace_endless_spool_enabled VALUE=False")
 
-    gcode.respond_info("ACE: Endless spool DISABLED (persisted)")
+    logging.info("ACE: Endless spool DISABLED (persisted)")
 
 
 def cmd_ACE_RESET_PERSISTENT_INVENTORY(gcmd):
     """Reset persistent filament inventory to empty slots. INSTANCE= for single, omit for all."""
     instance_num = gcmd.get_int("INSTANCE", default=None)
-    
+
     if instance_num is not None:
         # Reset specific instance
         ace = ace_get_instance(gcmd)
@@ -935,7 +1201,7 @@ def get_vars():
 def get_variable(varname, default=None):
     """
     Get a variable from save_variables (fetched fresh, not cached).
-    
+
     Always retrieves latest value from persistent storage.
 
     Args:
@@ -982,21 +1248,22 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
         return
 
     manager.runout_monitor.runout_detection_active = False
-    manager.gcode.respond_info("ACE: Runout detection disabled for print end")
+    logging.info("ACE: Runout detection disabled for print end")
 
     do_cut = gcmd.get_int('CUT_TIP', 1)
 
     if not do_cut:
         gcmd.respond_info("ACE: Print end - skipping unload (CUT_TIP=0), tool remains loaded")
-        
+
         # Disable feed assist on all instances except the one with the loaded tool
         tool_index = get_variable("ace_current_index", -1)
         if tool_index >= 0:
             active_instance = get_instance_from_tool(tool_index)
-            for_each_instance(lambda inst_num, mgr, instance: 
-                instance.reset_feed_assist_state() if inst_num != active_instance else None)
-            gcmd.respond_info(f"ACE: Feed assist disabled on all instances except ACE[{active_instance}] (T{tool_index})")
-        
+            for_each_instance(lambda inst_num, mgr, instance:
+                              instance.reset_feed_assist_state() if inst_num != active_instance else None)
+            gcmd.respond_info(
+                f"ACE: Feed assist disabled on all instances except ACE[{active_instance}] (T{tool_index})")
+
         return
 
     try:
@@ -1006,7 +1273,7 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
             gcmd.respond_info("ACE: No active tool for print end")
             return
 
-        gcmd.respond_info(f"ACE: Print cancelled - unloading tool T{tool_index}")
+        gcmd.respond_info(f"ACE: PRINT_END: unloading tool T{tool_index}")
 
         success = manager.smart_unload(tool_index, prepare_toolhead=True)
         if success:
@@ -1017,7 +1284,7 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
             gcmd.respond_info(f"ACE: WARNING - Tool T{tool_index} unload may have failed")
 
     except Exception as e:
-        gcmd.respond_info(f"ACE: Print end error: {e}")
+        gcmd.respond_info(f"ACE: PRINT_END error: {e}")
 
 
 def cmd_ACE_SMART_LOAD(gcmd):
@@ -1053,7 +1320,7 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         try:
             success = manager.smart_unload(current_tool)
             if success:
-                gcmd.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
+                # gcmd.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
                 manager.set_and_save_variable("ace_current_index", -1)
             else:
                 gcmd.respond_info(f"ACE: Smart unload of tool {current_tool} failed")
@@ -1810,7 +2077,7 @@ ACE_COMMANDS = [
     ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. INSTANCE= or TOOL=, VERBOSE=1 for detailed output"),
     ("ACE_GET_CONNECTION_STATUS", cmd_ACE_GET_CONNECTION_STATUS,
      "Get connection status for all ACE instances (connected, stable, retry info)"),
-    ("ACE_RECONNECT", cmd_ACE_RECONNECT, "Reconnect ACE serial. INSTANCE="),
+    ("ACE_RECONNECT", cmd_ACE_RECONNECT, "Reconnect ACE serial. INSTANCE= DELAY=5"),
     ("ACE_GET_CURRENT_INDEX", cmd_ACE_GET_CURRENT_INDEX, "Query currently loaded tool index"),
     ("ACE_FEED", cmd_ACE_FEED, "Feed filament. T=<tool> or INSTANCE= INDEX=, LENGTH=, [SPEED=]"),
     ("ACE_STOP_FEED", cmd_ACE_STOP_FEED, "Stop feeding. T=<tool> or INSTANCE= INDEX="),
@@ -1863,4 +2130,3 @@ def register_all_commands(printer):
 
     for cmd_name, cmd_handler, cmd_desc in ACE_COMMANDS:
         gcode.register_command(cmd_name, safe_gcode_command(cmd_handler), desc=cmd_desc)
-

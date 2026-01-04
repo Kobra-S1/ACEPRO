@@ -11,8 +11,8 @@ import re
 # ========== ACE Instance Constants ==========
 
 # Filament position state constants
-FILAMENT_STATE_SPLITTER = "splitter"    # In bowden between splitter and toolhead (loaded)
 FILAMENT_STATE_BOWDEN = "bowden"        # In bowden before splitter (unloaded, path free)
+FILAMENT_STATE_SPLITTER = "splitter"    # Possibly in splitter (between RDM and toolhead (loaded))
 FILAMENT_STATE_TOOLHEAD = "toolhead"    # At toolhead sensor
 FILAMENT_STATE_NOZZLE = "nozzle"        # In hotend/nozzle
 
@@ -29,6 +29,8 @@ UNLOAD_RETRY_DELAY = 0.5               # Seconds between attempts
 UNLOAD_INITIAL_LENGTH = 50             # mm for first attempt
 UNLOAD_SPEED_MULTIPLIERS = [1.0, 0.7, 0.4]  # Speed factors per attempt
 
+# Max retries for ACE command operations (feed/retract)
+MAX_RETRIES = 6
 # RFID state constants (from ACE hardware status responses)
 RFID_STATE_NO_INFO = 0         # Information not found (no RFID tag)
 RFID_STATE_FAILED = 1          # Failed to identify tag
@@ -394,4 +396,3 @@ OVERRIDABLE_PARAMS = [
     "heartbeat_interval",
     "max_dryer_temperature"
 ]
-

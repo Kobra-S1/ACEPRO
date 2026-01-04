@@ -56,10 +56,12 @@ def load_config(config):
     # Register each ACE instance with the printer so KlipperScreen can access them
     # Instance 0 is registered as "ace", others as "ace 1", "ace 2", etc.
     for instance_num, instance in enumerate(ace_manager.instances):
-        instance_name = "ace" if instance_num == 0 else f"ace {instance_num}"
+        instance_name = f"ace_instance_{instance_num}"
         printer.add_object(instance_name, instance)
-        logging.info(f"ACE: Registered printer object '{instance_name}'")
+        logging.info(
+            f"ACE: Registered printer object '{instance_name}' "
+            f"(has_get_status={hasattr(instance, 'get_status')})"
+        )
 
     # Return the AceManager for Klipper
     return ace_manager
-

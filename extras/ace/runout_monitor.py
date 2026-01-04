@@ -332,8 +332,9 @@ class RunoutMonitor:
 
         color_str = f"RGB({color[0]},{color[1]},{color[2]})"
         prompt_text = (
-            f"Filament runout detected! ACE {instance_num}, Slot {local_slot} (Tool T{tool_index}) - "
-            f"Material: {material} - Color: {color_str} - Please refill the spool."
+            f"Filament runout detected on Tool T{tool_index}! "
+            f"Please refill ACE {instance_num} Slot {local_slot} with {material} filament "
+            f"(Color: {color_str})."
         )
 
         self.gcode.run_script_from_command(
@@ -341,8 +342,23 @@ class RunoutMonitor:
         )
 
         self.gcode.run_script_from_command(
+            f'RESPOND TYPE=command MSG="action:prompt_button Retry T{tool_index}|T{tool_index}|primary"'
+        )
+
+        self.gcode.run_script_from_command(
+            'RESPOND TYPE=command MSG="action:prompt_button Extrude 100mm|'
+            '_EXTRUDE LENGTH=100 SPEED=300|secondary"'
+        )
+
+        self.gcode.run_script_from_command(
+            'RESPOND TYPE=command MSG="action:prompt_button Retract 100mm|'
+            '_RETRACT LENGTH=100 SPEED=300|secondary"'
+        )
+
+        self.gcode.run_script_from_command(
             'RESPOND TYPE=command MSG="action:prompt_footer_button Resume|RESUME|primary"'
         )
+
         self.gcode.run_script_from_command(
             'RESPOND TYPE=command MSG="action:prompt_footer_button Cancel Print|CANCEL_PRINT|error"'
         )

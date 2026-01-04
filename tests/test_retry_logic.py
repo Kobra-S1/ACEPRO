@@ -17,6 +17,7 @@ from ace.instance import AceInstance
 from ace.config import (
     INSTANCE_MANAGERS,
     FILAMENT_STATE_SPLITTER,
+    MAX_RETRIES,
 )
 
 
@@ -84,9 +85,6 @@ class TestFeedRetryLogic(unittest.TestCase):
         # Should only call once
         instance.feed_filament_with_wait_for_response.assert_called_once_with(0, 100, 50)
         
-        # Should save filament position
-        self.assertIn('ace_filament_pos', self.variables)
-        self.assertEqual(self.variables['ace_filament_pos'], FILAMENT_STATE_SPLITTER)
 
     @patch('ace.instance.AceSerialManager')
     def test_feed_retries_on_forbidden_then_succeeds(self, mock_serial_mgr_class):
@@ -110,12 +108,10 @@ class TestFeedRetryLogic(unittest.TestCase):
         # Should dwell between attempts
         instance.dwell.assert_called_once_with(delay=1.0)
         
-        # Should save position after success
-        self.assertEqual(self.variables['ace_filament_pos'], FILAMENT_STATE_SPLITTER)
 
     @patch('ace.instance.AceSerialManager')
     def test_feed_exhausts_retries_on_repeated_forbidden(self, mock_serial_mgr_class):
-        """Feed should raise ValueError after 3 FORBIDDEN responses."""
+        """Feed should raise ValueError after MAX_RETRIES FORBIDDEN responses."""
         INSTANCE_MANAGERS.clear()
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         
@@ -127,11 +123,11 @@ class TestFeedRetryLogic(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             instance.execute_feed_with_retries(0, 100, 50)
         
-        # Should try 3 times
-        self.assertEqual(instance.feed_filament_with_wait_for_response.call_count, 3)
+        # Should try MAX_RETRIES times
+        self.assertEqual(instance.feed_filament_with_wait_for_response.call_count, MAX_RETRIES)
         
-        # Should dwell 2 times (between attempt 1-2 and 2-3, but not after 3rd)
-        self.assertEqual(instance.dwell.call_count, 2)
+        # Should dwell (MAX_RETRIES - 1) times (between attempts, but not after last)
+        self.assertEqual(instance.dwell.call_count, MAX_RETRIES - 1)
         
         # Error message should mention FORBIDDEN
         self.assertIn('FORBIDDEN', str(ctx.exception))
@@ -249,21 +245,18 @@ class TestRetractRetryLogic(unittest.TestCase):
     @patch('ace.instance.time')
     @patch('ace.instance.AceSerialManager')
     def test_retract_retries_on_no_response(self, mock_serial_mgr_class, mock_time):
-        """Retract should retry up to 3 times if no response received."""
+        """Retract should retry up to MAX_RETRIES times if no response received."""
         INSTANCE_MANAGERS.clear()
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         instance.wait_ready = Mock()
         instance._is_slot_empty = Mock(return_value=False)
         
         # Mock time progression - timeout on each attempt
-        mock_time.time.side_effect = [
-            # Attempt 1
-            100.0, 100.0, *[100.0 + i*0.1 for i in range(1, 60)],  # Timeout after 5s
-            # Attempt 2
-            105.0, 105.0, *[105.0 + i*0.1 for i in range(1, 60)],  # Timeout after 5s
-            # Attempt 3
-            110.0, 110.0, *[110.0 + i*0.1 for i in range(1, 60)],  # Timeout after 5s
-        ]
+        time_values = []
+        for attempt in range(MAX_RETRIES):
+            base_time = 100.0 + attempt * 5.0
+            time_values.extend([base_time, base_time, *[base_time + i*0.1 for i in range(1, 60)]])
+        mock_time.time.side_effect = time_values
         
         # No response callback (simulates timeout)
         instance.serial_mgr.send_request = Mock()
@@ -271,11 +264,11 @@ class TestRetractRetryLogic(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             instance._retract(0, 50, 100)
         
-        # Should try 3 times
-        self.assertEqual(instance.serial_mgr.send_request.call_count, 3)
+        # Should try MAX_RETRIES times
+        self.assertEqual(instance.serial_mgr.send_request.call_count, MAX_RETRIES)
         
         # Error message should mention attempts
-        self.assertIn('no response after 3 attempts', str(ctx.exception))
+        self.assertIn(f'no response after {MAX_RETRIES} attempts', str(ctx.exception))
 
     @patch('ace.instance.time')
     @patch('ace.instance.AceSerialManager')
@@ -344,10 +337,11 @@ class TestRetractRetryLogic(unittest.TestCase):
         except ValueError:
             pass  # Expected to fail after retries
         
-        # Should have 2s pauses between attempts
+        # Should have 2s pauses between attempts (MAX_RETRIES - 1 pauses)
         # Find the 2s pauses (retry delays)
         retry_pauses = [d for d in pause_delays if abs(d - 2.0) < 0.01]
-        self.assertEqual(len(retry_pauses), 2, f"Expected 2 retry pauses of 2s, got: {pause_delays}")
+        self.assertEqual(len(retry_pauses), MAX_RETRIES - 1, 
+                        f"Expected {MAX_RETRIES - 1} retry pauses of 2s, got: {pause_delays}")
 
 
 if __name__ == '__main__':

@@ -451,7 +451,8 @@ EOF
 
     print_header "Step 6: KlipperScreen Integration (Optional)"
     
-    KLIPPERSCREEN_PANELS_DIR="$HOME/KlipperScreen/panels"
+    KLIPPERSCREEN_ROOT_DIR="$HOME/KlipperScreen"
+    KLIPPERSCREEN_PANELS_DIR="$KLIPPERSCREEN_ROOT_DIR/panels"
     KLIPPERSCREEN_PANEL_SOURCE="$SCRIPT_DIR/KlipperScreen/acepro.py"
     KLIPPERSCREEN_PANEL_TARGET="$KLIPPERSCREEN_PANELS_DIR/acepro.py"
     
@@ -465,6 +466,30 @@ EOF
             print_info "KlipperScreen panels directory found"
             create_or_replace_symlink "$KLIPPERSCREEN_PANEL_SOURCE" "$KLIPPERSCREEN_PANEL_TARGET" "acepro.py panel"
         fi
+    fi
+
+    # Optional: patch KlipperScreen core to subscribe to ACE objects
+    KLIPPERSCREEN_PATCH="$SCRIPT_DIR/patches/ace_global_subscription.patch"
+    if [ -d "$KLIPPERSCREEN_ROOT_DIR" ] && [ -f "$KLIPPERSCREEN_PATCH" ]; then
+        echo ""
+        print_info "ACE patch available for KlipperScreen core subscription."
+        if prompt_yes_no "Apply ACE KlipperScreen patch now?"; then
+            print_info "Checking ACE patch applicability..."
+            if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward --dry-run < "$KLIPPERSCREEN_PATCH"; then
+                print_info "Applying ACE patch to $KLIPPERSCREEN_ROOT_DIR"
+                if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward < "$KLIPPERSCREEN_PATCH"; then
+                    print_success "KlipperScreen patch applied"
+                else
+                    print_warning "Patch failed during apply (unexpected). Please review output."
+                fi
+            else
+                print_warning "Patch did not apply cleanly (likely already applied or conflicting changes). Skipping."
+            fi
+        else
+            print_info "Skipped KlipperScreen patch (you can apply $KLIPPERSCREEN_PATCH manually later)"
+        fi
+    elif [ ! -f "$KLIPPERSCREEN_PATCH" ]; then
+        print_warning "KlipperScreen patch file not found: $KLIPPERSCREEN_PATCH"
     fi
     
     # ========================================================================

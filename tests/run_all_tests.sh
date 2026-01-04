@@ -123,22 +123,39 @@ echo ""
 # Set PYTHONPATH
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
-# Run flake8 critical checks
+# Run syntax validation first (fast fail if code won't compile)
 echo "=========================================="
-echo -e "${BLUE}Running flake8 critical checks${NC}"
+echo -e "${BLUE}Running Python syntax validation${NC}"
 echo "=========================================="
 echo ""
 
-flake8 --select=E9,F63,F7,F82 \
-       --exclude=".venv,*/.venv/*" \
-       extras/ace
+python tests/check_syntax.py
+SYNTAX_EXIT=$?
+
+if [ $SYNTAX_EXIT -ne 0 ]; then
+    echo ""
+    echo -e "${RED}✗ Syntax errors detected - fix before running tests${NC}"
+    deactivate
+    exit $SYNTAX_EXIT
+fi
+
+echo ""
+
+# Run flake8 PEP 8 checks
+echo "=========================================="
+echo -e "${BLUE}Running flake8 PEP 8 checks${NC}"
+echo "=========================================="
+echo ""
+
+# Use .flake8 config file (E501 line length check is disabled)
+flake8 --statistics extras/ace
 
 FLAKE8_EXIT=$?
 
 if [ $FLAKE8_EXIT -eq 0 ]; then
-    echo -e "${GREEN}✓ No critical issues found${NC}"
+    echo -e "${GREEN}✓ No style issues found${NC}"
 else
-    echo -e "${RED}✗ Critical issues detected - fix before running tests${NC}"
+    echo -e "${RED}✗ Style issues detected - fix before running tests${NC}"
     deactivate
     exit $FLAKE8_EXIT
 fi

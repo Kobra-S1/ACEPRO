@@ -7,6 +7,7 @@ from .config import (
     FILAMENT_STATE_SPLITTER,
     FILAMENT_STATE_BOWDEN,
     FILAMENT_STATE_NOZZLE,
+    FILAMENT_STATE_TOOLHEAD,
     OVERRIDABLE_PARAMS,
     get_instance_from_tool,
     get_local_slot,
@@ -23,6 +24,7 @@ from .endless_spool import EndlessSpool
 from .runout_monitor import RunoutMonitor
 from . import commands
 from .config import read_ace_config
+import logging
 
 
 def toolchange_in_progress_guard(method):
@@ -85,8 +87,8 @@ class AceManager:
         self.purge_max_chunk_length = float(self.ace_config["purge_max_chunk_length"])
         self.pre_cut_retract_length = float(self.ace_config["pre_cut_retract_length"])
         self.ace_count = self.ace_config["ace_count"]
-        self.purge_multiplier = float(self.ace_config.get("purge_multiplier", 1.0)) 
-        
+        self.purge_multiplier = float(self.ace_config.get("purge_multiplier", 1.0))
+
         if self.ace_count < 1:
             raise config.error(f"ace_count must be >= 1, got {self.ace_count}")
 
@@ -134,7 +136,7 @@ class AceManager:
         self._ace_state_timer = None
 
         # Initialize global filament position
-        # Tracks physical filament location: 'splitter', 'bowden',
+        # Tracks physical filament location: 'bowden', 'splitter',
         # 'toolhead', or 'nozzle'
         save_vars = self.printer.lookup_object("save_variables")
         variables = save_vars.allVariables
@@ -161,6 +163,14 @@ class AceManager:
         )
 
         self.toolchange_in_progress = False
+
+        # Expose manager state for Moonraker/KlipperScreen JSON-RPC queries
+        # (distinct from per-instance printer objects).
+        try:
+            self.printer.add_object("ace_state", self)
+        except Exception:
+            # Non-fatal; fall back to per-instance status only.
+            pass
 
         # Connection health monitoring state
         self._connection_supervision_enabled = self.ace_config.get(
@@ -207,7 +217,10 @@ class AceManager:
     # ========== Lifecycle ==========
 
     def _handle_ready(self):
-        """Called when Klipper is ready. Sets up toolhead reference, connects ACE instances, initializes sensors, starts monitoring."""
+        """
+        Called when Klipper is ready.
+        Sets up toolhead reference, connects ACE instances, initializes sensors, starts monitoring.
+        """
 
         # Set toolhead on all instances
         toolhead = self.printer.lookup_object("toolhead")
@@ -361,7 +374,8 @@ class AceManager:
                     )
 
         self.gcode.respond_info(
-            f"ACE: Filament at toolhead, preparing for retraction (target_temp={target_temp}°C) pre_cut_retract={self.pre_cut_retract_length}mm"
+            f"ACE: Filament at toolhead, preparing for retraction "
+            f"(target_temp={target_temp}°C) pre_cut_retract={self.pre_cut_retract_length}mm"
         )
 
         try:
@@ -468,7 +482,6 @@ class AceManager:
         if wait_for_move_end:
             toolhead.wait_moves()
 
-
     @toolchange_in_progress_guard
     def smart_unload(self, tool_index=-1, prepare_toolhead=True):
         """
@@ -567,24 +580,36 @@ class AceManager:
                 self.gcode.run_script_from_command("G92 E0")
                 self.gcode.run_script_from_command("G90")
 
-        # ===== CASE 2: Tool unknown + any sensor triggered (toolhead or RDM) => CYCLE TO IDENTIFY =====
+        # ===== CASE 2: Given toolindex is set to unknown
+        # + any sensor triggered (toolhead or RDM) => CYCLE TO IDENTIFY =====
         toolhead_triggered = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_triggered = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
 
-        if current_tool_index == -1 and (toolhead_triggered or rdm_triggered):
+        # If any sensor is triggered, we need to cycle to identify the tool,
+        # we start with cycling with current_tool_index
+        if toolhead_triggered or rdm_triggered:
             sensor_desc = "toolhead" if toolhead_triggered else "RDM"
             self.gcode.respond_info(
                 f"ACE: Current tool unknown but {sensor_desc} sensor triggered - cycling slots to identify loaded tool"
             )
 
             # Distances for completing unload after identification
-            park_to_toolhead_len = self._get_config_for_tool(0, "parkposition_to_toolhead_length")
-            park_to_rdm_len = self._get_config_for_tool(0, "parkposition_to_rdm_length") if self.has_rdm_sensor() else park_to_toolhead_len
+            park_to_toolhead_len = self._get_config_for_tool(
+                0, "parkposition_to_toolhead_length"
+            )
+            park_to_rdm_len = (
+                self._get_config_for_tool(0, "parkposition_to_rdm_length")
+                if self.has_rdm_sensor() else park_to_toolhead_len
+            )
 
             retract_speed_mmmin = retract_speed * 60
 
             # Use unified cycling that also handles RDM-only trigger
-            full_unload_length = park_to_rdm_len if (rdm_triggered and not toolhead_triggered and self.has_rdm_sensor()) else park_to_toolhead_len
+            full_unload_length = (
+                park_to_rdm_len
+                if (rdm_triggered and not toolhead_triggered and self.has_rdm_sensor())
+                else park_to_toolhead_len
+            )
 
             return self._identify_and_unload_by_cycling(
                 current_tool_index,
@@ -594,16 +619,34 @@ class AceManager:
                 retract_speed_mmmin,
                 full_unload_length
             )
+        else:
+            self.gcode.respond_info(
+                "ACE: Not cycling - no sensor triggered")
 
-        # ===== CASE 3: Tool unknown + sensor clear = already unloaded =====
-        if current_tool_index == -1 and not toolhead_triggered:
+        # ===== Normal case if no tool was loaded, nothing to do here
+        if current_tool_index == -1 and not (toolhead_triggered or rdm_triggered):
             self.gcode.respond_info(
                 "ACE: No tool loaded and sensor clear - nothing to unload"
             )
-            set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER)
+            set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
             return True
 
-        # ===== CASE 4: Shouldn't reach here =====
+        if current_tool_index >= 0 and not (toolhead_triggered or rdm_triggered):
+            self.gcode.respond_info(
+                f"ACE: Unplausible state in smart_unload detected. "
+                f"Current_tool_index={current_tool_index} but sensor clear - "
+                f"assuming already unloaded, updating state accordingly."
+            )
+            set_and_save_variable(self.printer, self.gcode, "ace_current_index", -1)
+            set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+            return True
+
+        # ===== Something is strange... Shouldn't reach here =====
+        self.gcode.respond_info(
+            f"ACE: Invalid state: current_tool_index={current_tool_index} "
+            f"tool_index={tool_index} toolhead_triggered={toolhead_triggered} "
+            f"rdm_triggered={rdm_triggered}"
+        )
         raise Exception("Unexpected state in smart_unload")
 
     def _identify_and_unload_by_cycling(
@@ -631,7 +674,7 @@ class AceManager:
             self.gcode.respond_info(
                 "ACE: No sensors triggered - path clear, no unload needed"
             )
-            set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER)
+            set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
             return True
 
         # CASE 2: Toolhead sensor triggered - cycle with extruder retractions to identify tool
@@ -674,10 +717,11 @@ class AceManager:
                 )
             # Filament could be just before toolhead - ensure full unload length covers toolhead to rdm sensor
             full_unload_length = parkposition_to_toolhead_length
-            
+
             self.gcode.respond_info(
                 "ACE: RDM sensor triggered but toolhead sensor not - "
-                f"Retracting and monitoring RDM sensor during ACE-only retraction ({full_unload_length}mm at {rdm_retract_speed}mm/s)"
+                f"Retracting and monitoring RDM sensor during ACE-only retraction "
+                f"({full_unload_length}mm at {rdm_retract_speed}mm/s)"
             )
 
             return self._cycle_slots_with_sensor_check(
@@ -888,8 +932,7 @@ class AceManager:
         3. Retract to park position
         4. Verify path is clear
 
-        Result: All filament parked at splitter, ready for tool selection
-        Sets state: ace_filament_pos = "splitter" (parking position)
+        Result: All filament parked at bowden position, ready for tool selection
 
         Returns:
             bool: True if all slots loaded successfully, False otherwise
@@ -935,15 +978,36 @@ class AceManager:
                         feed_length
                     )
 
-                    # Verify sensor triggered
+                    # Check if verify sensor triggered or not
                     if not self.get_switch_state(verification_sensor):
+                        # Failure case
                         self.gcode.respond_info(
-                            f"ACE[{instance.instance_num}]: " f"{sensor_name} sensor not triggered after " f"feeding slot {slot}"
+                            f"ACE[{instance.instance_num}]: "
+                            f"{sensor_name} sensor not triggered after "
+                            f"feeding slot {slot}"
                         )
                         instance._stop_feed(slot)
+
+                        # We dont know how far the filament has moved, try retract to park directly to avoid jams
+                        if use_rdm:
+                            park_distance = instance.parkposition_to_rdm_length
+                        else:
+                            park_distance = instance.parkposition_to_toolhead_length
+
+                        self.gcode.respond_info(
+                            f"ACE: Safety retracting slot {slot} to park position to avoid jams"
+                            f"({park_distance}mm)"
+                        )
+                        instance._retract(slot, length=park_distance, speed=instance.retract_speed)
                         continue
 
+                    # Happy path
                     self.gcode.respond_info(f"ACE: {sensor_name} sensor triggered for slot {slot}")
+
+                    if use_rdm:
+                        set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER)
+                    else:
+                        set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
 
                     # Step 2: Retract to park position
                     # Use appropriate park distance based on sensor
@@ -972,7 +1036,7 @@ class AceManager:
                     self.gcode.respond_info(f"ACE[{instance.instance_num}]: " f"Error loading slot {slot}: {e}")
 
         if success_count > 0:
-            set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER)
+            set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
             set_and_save_variable(self.printer, self.gcode, "ace_current_index", -1)
             self.gcode.respond_info(f"ACE: Smart load complete - {success_count}/{total_slots} " f"slots loaded")
             return success_count == total_slots
@@ -996,6 +1060,9 @@ class AceManager:
             varname = f"ace_inventory_{instance.instance_num}"
             saved_inv = variables.get(varname, None)
             if saved_inv:
+                # Clean up legacy rgba field from saved inventory
+                for slot in saved_inv:
+                    slot.pop("rgba", None)
                 instance.inventory = saved_inv
                 self.gcode.respond_info(f"ACE[{instance.instance_num}]: Loaded persisted inventory")
             else:
@@ -1127,7 +1194,6 @@ class AceManager:
         Checks if ACE Pro unit is enabled/disabled via output pin and
         updates sensor state accordingly. Also monitors connection stability
         and pauses print if connection is unstable during printing.
-        
 
         """
         try:
@@ -1167,7 +1233,7 @@ class AceManager:
             # Detect instability - only flag as unstable when reconnect threshold exceeded
             # This avoids false alarms for brief disconnects that quickly recover
             reconnect_threshold = instance.serial_mgr.INSTABILITY_THRESHOLD
-            
+
             if status["recent_reconnects"] >= reconnect_threshold:
                 unstable_instances.append({
                     "instance": instance_num,
@@ -1330,23 +1396,34 @@ class AceManager:
 
         toolhead_sensor = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_sensor = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
-        filament_pos = self.variables.get("ace_filament_pos", FILAMENT_STATE_SPLITTER)
+        filament_pos = self.variables.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-        self.gcode.respond_info(
+        logging.info(
             f"ACE: Toolchange plausibility check - "
             f"Sensors: toolhead={toolhead_sensor}, rdm={'N/A (no RDM)' if not self.has_rdm_sensor() else rdm_sensor}, "
             f"State: filament_pos='{filament_pos}', current_tool=T{current_tool}"
         )
 
-        if (toolhead_sensor or rdm_sensor) and filament_pos in [FILAMENT_STATE_SPLITTER, FILAMENT_STATE_BOWDEN]:
+        if (toolhead_sensor or rdm_sensor) and (filament_pos == FILAMENT_STATE_BOWDEN):
             self.gcode.respond_info(
                 f"ACE: PLAUSIBILITY MISMATCH - Sensors show filament present "
-                f"but state='{filament_pos}'. Performing smart_unload to clear path."
+                f"but state='{filament_pos}'. Performing smart_unload to clear path. May help or not..."
             )
 
             success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1)
             if not success:
                 raise Exception("Failed to clear filament path - plausibility check failed")
+            current_tool = -1
+
+        if not toolhead_sensor and rdm_sensor and (filament_pos == FILAMENT_STATE_SPLITTER):
+            self.gcode.respond_info(
+                f"ACE: WARNING: Toolhead clear, but filament detected at RDM, "
+                f"state='{filament_pos}'. Performing smart_unload to clear path."
+            )
+
+            success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1)
+            if not success:
+                raise Exception("Failed to clear RMS filament path")
             current_tool = -1
 
         target_temp = 0
@@ -1362,7 +1439,7 @@ class AceManager:
 
         # ===== HANDLE TOOL RESELECTION =====
         if current_tool == target_tool:
-            filament_pos = self.variables.get("ace_filament_pos", FILAMENT_STATE_SPLITTER)
+            filament_pos = self.variables.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
             sensor_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
 
@@ -1395,13 +1472,14 @@ class AceManager:
                     target_instance = get_instance_from_tool(target_tool)
                     target_local_slot = get_local_slot(target_tool, target_instance)
                     target_ace = self.instances[target_instance] if target_instance < len(self.instances) else None
-                    
+
                     if target_ace:
                         self.gcode.respond_info(
-                            f"ACE: Tool {target_tool} already loaded - re-enabling feed assist on slot {target_local_slot}"
+                            f"ACE: Tool {target_tool} already loaded - "
+                            f"re-enabling feed assist on slot {target_local_slot}"
                         )
                         target_ace._enable_feed_assist(target_local_slot)
-                    
+
                     return f"Tool {target_tool} (already loaded)"
                 else:
                     # State says loaded but sensor is EMPTY - state is WRONG
@@ -1410,38 +1488,50 @@ class AceManager:
                         "Correcting state and proceeding with normal load."
                     )
                     if self.get_switch_state(SENSOR_RDM):
-                        set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER)
+                        filament_pos = FILAMENT_STATE_SPLITTER
+                        set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", filament_pos)
                     else:
-                        set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+                        filament_pos = FILAMENT_STATE_BOWDEN
+                        set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", filament_pos)
+                    self.gcode.respond_info(
+                        f"ACE: filament_pos for Tool {target_tool} changed to "
+                        f"assumed filament_pos='{filament_pos}'"
+                    )
                     # Fall through to normal toolchange logic below
 
+            # So, filament state is not NOZZLE if we reach this point, but we have
+            # assumingly an active/current tool loaded. Try to find out the real state
             self.gcode.respond_info(
-                f"ACE: Tool {target_tool} marked as current but filament_pos='{filament_pos}', checking sensors..."
+                f"ACE: Tool {target_tool} marked as current but "
+                f"filament_pos='{filament_pos}', checking sensors..."
             )
 
+            # Check toolhead sensor, if it shows filament we assume tool is loaded and persiststate was wrong
             if sensor_has_filament:
                 self.gcode.respond_info(
                     "ACE: Toolhead sensor triggered - filament present. Correcting state to 'nozzle'"
                 )
                 set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_NOZZLE)
                 return f"Tool {target_tool} (state corrected)"
-
-            # Again path check, if RDM sensor exists it will be used there as well
-            if not self.is_filament_path_free():
-                self.gcode.respond_info(
-                    f"ACE: WARNING - Tool {target_tool} marked as current but path is blocked. "
-                    f"Attempting to clear path."
-                )
-                success = self.smart_unload(tool_index=-1)
-                if not success:
-                    raise Exception(
-                        f"Cannot proceed with tool {target_tool} - filament path is jammed. "
-                        f"Manual intervention required."
+            else:
+                # Again path check, if RDM sensor exists it will be used there as well
+                # If either sensor shows filament, we assume tool is loaded
+                if not self.is_filament_path_free():
+                    self.gcode.respond_info(
+                        f"ACE: WARNING - Tool {target_tool} marked as current but "
+                        f"state is:'{filament_pos} and sensor report path is blocked. "
+                        f"Attempting to clear path."
                     )
+                    success = self.smart_unload(tool_index=-1)
+                    if not success:
+                        raise Exception(
+                            f"Cannot proceed with tool {target_tool} - filament path is jammed. "
+                            f"Manual intervention required."
+                        )
 
-            self.gcode.respond_info(
-                f"ACE: Tool {target_tool} path cleared, proceeding with normal load."
-            )
+                self.gcode.respond_info(
+                    f"ACE: Tool {target_tool} path cleared, proceeding with normal load."
+                )
 
         # ===== PRE-TOOLCHANGE (Macro handles heating) =====
         self.gcode.run_script_from_command(
@@ -1450,16 +1540,22 @@ class AceManager:
 
         # ===== UNLOAD CURRENT TOOL =====
         if current_tool != -1 and not is_endless_spool:
-            filament_pos = self.variables.get("ace_filament_pos", FILAMENT_STATE_SPLITTER)
+            filament_pos = self.variables.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
             self.gcode.respond_info(f"ACE: Current filament_pos before unload: {filament_pos}")
+            if (filament_pos in [FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER]):
+                if (filament_pos == FILAMENT_STATE_NOZZLE) and not self.get_switch_state(SENSOR_TOOLHEAD):
+                    self.gcode.respond_info(
+                        "ACE: WARNING: State says loaded but toolhead sensor is CLEAR, "
+                        "try to unload spool anyway"
+                    )
 
-            if filament_pos == FILAMENT_STATE_NOZZLE:
+                self.gcode.respond_info(f"ACE: Tool {current_tool} marked as loaded, performing unload")
                 success = self.smart_unload(tool_index=current_tool)
                 if not success:
                     raise Exception(f"Failed to unload tool {current_tool}")
                 self.gcode.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
 
-            elif filament_pos in [FILAMENT_STATE_SPLITTER, FILAMENT_STATE_BOWDEN]:
+            elif filament_pos == FILAMENT_STATE_BOWDEN:
                 self.gcode.respond_info(
                     f"ACE: Tool {current_tool} not loaded (filament_pos='{filament_pos}'), skipping unload"
                 )
@@ -1511,7 +1607,7 @@ class AceManager:
 
             # Re-initialize runout detection baseline after successful load
             self.runout_monitor.prev_toolhead_sensor_state = self.get_switch_state(SENSOR_TOOLHEAD)
-            self.gcode.respond_info(
+            logging.info(
                 f"ACE: Runout detection baseline reset after load - "
                 f"sensor: {'present' if self.runout_monitor.prev_toolhead_sensor_state else 'absent'}, "
                 f"tool: T{target_tool}"
@@ -1593,7 +1689,22 @@ class AceManager:
     # ========== Status and Reporting ==========
 
     def get_status(self, eventtime=None):
-        return {"ace_instances": len(self.instances)}
+        try:
+            save_vars = self.printer.lookup_object("save_variables")
+            variables = save_vars.allVariables
+        except Exception:
+            variables = {}
+
+        return {
+            "ace_instances": len(self.instances),
+            "current_index": variables.get("ace_current_index", -1),
+            "endless_spool_enabled": bool(
+                variables.get("ace_endless_spool_enabled", False)
+            ),
+            "endless_spool_match_mode": variables.get(
+                "ace_endless_spool_match_mode", "exact"
+            ),
+        }
 
     def _resolve_instance_config(self, instance_num):
         """
@@ -1861,17 +1972,10 @@ class AceManager:
                         f"ACE[{instance_num}]: ⚠ Toolhead sensor still triggered after {total_length}mm retraction\n"
                         f"  (No RDM sensor for additional validation)"
                     )
-                    # Trust the retraction even if sensor still shows filament
-                    # (could be sensor issue or need longer retract length)
-                    set_and_save_variable(
-                        self.printer, self.gcode,
-                        "ace_filament_pos", FILAMENT_STATE_BOWDEN
-                    )
-                    return True
+                    return False
 
         except Exception as e:
             self.gcode.respond_info(
                 f"ACE[{instance_num}]: Full unload failed: {e}"
             )
             return False
-

@@ -5,7 +5,11 @@ exclude =
     .git,
     __pycache__,
     .pytest_cache,
+    .venv,
+    venv,
     htmlcov,
     build,
     dist,
-    *.egg-info
+    *.egg-info,
+    KlipperScreen,
+    slicer

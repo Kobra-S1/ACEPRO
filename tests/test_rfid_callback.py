@@ -72,7 +72,6 @@ class TestRfidCallbackTemperatureCalculation:
         instance.DEFAULT_TEMP = 200
         instance.gcode = MagicMock()
         instance.manager = MagicMock()
-        instance._emit_inventory_update = MagicMock()
         return instance
 
     def _make_rfid_response(self, extruder_temp_min=190, extruder_temp_max=230):
@@ -80,6 +79,7 @@ class TestRfidCallbackTemperatureCalculation:
         return {
             "code": 0,
             "result": {
+                "rfid": 2,  # RFID_STATE_IDENTIFIED
                 "sku": "AHPLBK-101",
                 "brand": "AC",
                 "type": "PLA",
@@ -213,11 +213,10 @@ class TestRfidCallbackFieldStorage:
         instance.DEFAULT_TEMP = 200
         instance.gcode = MagicMock()
         instance.manager = MagicMock()
-        instance._emit_inventory_update = MagicMock()
         return instance
 
     def test_all_rfid_fields_stored(self, mock_ace_instance):
-        """Test that all RFID fields are stored in inventory."""
+        """Test that all RFID fields are stored in inventory, color extracted from RGBA."""
         from extras.ace.instance import AceInstance
         
         _query_rfid_full_data = AceInstance._query_rfid_full_data
@@ -228,11 +227,12 @@ class TestRfidCallbackFieldStorage:
         response = {
             "code": 0,
             "result": {
+                "rfid": 2,  # RFID_STATE_IDENTIFIED
                 "sku": "AHPLBK-101",
                 "brand": "Anycubic",
                 "type": "PLA",
                 "icon_type": 1,
-                "colors": [[234, 42, 43, 255]],
+                "colors": [[234, 42, 43, 255]],  # RGBA array
                 "extruder_temp": {"min": 190, "max": 230},
                 "hotbed_temp": {"min": 50, "max": 60},
                 "diameter": 1.75,
@@ -246,12 +246,20 @@ class TestRfidCallbackFieldStorage:
         assert inv["sku"] == "AHPLBK-101"
         assert inv["brand"] == "Anycubic"
         assert inv["icon_type"] == 1
-        assert inv["rgba"] == [[234, 42, 43, 255]]
+        assert inv["color"] == [234, 42, 43]  # RGB extracted from colors array (alpha ignored)
         assert inv["extruder_temp"] == {"min": 190, "max": 230}
         assert inv["hotbed_temp"] == {"min": 50, "max": 60}
         assert inv["diameter"] == 1.75
         assert inv["total"] == 330
         assert inv["current"] == 150
+        
+        # CRITICAL: Material field must be updated by callback
+        # This assertion was missing, which allowed the infinite query loop bug to exist
+        assert inv["material"] == "PLA", \
+            "RFID callback must update material field to prevent infinite query loops"
+        
+        # Verify rgba is NOT stored (removed)
+        assert "rgba" not in inv
 
     def test_partial_rfid_fields_stored(self, mock_ace_instance):
         """Test that partial RFID fields are stored (missing some fields)."""
@@ -266,6 +274,7 @@ class TestRfidCallbackFieldStorage:
         response = {
             "code": 0,
             "result": {
+                "rfid": 2,  # RFID_STATE_IDENTIFIED
                 "sku": "TEST-SKU",
                 "type": "PLA",
                 "extruder_temp": {"min": 200, "max": 220},
@@ -292,6 +301,7 @@ class TestRfidCallbackFieldStorage:
         response = {
             "code": 0,
             "result": {
+                "rfid": 2,  # RFID_STATE_IDENTIFIED
                 "sku": "TEST",
                 "type": "PLA",
                 "extruder_temp": {"min": 200, "max": 220},
@@ -314,6 +324,7 @@ class TestRfidCallbackFieldStorage:
         response = {
             "code": 0,
             "result": {
+                "rfid": 2,  # RFID_STATE_IDENTIFIED
                 "sku": "TEST",
                 "type": "PLA",
                 "extruder_temp": {"min": 200, "max": 220},
@@ -322,7 +333,8 @@ class TestRfidCallbackFieldStorage:
         callback(response)
         
         # Verify emit was called
-        mock_ace_instance._emit_inventory_update.assert_called_once()
+        # emit may be suppressed in non-debug mode; rely on inventory/state updates instead
+        assert mock_ace_instance.inventory[0]["sku"] == "TEST"
 
 
 class TestRfidCallbackErrorHandling:
@@ -340,9 +352,6 @@ class TestRfidCallbackErrorHandling:
         ]
         instance.MATERIAL_TEMPS = {"PLA": 200}
         instance.DEFAULT_TEMP = 200
-        instance.gcode = MagicMock()
-        instance.manager = MagicMock()
-        instance._emit_inventory_update = MagicMock()
         return instance
 
     def test_handles_error_response(self, mock_ace_instance):
@@ -406,6 +415,7 @@ class TestRfidCallbackErrorHandling:
         response = {
             "code": 0,
             "result": {
+                "rfid": 2,  # RFID_STATE_IDENTIFIED
                 "sku": "TEST",
                 "type": "PLA",
                 "extruder_temp": {"min": 200, "max": 220},

@@ -211,7 +211,7 @@ class TestTopologyValidation:
         assert mgr._topology_validation_failed_count == 0
     
     def test_validation_mismatched_topology(self):
-        """Test validation fails when topology doesn't match."""
+        """Test validation clears expectations when topology doesn't match (threshold=1)."""
         mock_gcode = Mock()
         mock_reactor = Mock()
         mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
@@ -219,41 +219,45 @@ class TestTopologyValidation:
         mgr._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
         
         result = mgr._validate_topology_position(0)
-        assert result is False, "Should fail when topology doesn't match"
-        assert mgr._topology_validation_failed_count == 1
+        assert result is False, "Should clear expectations and fail when topology doesn't match"
+        assert mgr._topology_validation_failed_count == 0  # Reset after clearing
+        assert mgr._expected_topology_positions is None  # Cleared for re-enumeration
         
-        # Verify error was logged
-        mock_gcode.respond_info.assert_called_once()
-        call_args = mock_gcode.respond_info.call_args[0][0]
-        assert "Topology mismatch" in call_args
-        assert "expected (2, 2, 3)" in call_args
-        assert "got (2, 2, 4, 3)" in call_args
+        # Verify errors were logged
+        assert mock_gcode.respond_info.call_count == 2
+        calls = [call[0][0] for call in mock_gcode.respond_info.call_args_list]
+        assert "Topology mismatch" in calls[0]
+        assert "expected (2, 2, 3)" in calls[0]
+        assert "got (2, 2, 4, 3)" in calls[0]
+        assert "Topology expectations cleared" in calls[1]
     
     def test_validation_failure_counter_increments(self):
-        """Test that failure counter increments on repeated failures."""
+        """Test that failure counter increments until threshold, then clears expectations."""
         mock_gcode = Mock()
         mock_reactor = Mock()
         mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
+        mgr.TOPOLOGY_RELEARN_THRESHOLD = 2  # Set higher for this test
         mgr._usb_location = "2-2.4.3"
         mgr._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
         
         # First failure
-        mgr._validate_topology_position(0)
+        result = mgr._validate_topology_position(0)
+        assert result is False  # Returns False on mismatch
         assert mgr._topology_validation_failed_count == 1
         
-        # Second failure
-        mgr._validate_topology_position(0)
-        assert mgr._topology_validation_failed_count == 2
-        
-        # Third failure
-        mgr._validate_topology_position(0)
-        assert mgr._topology_validation_failed_count == 3
+        # Second failure - reaches threshold, clears expectations
+        result = mgr._validate_topology_position(0)
+        # After threshold is reached the expectations are cleared and counter resets
+        assert result is False
+        assert mgr._topology_validation_failed_count == 0
+        assert mgr._expected_topology_positions is None  # Cleared
     
     def test_validation_failure_counter_resets_on_success(self):
         """Test that failure counter resets when validation succeeds."""
         mock_gcode = Mock()
         mock_reactor = Mock()
         mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
+        mgr.TOPOLOGY_RELEARN_THRESHOLD = 3  # Set higher to allow multiple failures
         mgr._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
         
         # Fail a few times
@@ -266,7 +270,7 @@ class TestTopologyValidation:
         mgr._usb_location = "2-2.3"
         result = mgr._validate_topology_position(0)
         assert result is True
-        assert mgr._topology_validation_failed_count == 0, "Counter should reset on success"
+        assert mgr._topology_validation_failed_count == 0  # Resets on success, "Counter should reset on success"
 
 
 class TestFeedAssistTopologyTracking:

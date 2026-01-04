@@ -5,6 +5,7 @@ AceInstance: Manages a single physical ACE Pro unit.
 import logging
 import time
 import json
+import copy
 from .config import (
     INSTANCE_MANAGERS,
     SLOTS_PER_ACE,
@@ -14,9 +15,8 @@ from .config import (
     FILAMENT_STATE_TOOLHEAD,
     FILAMENT_STATE_NOZZLE,
     RFID_STATE_NO_INFO,
-    RFID_STATE_FAILED,
     RFID_STATE_IDENTIFIED,
-    RFID_STATE_IDENTIFYING,
+    MAX_RETRIES,
     get_tool_offset,
     set_and_save_variable,
     create_inventory,
@@ -30,9 +30,9 @@ class AceInstance:
 
     # Defaults for slots that report ready but provide no metadata
     DEFAULT_MATERIAL = "Unknown"
-    DEFAULT_COLOR = [128, 128, 128]
-    DEFAULT_TEMP = 225
-    
+    DEFAULT_COLOR = [0, 0, 0]
+    DEFAULT_TEMP = 0
+
     # Material temperature defaults (from RFID tags)
     MATERIAL_TEMPS = {
         "PLA": 200,
@@ -101,24 +101,27 @@ class AceInstance:
         self._feed_assist_index = -1
         self._feed_assist_topology_position = None  # Track chain position (0, 1, 2...)
         self._pending_feed_assist_restore = -1  # Slot to restore after first heartbeat
+        self._pending_rfid_refresh = False  # Flag to refresh all RFID data after reconnect
         self._dryer_active = False
         self._dryer_temperature = 0
         self._dryer_duration = 0
         self._pending_rfid_queries = set()  # Track slots with in-flight RFID queries
-        self._rfid_query_attempted = set()  # Track slots where RFID query was already attempted
 
         self.status_debug_logging = bool(ace_config.get("status_debug_logging", False))
+        self.supervision_enabled = bool(ace_config.get("ace_connection_supervision", True))
 
         self.serial_mgr = AceSerialManager(
             self.gcode,
             self.reactor,
             instance_num,
             ace_enabled=ace_enabled,
-            status_debug_logging=self.status_debug_logging
+            status_debug_logging=self.status_debug_logging,
+            supervision_enabled=self.supervision_enabled
         )
         self.tool_offset = get_tool_offset(self.instance_num)
         self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)
         self.serial_mgr.set_on_connect_callback(self._on_ace_connect)
+        self._dryer_start_logged = False  # prevent duplicate dryer start messages
 
     @property
     def manager(self):
@@ -208,6 +211,23 @@ class AceInstance:
                 return slot.get("status") == "empty"
         return False
 
+    def _is_printing_or_paused(self):
+        """Check if printer is in a printing or paused state.
+
+        Returns:
+            bool: True if printing or paused, False otherwise
+        """
+        print_stats = self.printer.lookup_object("print_stats", None)
+        if not print_stats:
+            return False
+
+        try:
+            stats = print_stats.get_status(self.reactor.monotonic())
+            state = (stats.get("state") or "").lower()
+            return state in ["printing", "paused"]
+        except Exception:
+            return False
+
     def _enable_feed_assist(self, slot_index):
         """Enable feed assist for smooth filament loading."""
         self._feed_assist_index = slot_index
@@ -230,6 +250,7 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Feed assist enable failed: {msg}"
                 )
 
+        self.wait_ready()
         request = {"method": "start_feed_assist", "params": {"index": slot_index}}
         self.send_request(request, callback)
         self.wait_ready()
@@ -247,7 +268,7 @@ class AceInstance:
 
         def callback(response):
             if response and response.get("code") == 0:
-                self.gcode.respond_info(
+                logging.info(
                     f"ACE[{self.instance_num}]: Feed assist disabled for slot {slot_index}"
                 )
                 set_and_save_variable(
@@ -366,7 +387,7 @@ class AceInstance:
         Raises:
             ValueError: If retraction fails after all retries
         """
-        max_retries = 3
+        max_retries = MAX_RETRIES
         retry_delay_s = 2.0
 
         self.wait_ready()
@@ -382,7 +403,6 @@ class AceInstance:
             ace_status_before = self._info.get('status', 'unknown')
             retract_start_time = time.time()
             early_stop_state = {"triggered": False, "elapsed": None}
-            initial_slot_empty = self._is_slot_empty(slot)
 
             if attempt > 1:
                 self.gcode.respond_info(
@@ -474,7 +494,6 @@ class AceInstance:
                         self.wait_ready()
                         return {"code": 0, "msg": "Retract stopped early: slot empty"}
                     self.reactor.pause(self.reactor.monotonic() + 0.2)
-
 
                 def wait_cycle():
                     if on_wait_for_ready is not None:
@@ -631,14 +650,11 @@ class AceInstance:
         return self.extruder_feeding_length
 
     def execute_feed_with_retries(self, local_slot, feed_length, feed_speed):
-        max_retries = 3
+        max_retries = MAX_RETRIES
         for attempt in range(max_retries):
             response = self.feed_filament_with_wait_for_response(local_slot, feed_length, feed_speed)
 
             if response.get("code") == 0:
-                set_and_save_variable(
-                    self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER
-                )
                 break
             elif response.get("msg") == "FORBIDDEN" and attempt < max_retries - 1:
                 self.gcode.respond_info(
@@ -668,11 +684,30 @@ class AceInstance:
             if self.manager.get_switch_state(SENSOR_TOOLHEAD):
                 raise ValueError("Cannot feed, filament in nozzle")
 
-        self._feed_to_toolhead_with_extruder_assist(local_slot, self.toolchange_load_length, self.feed_speed,
-                                                    self.extruder_feeding_length, self.extruder_feeding_speed)
+        try:
+            self._feed_to_toolhead_with_extruder_assist(
+                local_slot,
+                self.toolchange_load_length,
+                self.feed_speed,
+                self.extruder_feeding_length,
+                self.extruder_feeding_speed
+            )
+        except Exception as e:
+            # Perform your custom action here, e.g., log, cleanup, etc.
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Exception during feed to toolhead: {e}, "
+                f"retracting filament 150mm back in case it got squished and stuck "
+                f"in the filament-hub"
+            )
+            self._retract(local_slot, 150, self.retract_speed)
+
+            raise  # Re-raise the original exception
 
         set_and_save_variable(
-            self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_TOOLHEAD
+            self.printer,
+            self.gcode,
+            "ace_filament_pos",
+            FILAMENT_STATE_TOOLHEAD
         )
 
         self.gcode.run_script_from_command("G92 E0")
@@ -705,7 +740,7 @@ class AceInstance:
         Returns:
             bool: True if firmware acknowledged, False otherwise
         """
-        self.gcode.respond_info(
+        logging.info(
             f"ACE[{self.instance_num}]: Requesting retract speed change to "
             f"{retract_speed}mm/s (slot {slot})"
         )
@@ -756,7 +791,7 @@ class AceInstance:
         Returns:
             bool: True if firmware acknowledged, False otherwise
         """
-        self.gcode.respond_info(
+        logging.info(
             f"ACE[{self.instance_num}]: Requesting feed speed change to "
             f"{retract_speed}mm/s (slot {slot})"
         )
@@ -850,7 +885,7 @@ class AceInstance:
             return {"code": -1, "msg": "Feed command timeout - no response"}
 
         final_response = response_container["response"] or {"code": -1, "msg": "No response"}
-        self.gcode.respond_info(
+        logging.info(
             f"ACE[{self.instance_num}]: feed_filament_with_wait_for_response() completed -> "
             f"slot={slot}, length={length}mm, result_code={final_response.get('code')}"
         )
@@ -987,8 +1022,10 @@ class AceInstance:
                     extra_length = self.parkposition_to_toolhead_length
                     extra_speed = self.retract_speed / 2
                     self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: Suspicious late sensor trigger - Retracting extra parkposition_to_toolhead_length to ensure clear path: "
-                        f"(Length: {extra_length:.2f}mm, {extra_speed:.1f}mm/s, "
+                        f"ACE[{self.instance_num}]: Suspicious late sensor trigger - "
+                        f"Retracting extra parkposition_to_toolhead_length to ensure clear path: "
+                        f"(Length: {extra_length:.2f}mm, "
+                        f"{extra_speed:.1f}mm/s)"
                     )
 
                     self._retract(
@@ -1086,7 +1123,7 @@ class AceInstance:
     def _query_rfid_full_data(self, slot_idx):
         """
         Query full RFID tag data via get_filament_info.
-        
+
         This gets the complete RFID data including:
         - extruder_temp: {min, max}
         - hotbed_temp: {min, max}
@@ -1098,32 +1135,54 @@ class AceInstance:
         if slot_idx in self._pending_rfid_queries:
             return
         self._pending_rfid_queries.add(slot_idx)
-        self._rfid_query_attempted.add(slot_idx)  # Mark as attempted (cleared when slot becomes empty)
-        
+
         def rfid_callback(response):
             # Always clear pending flag when callback completes
             self._pending_rfid_queries.discard(slot_idx)
-            
+
+            # LOG RAW get_filament_info RESPONSE
+            # self.gcode.respond_info(
+            #     f"ACE[{self.instance_num}]: Slot {slot_idx} get_filament_info RAW response: {response}"
+            # )
+
             if response and response.get("code") == 0 and "result" in response:
                 result = response["result"]
-                
+
+                # Check if actual RFID tag is present (not just non-RFID spool)
+                rfid_state = result.get("rfid", 0)
+
+                # Only process if RFID tag detected (rfid=2 = RFID_STATE_IDENTIFIED)
+                # Don't overwrite manual data for non-RFID spools (rfid=1) or empty slots (rfid=0)
+                if rfid_state != RFID_STATE_IDENTIFIED:
+                    logging.info(
+                        f"ACE[{self.instance_num}]: Slot {slot_idx} - No RFID tag (rfid={rfid_state}), "
+                        f"skipping inventory update to preserve manual data"
+                    )
+                    return
+
                 # Extract all RFID fields
                 sku = result.get("sku", "")
                 brand = result.get("brand", "")
                 material = result.get("type", "")
                 icon_type = result.get("icon_type")
-                rgba = result.get("colors")  # [[R, G, B, A]]
+                colors_array = result.get("colors")  # [[R, G, B, A]]
+                rfid_color = None
+                if colors_array and len(colors_array) > 0:
+                    # Extract RGB from first color entry (ignore alpha)
+                    first_color = colors_array[0] if isinstance(colors_array[0], (list, tuple)) else colors_array
+                    if len(first_color) >= 3:
+                        rfid_color = [first_color[0], first_color[1], first_color[2]]
                 extruder_temp = result.get("extruder_temp", {})
                 hotbed_temp = result.get("hotbed_temp", {})
                 diameter = result.get("diameter")
                 total = result.get("total")
                 current = result.get("current")
-                
+
                 # Calculate temperature from RFID based on rfid_temp_mode config
                 temp_min = extruder_temp.get("min", 0)
                 temp_max = extruder_temp.get("max", 0)
                 temp_mode = self.ace_config.get("rfid_temp_mode", "average")
-                
+
                 if temp_min > 0 or temp_max > 0:
                     if temp_mode == "min" and temp_min > 0:
                         rfid_temp = temp_min
@@ -1137,16 +1196,24 @@ class AceInstance:
                         rfid_temp = temp_min
                 else:
                     rfid_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
-                
+
                 # Update inventory with full RFID data
                 if 0 <= slot_idx < self.SLOT_COUNT:
                     inv = self.inventory[slot_idx]
-                    
+
+                    # Update material from RFID callback (authoritative)
+                    if material:
+                        inv["material"] = material
+
                     # Update temperature from RFID
                     old_temp = inv.get("temp", 0)
                     if rfid_temp != old_temp:
                         inv["temp"] = rfid_temp
-                    
+
+                    # Update color from RFID
+                    if rfid_color:
+                        inv["color"] = rfid_color
+
                     # Store all RFID metadata
                     if sku:
                         inv["sku"] = sku
@@ -1154,8 +1221,6 @@ class AceInstance:
                         inv["brand"] = brand
                     if icon_type is not None:
                         inv["icon_type"] = icon_type
-                    if rgba:
-                        inv["rgba"] = rgba
                     if extruder_temp:
                         inv["extruder_temp"] = extruder_temp
                     if hotbed_temp:
@@ -1166,26 +1231,27 @@ class AceInstance:
                         inv["total"] = total
                     if current is not None:
                         inv["current"] = current
-                    
+
                     # Log the full RFID data
-                    self.gcode.respond_info(
+                    color_str = f"RGB({rfid_color[0]},{rfid_color[1]},{rfid_color[2]})" if rfid_color else "none"
+                    logging.info(
                         f"ACE[{self.instance_num}]: Slot {slot_idx} RFID full data -> "
                         f"sku={sku}, temp={rfid_temp}°C (min={temp_min}, max={temp_max}), "
-                        f"hotbed={hotbed_temp}, brand={brand}"
+                        f"color={color_str}, hotbed={hotbed_temp}, brand={brand}"
                     )
-                    
+
                     # Sync to persistent storage
                     if self.manager:
                         self.manager._sync_inventory_to_persistent(self.instance_num)
-                    
+
                     # Emit JSON update for UI
-                    self._emit_inventory_update()
+                    # self._emit_inventory_update()
             else:
                 msg = response.get("msg", "Unknown") if response else "No response"
                 self.gcode.respond_info(
                     f"ACE[{self.instance_num}]: get_filament_info failed for slot {slot_idx}: {msg}"
                 )
-        
+
         request = {"method": "get_filament_info", "params": {"index": slot_idx}}
         self.send_request(request, rfid_callback)
 
@@ -1203,7 +1269,16 @@ class AceInstance:
                     "rfid": inv.get("rfid", False),
                 }
                 # Include optional RFID metadata fields if present
-                for key in ["sku", "brand", "icon_type", "rgba", "extruder_temp", "hotbed_temp", "diameter", "total", "current"]:
+                for key in [
+                    "sku",
+                    "brand",
+                    "icon_type",
+                    "rgba",
+                    "extruder_temp",
+                    "hotbed_temp",
+                    "diameter",
+                    "total",
+                        "current"]:
                     if key in inv:
                         slot_data[key] = inv[key]
                 slots_out.append(slot_data)
@@ -1213,12 +1288,35 @@ class AceInstance:
 
     def _status_update_callback(self, response):
         """Handle status updates from ACE hardware."""
+        inventory_changed = False
+        feed_assist_was_active = self._feed_assist_index
+        filament_loaded = False
+
+        # LOG RAW status RESPONSE (only slots data for readability)
+        # if response and "result" in response:
+        #     slots_data = response.get("result", {}).get("slots", [])
+        #     if slots_data:
+        #         for slot in slots_data:
+        #             idx = slot.get("index")
+        #             rfid_val = slot.get("rfid")
+        #             status_val = slot.get("status")
+        #             self.gcode.respond_info(
+        #                 f"ACE[{self.instance_num}]: Slot {idx} status RAW -> rfid={rfid_val}, status={status_val}"
+        #             )
+
         if response and "result" in response:
             self._info = response["result"]
 
-            inventory_changed = False
-            feed_assist_was_active = self._feed_assist_index
-            filament_loaded = False
+            # Handle pending RFID refresh after reconnect
+            if self._pending_rfid_refresh:
+                self._pending_rfid_refresh = False
+                if self.rfid_inventory_sync_enabled:
+                    # Unconditionally query all slots to catch any spool changes during disconnect
+                    for slot_idx in range(self.SLOT_COUNT):
+                        logging.info(
+                            f"ACE[{self.instance_num}]: Reconnect - querying RFID data for slot {slot_idx}"
+                        )
+                        self._query_rfid_full_data(slot_idx)
 
             slots = self._info.get("slots", [])
             for slot in slots:
@@ -1233,6 +1331,7 @@ class AceInstance:
                     updated_color = saved_color
                     updated_material = saved_material
                     updated_temp = saved_temp
+                    updated_rfid = None  # Will be set based on transition or status
 
                     # Get current states
                     old_status = self.inventory[idx].get("status")
@@ -1244,10 +1343,36 @@ class AceInstance:
 
                         # Log the state transition
                         if old_status == "empty" and new_status == "ready":
-                            self.gcode.respond_info(
-                                f"ACE[{self.instance_num}]: Slot {idx} auto-restored: "
-                                f"empty → ready (material={saved_material})"
-                            )
+                            # Check if the new spool is non-RFID (RFID_STATE_NO_INFO = 0)
+                            rfid_state = slot.get("rfid")
+                            if rfid_state == RFID_STATE_NO_INFO and saved_rfid:
+                                # RFID → non-RFID transition: clear RFID-specific fields only
+                                # (User may have replaced empty RFID spool with matching non-RFID spool)
+                                # Keep material/color/temp for print continuity
+                                updated_rfid = False
+                                # Clear all optional RFID-specific fields from inventory
+                                for key in [
+                                    "sku",
+                                    "brand",
+                                    "icon_type",
+                                    "extruder_temp",
+                                    "hotbed_temp",
+                                    "diameter",
+                                    "total",
+                                        "current"]:
+                                    self.inventory[idx].pop(key, None)
+                                # Clear query state
+                                self._pending_rfid_queries.discard(idx)
+                                self.gcode.respond_info(
+                                    f"ACE[{self.instance_num}]: Slot {idx} RFID→non-RFID swap detected -> "
+                                    f"empty → ready (clearing RFID fields, preserving material={saved_material})"
+                                )
+                            else:
+                                # RFID spool (identifying/identified) OR same non-RFID refilled: preserve metadata
+                                self.gcode.respond_info(
+                                    f"ACE[{self.instance_num}]: Slot {idx} auto-restored: "
+                                    f"empty → ready (material={saved_material})"
+                                )
                             filament_loaded = True
 
                         elif old_status == "ready" and new_status == "empty":
@@ -1260,83 +1385,54 @@ class AceInstance:
                     if new_status == "empty":
                         updated_rfid = False
                         # Clear all optional RFID fields
-                        for key in ["sku", "brand", "icon_type", "rgba", "extruder_temp", "hotbed_temp", "diameter", "total", "current"]:
+                        for key in [
+                            "sku",
+                            "brand",
+                            "icon_type",
+                            "extruder_temp",
+                            "hotbed_temp",
+                            "diameter",
+                            "total",
+                                "current"]:
                             self.inventory[idx].pop(key, None)
-                        # Clear query tracking so we'll query again when spool is reinserted
-                        self._rfid_query_attempted.discard(idx)
                         self._pending_rfid_queries.discard(idx)
 
-                    # If RFID provided full data while becoming ready, sync it to inventory
+                        # If NOT printing/paused, also clear material/color/temp to defaults
+                        # (For endless spool/runout during printing, we preserve this info)
+                        if not self._is_printing_or_paused():
+                            updated_material = ""
+                            updated_color = [0, 0, 0]
+                            updated_temp = 0
+                            inventory_changed = True  # Force persistence update
+
+                    # Handle RFID tag detection - only query get_filament_info, don't use status metadata
                     elif new_status == "ready":
                         rfid_state = slot.get("rfid")
 
-                        # Respect the runtime toggle; skip RFID syncing when disabled
-                        if self.rfid_inventory_sync_enabled:
-                            material = (slot.get("type") or "").strip()
-                            color = slot.get("color")
-                            color_list = list(color) if isinstance(color, (list, tuple)) else None
-                            # Accept true black RFID colors (0,0,0) instead of treating as invalid
-                            color_valid = bool(color_list) and len(color_list) >= 3
+                        # When RFID sync enabled: only use data from get_filament_info callback
+                        # Don't read material/color/sku from get_status - it may be stale
+                        if self.rfid_inventory_sync_enabled and rfid_state == RFID_STATE_IDENTIFIED:
+                            # Query on RFID state transition (false → detected)
+                            # Skip if query is already in-flight
+                            query_pending = idx in self._pending_rfid_queries
 
-                            if rfid_state == RFID_STATE_IDENTIFIED and material and color_valid:
-                                incoming_color = color_list[:3]
-
-                                # Check if we're missing full RFID data (need to query get_filament_info)
-                                missing_rfid_data = (
-                                    "extruder_temp" not in self.inventory[idx] or
-                                    "hotbed_temp" not in self.inventory[idx]
+                            if not saved_rfid and not query_pending:
+                                updated_rfid = True
+                                # Query get_filament_info - callback will populate all metadata
+                                self._query_rfid_full_data(idx)
+                                self.gcode.respond_info(
+                                    f"ACE[{self.instance_num}]: Slot {idx} RFID detected -> "
+                                    f"querying get_filament_info..."
                                 )
-                                
-                                # Skip if query is already in-flight or was already attempted
-                                # (only retry when slot becomes empty then ready again)
-                                already_queried = idx in self._rfid_query_attempted
-                                query_pending = idx in self._pending_rfid_queries
-
-                                # Treat as a change if any field differs, rfid flag was previously false,
-                                # OR we're missing full RFID data that should be queried
-                                # BUT skip re-query if one is already in-flight or was already attempted
-                                is_changed = (
-                                    material != saved_material or
-                                    incoming_color != saved_color[:3] or
-                                    not saved_rfid or
-                                    (missing_rfid_data and not query_pending and not already_queried)
-                                )
-
-                                if is_changed:
-                                    updated_material = material
-                                    updated_color = incoming_color
-                                    updated_rfid = True
-                                    
-                                    # Query full RFID data via get_filament_info to get temperatures
-                                    self._query_rfid_full_data(idx)
-                                    
-                                    # For now, use material lookup for temp (will be updated by callback)
-                                    updated_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
-                                    
-                                    # Capture basic RFID metadata from status (sku/brand available in get_status)
-                                    sku = slot.get("sku", "")
-                                    brand = slot.get("brand", "")
-                                    
-                                    # Store basic fields in inventory (full data comes from callback)
-                                    if sku:
-                                        self.inventory[idx]["sku"] = sku
-                                    if brand:
-                                        self.inventory[idx]["brand"] = brand
-                                    
-                                    self.gcode.respond_info(
-                                        f"ACE[{self.instance_num}]: Slot {idx} RFID detected -> "
-                                        f"material={updated_material}, color={updated_color}, querying full RFID data..."
-                                    )
-                                    inventory_changed = True
-                                else:
-                                    updated_rfid = saved_rfid
+                                inventory_changed = True
                             else:
-                                updated_rfid = saved_rfid
+                                # RFID already detected - keep existing data
+                                if updated_rfid is None:
+                                    updated_rfid = saved_rfid
                         else:
-                            # RFID syncing disabled: ignore RFID-tagged metadata (rfid_state != RFID_STATE_NO_INFO)
-                            # and leave saved values untouched. Non-RFID updates (rfid_state == RFID_STATE_NO_INFO)
-                            # can still fall through to defaulting logic below.
-                            updated_rfid = saved_rfid
+                            # RFID sync disabled or no RFID: keep inventory as source of truth
+                            if updated_rfid is None:
+                                updated_rfid = saved_rfid
 
                         # If still missing metadata, fall back to defaults for ready slots
                         missing_material = not updated_material.strip()
@@ -1349,22 +1445,44 @@ class AceInstance:
 
                         # When RFID sync is disabled AND the slot reports RFID data (rfid_state != RFID_STATE_NO_INFO),
                         # do not auto-fill defaults; leave values as-is to satisfy "ignore RFID data".
-                        allow_default_fill = not (not self.rfid_inventory_sync_enabled and rfid_state not in (None, RFID_STATE_NO_INFO))
+                        allow_default_fill = not (
+                            not self.rfid_inventory_sync_enabled and rfid_state not in (
+                                None, RFID_STATE_NO_INFO))
 
                         if allow_default_fill and (missing_material or missing_temp):
-                            if missing_material:
+                            # Check if we're actually changing anything before setting inventory_changed
+                            needs_update = False
+                            if missing_material and updated_material != self.DEFAULT_MATERIAL:
                                 updated_material = self.DEFAULT_MATERIAL
-                            if missing_temp:
+                                needs_update = True
+                            elif missing_material:
+                                updated_material = self.DEFAULT_MATERIAL
+
+                            if missing_temp and updated_temp != self.DEFAULT_TEMP:
                                 updated_temp = self.DEFAULT_TEMP
-                            if missing_color:
+                                needs_update = True
+                            elif missing_temp:
+                                updated_temp = self.DEFAULT_TEMP
+
+                            if missing_color and updated_color != self.DEFAULT_COLOR:
+                                updated_color = list(self.DEFAULT_COLOR)
+                                needs_update = True
+                            elif missing_color:
                                 updated_color = list(self.DEFAULT_COLOR)
 
-                            inventory_changed = True
-                            self.gcode.respond_info(
-                                f"ACE[{self.instance_num}]: Slot {idx} ready with no metadata -> "
-                                f"defaulting to {updated_material} {updated_temp}C, color {updated_color}"
-                            )
+                            if needs_update:
+                                inventory_changed = True
+                                self.gcode.respond_info(
+                                    f"ACE[{self.instance_num}]: Slot {idx} ready with no metadata -> "
+                                    f"defaulting to {updated_material} {updated_temp}C, color {updated_color}"
+                                )
                     else:
+                        # Don't overwrite updated_rfid if it was already set
+                        if updated_rfid is None:
+                            updated_rfid = saved_rfid
+
+                    # Final safety check: ensure updated_rfid has a value
+                    if updated_rfid is None:
                         updated_rfid = saved_rfid
 
                     # Only write to inventory if values actually changed
@@ -1373,7 +1491,7 @@ class AceInstance:
                         inv.get("color") != updated_color or
                         inv.get("material") != updated_material or
                         inv.get("temp") != updated_temp or
-                        inv.get("rfid") != updated_rfid):
+                            inv.get("rfid") != updated_rfid):
                         inv["status"] = new_status
                         inv["color"] = updated_color
                         inv["material"] = updated_material
@@ -1386,7 +1504,7 @@ class AceInstance:
                 self.manager._sync_inventory_to_persistent(self.instance_num)
 
             # Emit inventory update for KlipperScreen
-            self._emit_inventory_update()
+            # self._emit_inventory_update()
 
             # Restore feed assist if it was active before filament loading
             # (ACE hardware disables feed assist when loading filament on any slot)
@@ -1409,7 +1527,7 @@ class AceInstance:
 
         if response.get("code") == 0 and "result" in response:
             self._status_update_callback(response)
-            
+
             # Restore pending feed assist after first successful heartbeat
             self._maybe_restore_pending_feed_assist()
         else:
@@ -1421,19 +1539,19 @@ class AceInstance:
     def _maybe_restore_pending_feed_assist(self):
         """
         Restore feed assist if pending after reconnect.
-        
+
         Called after first successful heartbeat to ensure connection is stable.
         Only restores if reconnecting to same position in daisy chain (topology).
         """
         if self._pending_feed_assist_restore < 0:
             return
-        
+
         slot = self._pending_feed_assist_restore
         self._pending_feed_assist_restore = -1  # Clear before attempting
-        
+
         # Check if we're at the same position in the daisy chain
         current_position = self.serial_mgr.get_usb_topology_position()
-        
+
         if self._feed_assist_topology_position is not None and current_position != self._feed_assist_topology_position:
             # Connected to different position in chain, don't restore
             self.gcode.respond_info(
@@ -1444,16 +1562,25 @@ class AceInstance:
             self._feed_assist_index = -1  # Clear stale state
             self._feed_assist_topology_position = None
             return
-        
+
         self.gcode.respond_info(
             f"ACE[{self.instance_num}]: Restoring feed assist on slot {slot} "
             f"(chain position: {current_position})"
         )
         try:
+            # Use short timeout - if ACE is busy (e.g., RFID read/preload), skip restoration
+            # Feed assist can be restored later or manually if needed
+            self.wait_ready(timeout_s=5.0)
             request = {"method": "start_feed_assist", "params": {"index": slot}}
             self.send_request(
                 request,
                 lambda response: self._on_feed_assist_restore_response(response, slot)
+            )
+        except TimeoutError:
+            # ACE busy (likely RFID read/preload) - skip restoration, don't cascade timeouts
+            logging.info(
+                f"ACE[{self.instance_num}]: Skipping feed assist restoration on slot {slot} "
+                f"(ACE busy, will retry on next status update)"
             )
         except Exception as e:
             self.gcode.respond_info(
@@ -1463,12 +1590,22 @@ class AceInstance:
     def _on_ace_connect(self):
         """
         Handle ACE connection/reconnection.
-        
-        Defers feed assist restoration until after first successful heartbeat
-        to ensure connection is actually stable before sending commands.
+
+        Refreshes RFID data for all slots with detected tags to catch any
+        spool changes that occurred while disconnected.
+
+        Defers feed assist restoration and RFID refresh until after first
+        successful status update to ensure connection is stable.
         """
+        # Set flag to refresh RFID data on next status update
+        # This ensures we have current data if spools were changed during disconnect
+        self._pending_rfid_refresh = True
+        logging.info(
+            f"ACE[{self.instance_num}]: Connected - will refresh RFID data after first status update"
+        )
+
         if not self.feed_assist_active_after_ace_connect:
-            self.gcode.respond_info(
+            logging.info(
                 f"ACE[{self.instance_num}]: Connected - feed assist restoration disabled"
             )
             return
@@ -1478,12 +1615,12 @@ class AceInstance:
             slot = self._feed_assist_index
             # Defer restoration until after first heartbeat confirms communication
             self._pending_feed_assist_restore = slot
-            self.gcode.respond_info(
+            logging.info(
                 f"ACE[{self.instance_num}]: Connected - "
                 f"will restore feed assist on slot {slot} after heartbeat"
             )
         else:
-            self.gcode.respond_info(
+            logging.info(
                 f"ACE[{self.instance_num}]: Connected - "
                 f"no previous feed assist to restore"
             )
@@ -1501,8 +1638,41 @@ class AceInstance:
             )
 
     def get_status(self, eventtime=None):
-        """Return status dict for Klipper."""
-        return self._info.copy()
+        """Return status dict for Klipper/Moonraker queries."""
+        # Debug logging reserved for status_debug_logging; keep silent by default
+
+        status = copy.deepcopy(self._info)
+        status["instance"] = self.instance_num
+
+        # Expose UI-friendly slot inventory (material/color/temp/status/RFID metadata)
+        slots_out = []
+        for i in range(self.SLOT_COUNT):
+            inv = self.inventory[i]
+            slot_data = {
+                "status": inv.get("status"),
+                "color": inv.get("color"),
+                "material": inv.get("material"),
+                "temp": inv.get("temp"),
+                "rfid": inv.get("rfid", False),
+            }
+            for key in [
+                "sku",
+                "brand",
+                "icon_type",
+                "rgba",
+                "extruder_temp",
+                "hotbed_temp",
+                "diameter",
+                "total",
+                "current",
+            ]:
+                if key in inv:
+                    slot_data[key] = inv[key]
+            slots_out.append(slot_data)
+
+        status["slots"] = slots_out
+
+        return status
 
     def dwell(self, delay=1.0, verbose=False):
         """Sleep in reactor time."""
@@ -1534,24 +1704,6 @@ class AceInstance:
         toolhead.move(new_pos, speed)
         if wait_for_move_end:
             toolhead.wait_moves()
-
-    def start_heartbeat(self):
-        """Start periodic heartbeat requests."""
-        self.serial_mgr.heartbeat_interval = self.heartbeat_interval
-        self.serial_mgr.start_heartbeat()
-        self.gcode.respond_info(
-            f"ACE[{self.instance_num}]: Heartbeat started "
-            f"(interval={self.heartbeat_interval}s)"
-        )
-
-    def stop_heartbeat(self):
-        """Stop periodic heartbeat requests."""
-        self.serial_mgr.stop_heartbeat()
-        self.gcode.respond_info(f"ACE[{self.instance_num}]: Heartbeat stopped")
-
-    def is_heartbeat_active(self):
-        """Check if heartbeat timer is running."""
-        return self.serial_mgr.heartbeat_timer is not None
 
     def reset_persistent_inventory(self):
         """Reset persistent inventory to empty slots."""
@@ -1587,7 +1739,7 @@ class AceInstance:
         """
         target_sensor_name = "RDM" if target_sensor == SENSOR_RDM else "toolhead"
 
-        self.gcode.respond_info(
+        logging.info(
             f"ACE[{self.instance_num}]: Feeding to {target_sensor_name} sensor "
             f"(length={feed_length}mm)"
         )
@@ -1602,11 +1754,6 @@ class AceInstance:
 
         # Start feeding
         self._feed(slot, feed_length, self.feed_speed)
-
-        # Set SPLITTER state after feed command sent (filament in bowden between splitter and sensor)
-        set_and_save_variable(
-            self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER
-        )
 
         # Wait for target sensor to trigger
         expected_time = feed_length / self.feed_speed
@@ -1649,10 +1796,10 @@ class AceInstance:
                     f"but {target_sensor_name} sensor not triggered"
                 )
 
-        self.gcode.respond_info(
-            f"ACE[{self.instance_num}]: Filament reached {target_sensor_name} sensor after feeding "
-            f"{accumulated_feed_length}mm. Consider updating 'feed_length' if needed."
-        )
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Filament reached {target_sensor_name} sensor after feeding "
+                f"{accumulated_feed_length}mm. Consider updating 'feed_length' if needed."
+            )
 
         self.wait_ready()
 
@@ -1677,4 +1824,3 @@ class AceInstance:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Filament position set to toolhead"
             )
-

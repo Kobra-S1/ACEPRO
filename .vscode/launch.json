@@ -1,0 +1,56 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Pytest",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "-s",
+        "${file}"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+        "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}"
+      },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug Pytest (subprocess)",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "-s",
+        "${file}"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+        "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}"
+      },
+      "console": "internalConsole",
+      "justMyCode": false,
+      "subProcess": true
+    },
+    {
+      "name": "Run All Tests (pytest)",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        ".",
+        "-q"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "console": "integratedTerminal"
+    }
+  ]
+}

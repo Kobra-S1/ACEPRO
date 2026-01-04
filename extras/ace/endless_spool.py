@@ -131,6 +131,15 @@ class EndlessSpool:
                 return candidate_tool
 
             cand_material = cand_inv.get("material", "").lower().strip()
+
+            # SAFETY: Never match "unknown" materials - we don't know if they're compatible!
+            if current_material == "unknown" or cand_material == "unknown":
+                logging.info(
+                    f"ACE: T{candidate_tool} skipped - cannot match unknown materials "
+                    f"(current='{current_material}', candidate='{cand_material}')"
+                )
+                continue
+
             if cand_material != current_material:
                 logging.info(
                     f"ACE: T{candidate_tool} skipped - material mismatch "
@@ -244,7 +253,7 @@ class EndlessSpool:
                         )
 
                     self.gcode.respond_info("ACE: Searching for next matching spool...")
-                    
+
                     # Temporarily mark tried tools as unavailable during search
                     saved_statuses = {}
                     for tried_tool in tried_tools:
@@ -255,7 +264,7 @@ class EndlessSpool:
                             if tried_ace:
                                 saved_statuses[tried_tool] = tried_ace.inventory[tried_slot]["status"]
                                 tried_ace.inventory[tried_slot]["status"] = "searching"  # Temp status
-                    
+
                     try:
                         next_tool = self.find_exact_match(from_tool)
                     finally:
@@ -347,4 +356,3 @@ class EndlessSpool:
     def get_status(self):
         """Return status dict for Klipper."""
         return {}
-

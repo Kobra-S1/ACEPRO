@@ -122,8 +122,7 @@ https://www.printables.com/model/1227630-anycubic-acepro-back-cover-for-usb-c
 1. **Clone Repository**
 ```bash
 cd ~
-git clone https://github.com/Kobra-S1/ACEPRO.git
-git checkout dev # For the development branch with the latest update
+git clone -b dev https://github.com/Kobra-S1/ACEPRO.git
 ```
 
 2. **Install Python Dependencies (if not already installed)**
@@ -638,7 +637,7 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 |---------|-------------|------------|
 | `ACE_GET_STATUS` | Query ACE hardware status | `[INSTANCE=<0-3>] [VERBOSE=1]` - omit INSTANCE for all, VERBOSE=1 for detailed output |
 | `ACE_GET_CONNECTION_STATUS` | Query connection stability for all instances | - |
-| `ACE_RECONNECT` | Manually reconnect serial | `[INSTANCE=<0-3>]` or omit for all |
+| `ACE_RECONNECT` | Manually reconnect serial | `[INSTANCE=<0-3>] [DELAY=5]` - omit INSTANCE for all, DELAY=reconnect delay in seconds |
 | `ACE_DEBUG_SENSORS` | Print all sensor states | - |
 | `ACE_DEBUG_STATE` | Print manager and instance state | - |
 | `ACE_DEBUG` | Send raw debug request to hardware | `INSTANCE=<0-3> METHOD=<name> [PARAMS=<json>]` |
@@ -663,16 +662,56 @@ The ACE Pro switch in Mainsail (Miscellaneous section) enables or disables the s
 
 ## 📊 Inventory Management
 
-Track filament materials, colors, and temperatures for intelligent toolchanges and endless spool.
+Track filament materials, RGB colors, and temperatures for intelligent toolchanges and endless spool matching.
 
-**RFID handling:** When a slot transitions to `ready` and ACE reports `rfid=2` with non-empty material and color, the driver copies that material/color into the slot inventory and automatically sets temperature based on material type (e.g., PLA→200°C, PLA High Speed→215°C, ABS→240°C), persists it, and emits a `// {"instance":..., "slots":...}` notify line. KlipperScreen listens for those notify lines and refreshes immediately, so the panel updates without pressing Refresh. RFID sync can be toggled with `ACE_ENABLE_RFID_SYNC` / `ACE_DISABLE_RFID_SYNC` (per-instance or all). Black RFID tag colors (0,0,0) are accepted and overwrite manual values; when RFID sync is enabled and a slot has an RFID spool, the KlipperScreen config dialog locks manual material/color changes.
+### RFID Automatic Sync
 
-**Non-RFID spools:** When a spool without an RFID tag is inserted into an empty slot, the driver automatically applies default metadata to make the slot immediately usable:
-- **Material**: `Unknown` - clearly indicates unconfigured spool, won't match in endless spool "exact" or "material" modes
-- **Color**: Gray `[128, 128, 128]` - matches UI empty slot color, visually indicates unconfigured
-- **Temperature**: 225°C - safe middle-ground for most materials, its your responsibility to set here the right values for your loaded filament.
+When a slot transitions to `ready` state and the ACE reports RFID tag data, the driver automatically:
 
-These defaults are applied only when the slot has no saved metadata. If you remove and reinsert the same spool, saved metadata is restored instead of applying defaults.
+1. **Reads RFID Data**: Material name, RGB color (0-255), temperature, diameter, brand, SKU, etc.
+2. **Updates Inventory**: Copies RFID data to slot inventory
+3. **Auto-Temperature**: Sets temperature based on material type:
+   - PLA → 210°C
+   - PLA High Speed → 215°C
+   - PETG → 240°C
+   - ABS → 240°C
+   - TPU → 220°C
+4. **Persists State**: Saves to `saved_variables.cfg`
+5. **UI Notification**: Emits `// {"instance":..., "slots":...}` for instant KlipperScreen refresh
+
+**RFID Sync Control:**
+```gcode
+ACE_ENABLE_RFID_SYNC [INSTANCE=0]   # Enable auto-sync (per-instance or all)
+ACE_DISABLE_RFID_SYNC [INSTANCE=0]  # Disable auto-sync
+ACE_RFID_SYNC_STATUS [INSTANCE=0]   # Check sync status
+```
+
+**Black Color Handling**: RFID tags reporting RGB(0,0,0) are accepted as valid black and overwrite manual values.
+
+**UI Behavior**: When RFID sync is enabled and a slot has an RFID spool, the KlipperScreen config dialog locks manual material/color changes to prevent conflicts.
+
+### Non-RFID Spools (Manual Configuration)
+
+When a spool **without an RFID tag** is inserted into an empty slot, the driver automatically applies default metadata to make the slot immediately usable:
+
+- **Material**: `Unknown` - Clearly indicates unconfigured spool, won't match in endless spool "exact" or "material" modes
+- **Color**: Black RGB(0, 0, 0) - Default empty slot color
+- **Temperature**: 225°C - Safe middle-ground for most materials
+
+⚠️ **Important**: It's your responsibility to configure the correct material and temperature for non-RFID spools before use!
+
+**Manual Configuration:**
+```gcode
+# Set slot with RGB color values
+ACE_SET_SLOT T=0 MATERIAL=PLA COLOR=255,0,0 TEMP=210
+
+# Or use named colors
+ACE_SET_SLOT T=0 MATERIAL=PETG COLOR=BLUE TEMP=240
+```
+
+**Named Colors**: RED, GREEN, BLUE, YELLOW, ORANGE, PURPLE, WHITE, BLACK, GRAY
+
+**Metadata Restoration**: If you remove and reinsert the same spool, saved metadata (color, material, temp) is automatically restored instead of applying defaults.
 
 For detailed inventory examples, see [example_cmds.txt](example_cmds.txt#inventory-management).
 
@@ -699,15 +738,69 @@ ACE_QUERY_SLOTS
 # Query specific instance
 ACE_QUERY_SLOTS INSTANCE=0
 
+# Verbose mode (shows all RFID fields)
+ACE_QUERY_SLOTS VERBOSE=1
 ```
 
-### Empty Slot Data Retention
+**Display Format:**
+```
+=== ACE Instance 0 Slots ===
+[#] T# | Status | RFID     | SKU          | Brand        | Material        | RGB              |   Temp | Extruder     | Bed
+-------+--------+----------+--------------+--------------+-----------------+------------------+--------+--------------+------------
+[0] T0 | -----  | ----     | ---          | ---          | Empty           | RGB(0,0,0)       |    0°C | ---          | ---
+[1] T1 | ready  | RFID     | AHPLBK-101   | Anycubic     | PLA             | RGB(255,255,255) |  210°C | 190-230°C    | 50-60°C
+[2] T2 | ready  | ----     | ---          | ---          | PETG            | RGB(0,0,255)     |  240°C | ---          | ---
+[3] T3 | ready  | RFID     | AHPLBK-101   | Anycubic     | PLA             | RGB(255,0,0)     |  210°C | 190-230°C    | 50-60°C
 
-When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver:
-- **Preserves**: `color`, `material`, `temp` - allows auto-restore if the same spool is reinserted
-- **Clears**: `rfid` flag and all RFID-specific fields (`extruder_temp`, `hotbed_temp`, `diameter`, `sku`, `brand`, etc.)
+ACE[1] Slots:
+  0: [T4] ready, [----], PLA, RGB(255,255,0), 210°C
+  1: [T5] -----, [----], -----, RGB(128,128,128), 0°C
+```
 
-This means if you remove and reinsert a spool, the slot automatically restores to `ready` with its previous color/material/temp settings.
+**Field Descriptions:**
+- `[Tn]` - Tool number (Instance 0: T0-T3, Instance 1: T4-T7, etc.)
+- Status - `ready` or `-----` (empty)
+- `[RFID]` or `[----]` - RFID tag present indicator
+- Material - Material name or `-----` (empty)
+- `RGB(r,g,b)` - Color as RGB values (0-255 range)
+- Temperature - Print temperature in °C (0°C when empty)
+
+
+
+### Empty Slot Data Retention & Auto-Restore
+
+When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver intelligently preserves core metadata:
+
+**Preserved Data:**
+- ✅ **RGB Color** - Full RGB(r,g,b) values retained
+- ✅ **Material** - Material name (PLA, PETG, etc.)
+- ✅ **Temperature** - Print temperature in °C
+
+**Cleared Data:**
+- ❌ **RFID Flag** - Set to `False` (no tag physically present)
+- ❌ **Extended RFID Fields** - `extruder_temp`, `hotbed_temp`, `diameter`, `sku`, `brand`, etc.
+
+**Why This Matters:**
+
+1. **Auto-Restore**: If you reinsert the same spool, the slot automatically restores to `ready` with its previous RGB color, material, and temperature settings.
+
+2. **Endless Spool Matching**: Preserved metadata enables endless spool to match based on the previous spool's material/color, even after it runs out.
+
+3. **Visual Feedback**: Empty slots display as:
+   ```
+   0: [T0] -----, [----], -----, RGB(255,0,0), 0°C
+   ```
+   The RGB color is visible even when empty, helping you remember what was loaded.
+
+**Example Workflow:**
+```
+1. Load red PLA spool → Slot 0: status=ready, material=PLA, color=RGB(255,0,0), temp=210°C
+2. Runout detected → Slot 0: status=empty (color/material/temp preserved)
+3. Insert new spool:
+   a) IF RFID present → All fields updated from RFID tag
+   b) IF NO RFID → Restores to ready with RGB(255,0,0), PLA, 210°C
+4. Endless spool can now match based on preserved metadata
+```
 
 ## � Connection Supervision
 
@@ -874,9 +967,25 @@ ACE_GET_ENDLESS_SPOOL_MODE
 
 ### Match Mode Examples
 
-- **Exact**: T0 (red PLA) runs out → chooses the next **red PLA** slot; ignores blue PLA.
-- **Material**: T0 (red PLA) runs out → chooses any **PLA** slot (color ignored); still skips PETG.
-- **Next**: T0 runs out → picks the next **ready** slot in tool order (T1→T2→…), regardless of material/color; skips non-ready slots.
+**Exact Mode** (Match Material AND RGB Color):
+- T0 runs out: material=PLA, color=RGB(255,0,0)
+- Searches for: material=PLA **AND** RGB(255,0,0)
+- ✅ Matches: T4 with PLA RGB(255,0,0)
+- ❌ Skips: T1 with PLA RGB(0,0,255) - color doesn't match
+- ❌ Skips: T2 with PETG RGB(255,0,0) - material doesn't match
+
+**Material Mode** (Match Material Only, Ignore RGB):
+- T0 runs out: material=PLA, color=RGB(255,0,0)
+- Searches for: material=PLA (any RGB color)
+- ✅ Matches: T1 with PLA RGB(0,0,255) - color ignored
+- ✅ Matches: T4 with PLA RGB(255,255,0) - color ignored
+- ❌ Skips: T2 with PETG - material doesn't match
+
+**Next Mode** (Take Next Ready, Ignore Material and RGB):
+- T0 runs out
+- Searches for: Next `ready` slot in round-robin order (T1→T2→...→T15→T0)
+- ✅ Matches: First ready slot found, regardless of material/color
+- ❌ Skips: Empty slots (`status=empty`)
 
 ### Behavior
 
@@ -888,10 +997,35 @@ ACE_GET_ENDLESS_SPOOL_MODE
 
 ### Requirements
 
-- Inventory should include material/color for best matching (required for `exact`, optional for `next`)
-- Matching is **case-insensitive** and **whitespace-trimmed**
-- `exact` requires material **and** color; `material` ignores color; `next` ignores both
-- Only `ready` slots are considered for swapping in all modes
+- **Exact Mode**: Requires both material name and RGB color values in inventory
+- **Material Mode**: Requires material name (RGB ignored)
+- **Next Mode**: Only requires `status=ready` (material/RGB ignored)
+- Material matching is **case-insensitive** and **whitespace-trimmed**
+- RGB color matching uses exact integer comparison (R, G, B must all match)
+- Only slots with `status=ready` are considered for swapping in all modes
+- Empty slots (`status=empty`) are always skipped, even if metadata is preserved
+
+### ⚠️ Safety: Unknown Material Handling
+
+**Unknown materials will NEVER match each other for safety:**
+- Non-RFID spools default to material="Unknown"
+- Even if two slots both say "Unknown", they will **NOT** match
+- **Reason**: "Unknown" means we don't know the actual material - they could be PLA, PETG, ABS, TPU, etc.
+- Automatic swapping between unknown materials could cause:
+  - ❌ Wrong temperature (PLA→PETG = 210°C→240°C mismatch)
+  - ❌ Incompatible materials mixing in hotend
+  - ❌ Print failure or nozzle clogs
+
+**Solution**: Always label non-RFID spools with proper material names using `ACE_SET_SLOT`:
+```gcode
+# Set material explicitly for non-RFID spools
+ACE_SET_SLOT T=0 MATERIAL="PLA" COLOR=RED TEMP=210
+ACE_SET_SLOT T=4 MATERIAL="PLA" COLOR=BLUE TEMP=210
+
+# Now endless spool can safely match PLA→PLA
+```
+
+**Tip**: Use `ACE_QUERY_SLOTS` to verify all spools have proper material labels before starting prints that rely on endless spool.
 
 ### Persistent Storage
 

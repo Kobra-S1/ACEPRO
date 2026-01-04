@@ -53,7 +53,7 @@ The ACE Pro is a multi-material filament management system for Klipper-based 3D 
   - Instance 3: T12-T15 (slots 0-3)
   - Instance N: ...
 - **Global State Management**:
-  - `ace_filament_pos`: Tracks filament position ("splitter", "bowden", "toolhead", "nozzle")
+  - `ace_filament_pos`: Tracks filament position ("bowden", "splitter", "toolhead", "nozzle")
   - `ace_current_index`: Currently active tool (-1 = none)
   - `ace_endless_spool_enabled`: Endless spool active/inactive
   - `ace_global_enabled`: ACE system master enable
@@ -123,7 +123,7 @@ serial_mgr: AceSerialManager        # Communication handler
 
 # Defaults for non-RFID spools (applied when slot becomes ready with no metadata)
 DEFAULT_MATERIAL = "Unknown"       # Won't match in endless spool exact/material modes
-DEFAULT_COLOR = [128, 128, 128]     # Gray - matches UI empty slot color
+DEFAULT_COLOR = [0, 0, 0]           # Black - default empty slot color
 DEFAULT_TEMP = 225                  # Safe middle-ground temperature
 ```
 
@@ -241,12 +241,34 @@ get_status()                        # Return endless spool status dict (currentl
 
 **Match Mode Behavior:**
 ```
-Mode     | Material | Color | Example
-─────────┼──────────┼───────┼────────────────────────
-"exact"  | Must     | Must  | PLA + RGB(255,0,0) → match only identical red PLA
-"material"| Must    | Any   | PLA + any color → match any PLA regardless of color
-"next"   | Any      | Any   | First ready spool, ignore material/color
+Mode     | Material | Color/RGB | Example
+─────────┼──────────┼───────────┼────────────────────────
+"exact"  | Must     | Must      | PLA + RGB(255,0,0) → match only identical red PLA
+"material"| Must    | Any       | PLA + any RGB → match any PLA regardless of color
+"next"   | Any      | Any       | First ready spool, ignore material and RGB
 ```
+
+**⚠️ Safety: Unknown Material Handling:**
+- **Unknown materials will NEVER match each other**
+- Non-RFID spools without manual labels default to `material="Unknown"`
+- Even if two slots both have `material="Unknown"`, they will NOT match
+- **Rationale**: "Unknown" means we don't know the actual material type
+  - Could be PLA (210°C), PETG (240°C), ABS (250°C), TPU (230°C), etc.
+  - Automatic swapping risks: wrong temperature, incompatible materials, print failure
+- **Solution**: Always label non-RFID spools explicitly using `ACE_SET_SLOT`
+- **Example**: 
+  ```gcode
+  ACE_SET_SLOT T=0 MATERIAL="PLA" COLOR=RED TEMP=210
+  ACE_SET_SLOT T=4 MATERIAL="PLA" COLOR=BLUE TEMP=210
+  # Now "PLA" → "PLA" can safely match
+  ```
+
+**Color Matching Details:**
+- In "exact" mode: RGB values must match exactly (e.g., R=255,G=0,B=0)
+- In "material" mode: RGB ignored, only material name compared
+- In "next" mode: Both material and RGB ignored
+- RGB preserved during slot empty transitions for auto-restore
+- RFID-tagged spools auto-update RGB when inserted
 
 **Swap Failure Retry Logic:**
 ```
@@ -360,14 +382,42 @@ Sensor State Check
 
 **Protocol:**
 - Binary frames with CRC-16
-- Request ID tracking for callback dispatch
+- Request ID tracking for callback dispatch (never resets on reconnect)
 - High-priority queue for time-sensitive operations
-- Automatic retry on timeout/failure
+- 5-second timeout with elapsed time logging
+- Unsolicited messages logged with response ID and current request ID
+
+**Request ID Behavior:**
+- IDs start at 0 and increment indefinitely (no wraparound)
+- IDs never reset on reconnect to prevent collisions with pending responses
+- Callbacks registered per ID, dispatched on response arrival
+
+**Timeout Handling:**
+- Default timeout: 5.0 seconds (configurable via `timeout_s`)
+- On timeout: Log "Request ID={rid} TIMEOUT after {elapsed:.1f}s"
+- Callback invoked with `response=None` to signal failure
+- In-flight request removed from tracking
+
+**Unsolicited Message Handling:**
+- Responses without matching callback logged as "UNSOLICITED"
+- Log format: "UNSOLICITED (ID={response_id}, current_id={self._request_id}): {json}"
+- Helps diagnose timeout vs late-arrival issues
+- Not an error - ACE may respond slower than timeout window
+
+**Protocol Configuration:**
+```python
+DEFAULT_TIMEOUT_S = 5.0                 # Request timeout
+                                         # ACE devices can take several seconds to respond
+                                         # Timeout logged with elapsed time
+WINDOW_SIZE = 4                          # Max concurrent in-flight requests
+QUEUE_MAXSIZE = 1024                     # Request queue size
+```
 
 **Key Methods:**
 ```python
 # Connection Management
 connect(port, baud)                      # Establish serial connection
+                                         # Flushes I/O buffers on connect
 connect_to_ace(baud, delay)              # Connect with delayed initialization
 auto_connect(instance, baud)             # Auto-detect and connect to ACE by instance
 reconnect(delay)                         # Reconnect after disconnect
@@ -412,11 +462,15 @@ get_connection_status()                  # Get detailed status dict:
 #   RECONNECT_BACKOFF_MAX = 30.0         # Maximum retry delay (cyclic)
 #   RECONNECT_BACKOFF_FACTOR = 1.5       # Multiply delay on each failure
 
-# Protocol
+# Protocol & Frame Handling
 _calc_crc(buffer)                        # Calculate CRC-16 for frame
 _send_frame(request)                     # Send binary frame with CRC
-read_frames(eventtime)                   # Read and parse incoming frames
+_reader(eventtime)                       # Timer callback: read frames, parse, dispatch
+                                         # Logs unsolicited messages with response ID and current_id
+_writer(eventtime)                       # Timer callback: send requests, handle timeouts
+                                         # Timeout logging: "Request ID={rid} TIMEOUT after {elapsed:.1f}s"
 dispatch_response(response)              # Route response to callback
+                                         # Returns (callback, was_solicited) tuple
 
 # ACE Enable/Disable Support
 enable_ace_pro()                         # Enable reconnection attempts
@@ -429,8 +483,8 @@ is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 **Global State & Constants:**
 ```python
 # Filament Position States
-FILAMENT_STATE_SPLITTER = "splitter"    # At 4-in-1 splitter (unloaded)
-FILAMENT_STATE_BOWDEN = "bowden"        # In bowden tube
+FILAMENT_STATE_BOWDEN = "bowden"        # In bowden tube before RDM/4-in-1 splitter (unloaded)
+FILAMENT_STATE_SPLITTER = "splitter"    # In RDM, so possible loaded in splitter 
 FILAMENT_STATE_TOOLHEAD = "toolhead"    # At toolhead sensor
 FILAMENT_STATE_NOZZLE = "nozzle"        # In hotend/nozzle
 
@@ -516,8 +570,13 @@ ACE_SET_SLOT [T=<tool>|INSTANCE=<n> INDEX=<n>] COLOR=<name>|R,G,B MATERIAL=<name
              or EMPTY=1                    # Set slot metadata or clear
                                            # COLOR can be named (e.g. RED, BLUE) or R,G,B
 
-ACE_QUERY_SLOTS [INSTANCE=<n>]             # Query slots
+ACE_QUERY_SLOTS [INSTANCE=<n>] [VERBOSE=1] # Query slots with RFID details
                                            # Without INSTANCE: all instances
+                                           # VERBOSE=1: Show all RFID fields
+                                           # Format: Table with columns:
+                                           #   [#] T# | Status | RFID | SKU | Brand | Material | RGB | Temp | Extruder | Bed
+                                           # Example: "[1] T1 | ready | RFID | AHPLBK-101 | Anycubic | PLA | RGB(255,0,0) | 210°C | 190-230°C | 50-60°C"
+                                           # Empty slots: "-----" status, "---" for missing fields
 
 ACE_SAVE_INVENTORY [INSTANCE=<n>]          # Persist inventory to saved_variables
                                            # If INSTANCE specified, saves that instance
@@ -563,11 +622,31 @@ ACE_GET_ENDLESS_SPOOL_MODE                 # Query current match mode
 **RFID Inventory Sync:**
 ```
 ACE_ENABLE_RFID_SYNC [INSTANCE=<n>]        # Enable auto-sync RFID to inventory
+                                           # When enabled, RFID data auto-updates slot metadata
+                                           # Updates: material, color (RGB), temp, diameter, brand, etc.
+                                           # Slot marked with rfid=True when data present
 
 ACE_DISABLE_RFID_SYNC [INSTANCE=<n>]       # Disable auto-sync
+                                           # Manual ACE_SET_SLOT commands still work
 
 ACE_RFID_SYNC_STATUS [INSTANCE=<n>]        # Query RFID sync status
+                                           # Shows enabled/disabled state per instance
 ```
+
+**RFID Query Behavior:**
+- RFID tags are queried automatically when state transitions from `saved_rfid=False` to RFID detected
+- On (re)connect: All slots are queried unconditionally to catch spool changes during disconnect
+- No re-query for already-detected tags (prevents duplicate queries)
+- Query triggers: `get_filament_info` request to ACE firmware
+- Data update: Via callback, updates inventory with material/color/temp/brand/SKU/temps
+
+**RFID Color Handling:**
+- RFID tags provide RGB color values (0-255 range)
+- Color auto-synced to inventory when RFID sync enabled
+- Empty slots default to RGB(0,0,0) - black
+- Manual color override: `ACE_SET_SLOT T=0 COLOR=RED` or `COLOR=255,0,0`
+- Named colors: RED, GREEN, BLUE, YELLOW, ORANGE, PURPLE, WHITE, BLACK, GRAY
+- RGB values preserved when slot becomes empty (for auto-restore)
 
 **Dryer Control:**
 ```
@@ -690,7 +769,7 @@ def ace_get_instance_and_slot(gcmd):
 4. Unload Current Tool (if any)
    - AceManager.smart_unload(current_tool)
    - Cut filament (CUT_TIP macro)
-   - Retract to splitter
+   - Retract to bowden
    - Validate sensors clear
    ↓
 5. Load Target Tool
@@ -747,12 +826,17 @@ def ace_get_instance_and_slot(gcmd):
 8b. If MATCH Found:
    - Close prompt automatically
    - EndlessSpool.execute_swap(from_tool, to_tool)
-   - Mark old slot empty (status="empty", preserves color/material/temp)
+   - Mark old slot empty (status="empty", preserves color/RGB/material/temp)
    - Execute tool change with is_endless_spool=True
    - Skip unload (already empty), perform 1.5x purge
    - Resume print automatically
    ↓
 9. Finally: Clear runout_handling_in_progress flag
+
+**Note on Color Preservation:**
+RGB values are preserved when a slot becomes empty, allowing the system to
+restore previous settings if the same spool is reinserted. This also enables
+endless spool matching based on the previous spool's color/material metadata.
 ```
 
 ## State Management
@@ -760,7 +844,7 @@ def ace_get_instance_and_slot(gcmd):
 ### Global State (saved_variables.cfg)
 
 ```python
-ace_filament_pos: str               # "splitter" | "bowden" | "toolhead" | "nozzle"
+ace_filament_pos: str               # "bowden" | "splitter" | "toolhead" | "nozzle"
 ace_current_index: int              # Currently loaded tool (-1 = none)
 ace_endless_spool_enabled: bool     # Endless spool active
 ace_endless_spool_match_mode: str   # Match mode: "exact" | "material" | "next"
@@ -823,7 +907,7 @@ When a slot transitions from `ready` to `empty` (runout, manual EMPTY=1, etc.):
 | Field | Behavior | Reason |
 |-------|----------|--------|
 | `status` | Set to `"empty"` | Hardware reports no filament |
-| `color` | **Preserved** | Allows auto-restore if same spool reinserted |
+| `color` | **Preserved** (RGB) | Allows auto-restore if same spool reinserted |
 | `material` | **Preserved** | Allows auto-restore if same spool reinserted |
 | `temp` | **Preserved** | Allows auto-restore if same spool reinserted |
 | `rfid` | Set to `False` | No RFID tag present |
@@ -832,10 +916,26 @@ When a slot transitions from `ready` to `empty` (runout, manual EMPTY=1, etc.):
 | `diameter` | **Cleared** | RFID data no longer valid |
 | `sku`, `brand`, etc. | **Cleared** | RFID data no longer valid |
 
-**Rationale**: Core metadata (color, material, temp) is preserved so that if the same
+**Display Behavior**:
+- Empty slots show `-----` for status and material in ACE_QUERY_SLOTS output
+- RGB color preserved (displays as RGB(r,g,b) even when empty)
+- Temperature shows 0°C when empty (temp field preserved but not active)
+- RFID indicator shows `[----]` when no RFID tag present
+
+**Rationale**: Core metadata (color/RGB, material, temp) is preserved so that if the same
 spool is reinserted, the slot auto-restores to `ready` with its previous settings.
 RFID-specific fields are cleared because they only apply when an RFID-tagged spool
 is physically present.
+
+**Auto-Restore on Spool Swap:**
+```
+1. Slot 0: status=ready, material=PLA, color=RGB(255,0,0), temp=210
+2. Runout detected → status=empty (material/color/temp preserved)
+3. User inserts NEW spool → ACE hardware detects filament
+4a. IF RFID present: All fields updated from RFID tag (material, RGB, temp, etc.)
+4b. IF NO RFID: Slot restores to ready with preserved material/color/temp
+5. Endless spool can match based on preserved metadata
+```
 
 
 ## Configuration Example
