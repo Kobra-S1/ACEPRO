@@ -1379,10 +1379,20 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             stats = print_stats.get_status(reactor.monotonic())
             is_printing = stats.get('state') in ['printing', 'paused']
 
+        # Check if this is a startup toolchange (G9111) vs regular print toolchange
+        # During G9111: startup_toolchange=1 -> raise exception to abort macro
+        # During print: startup_toolchange=0 -> pause and show dialog for recovery
+        # If _ACE_STATE macro not loaded, default to pause behavior (safer for active prints)
+        ace_state = printer.lookup_object('gcode_macro _ACE_STATE', None)
+        is_startup = False
+        
+        if ace_state and hasattr(ace_state, 'variables'):
+            is_startup = ace_state.variables.get('startup_toolchange', 0) == 1
+
         # instance_num = get_instance_from_tool(tool_index)
         # slot_index = get_local_slot(tool_index, instance_num)
 
-        if is_printing:
+        if is_printing and not is_startup:
             gcode.run_script_from_command('PAUSE')
 
             try:
@@ -1427,45 +1437,9 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
                 gcode.respond_info(f"Failed to show error dialog: {dialog_error}")
         else:
             gcode.run_script_from_command("M104 S0")
-            gcode.respond_info("ACE: Extruder heater switched off")
+            gcode.respond_info("ACE: Initial toolchange failed, cancel print and switching extruder heater off")
 
-            try:
-                gcode.run_script_from_command(
-                    'RESPOND TYPE=command MSG="action:prompt_begin Tool Change Failed"'
-                )
-
-                error_text = str(e).split('\n')[0].replace('"', '\\"')
-                prompt_text = f"Tool change to T{tool_index} failed! Error: {error_text}"
-
-                gcode.run_script_from_command(
-                    f'RESPOND TYPE=command MSG="action:prompt_text {prompt_text}"'
-                )
-
-                gcode.run_script_from_command(
-                    f'RESPOND TYPE=command MSG="action:prompt_button Retry T{tool_index}|T{tool_index}|primary"'
-                )
-
-                gcode.run_script_from_command(
-                    'RESPOND TYPE=command MSG="action:prompt_button Extrude 100mm|'
-                    '_EXTRUDE LENGTH=100 SPEED=300|secondary"'
-                )
-
-                gcode.run_script_from_command(
-                    'RESPOND TYPE=command MSG="action:prompt_button Retract 100mm|'
-                    '_RETRACT LENGTH=100 SPEED=300|secondary"'
-                )
-
-                gcode.run_script_from_command(
-                    'RESPOND TYPE=command MSG="action:prompt_footer_button Continue|'
-                    'RESPOND TYPE=command MSG=action:prompt_end|secondary"'
-                )
-
-                gcode.run_script_from_command(
-                    'RESPOND TYPE=command MSG="action:prompt_show"'
-                )
-
-            except Exception as dialog_error:
-                gcode.respond_info(f"Failed to show error dialog: {dialog_error}")
+            raise gcmd.error(f"Tool change to T{tool_index} failed during startup: {str(e)}")
 
 
 def cmd_ACE_SET_RETRACT_SPEED(gcmd):
