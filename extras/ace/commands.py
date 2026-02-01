@@ -1385,7 +1385,7 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         # If _ACE_STATE macro not loaded, default to pause behavior (safer for active prints)
         ace_state = printer.lookup_object('gcode_macro _ACE_STATE', None)
         is_startup = False
-        
+
         if ace_state and hasattr(ace_state, 'variables'):
             is_startup = ace_state.variables.get('startup_toolchange', 0) == 1
 

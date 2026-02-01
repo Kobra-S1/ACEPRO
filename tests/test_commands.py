@@ -2040,8 +2040,9 @@ class TestToolChangeIntegration:
             assert any("Cancel Print|CANCEL_PRINT" in c for c in calls)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_turns_off_heater(self, mock_gcmd, setup_mocks):
-        """Test tool change failure when NOT printing - should turn off heater."""
+        """Test tool change failure when NOT printing - should turn off heater and raise exception."""
         mock_gcmd.get_int = Mock(return_value=1)
+        mock_gcmd.error = Exception  # Make gcmd.error return an Exception class
         
         # Mock printer objects
         mock_printer = Mock()
@@ -2077,22 +2078,19 @@ class TestToolChangeIntegration:
         with patch('ace.commands.get_printer', return_value=mock_printer), \
              patch('ace.commands.get_variable', return_value=0), \
              patch('ace.commands.set_and_save_variable'):
-            ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
+            # Should raise exception for non-printing startup failure
+            with pytest.raises(Exception) as exc_info:
+                ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
             
-            # Verify M104 S0 (heater off) was called
+            assert "failed during startup" in str(exc_info.value) or "Load failed" in str(exc_info.value)
+            
+            # Verify M104 S0 (heater off) was called before exception
             assert mock_gcode.run_script_from_command.called
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("M104 S0" in c for c in calls)
-            
-            # Verify error dialog was shown (different from printing case)
-            assert any("action:prompt_begin" in c for c in calls)
-            
-            # Should have Continue button (not Resume)
-            assert any("Continue" in c for c in calls)
-            assert not any("Resume|RESUME" in c for c in calls)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_updates_state_before_dialog(self, mock_gcmd, setup_mocks):
-        """Test that tool state is updated even when tool change fails."""
+        """Test that tool state is updated even when tool change fails during printing."""
         mock_gcmd.get_int = Mock(return_value=2)
         
         # Mock printer objects
@@ -2101,17 +2099,27 @@ class TestToolChangeIntegration:
         mock_kinematics = Mock()
         mock_reactor = Mock()
         mock_gcode = Mock()
+        mock_print_stats = Mock()
         
         # Mock homed
         mock_kinematics.get_status = Mock(return_value={'homed_axes': 'xyz'})
         mock_toolhead.get_kinematics = Mock(return_value=mock_kinematics)
         mock_reactor.monotonic = Mock(return_value=1.0)
         mock_printer.get_reactor = Mock(return_value=mock_reactor)
-        mock_printer.lookup_object = Mock(side_effect=lambda obj, default=None: {
-            'toolhead': mock_toolhead,
-            'gcode': mock_gcode,
-            'print_stats': None
-        }.get(obj, default))
+        
+        # Mock print_stats to indicate PRINTING (so dialog is shown instead of exception)
+        mock_print_stats.get_status = Mock(return_value={'state': 'printing'})
+        
+        def lookup_side_effect(obj, default=None):
+            if obj == 'toolhead':
+                return mock_toolhead
+            elif obj == 'gcode':
+                return mock_gcode
+            elif obj == 'print_stats':
+                return mock_print_stats
+            return default if default is not None else Mock()
+        
+        mock_printer.lookup_object = Mock(side_effect=lookup_side_effect)
         
         # Mock perform_tool_change to raise exception
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Test failure"))
@@ -2170,16 +2178,26 @@ class TestToolChangeIntegration:
         mock_kinematics = Mock()
         mock_reactor = Mock()
         mock_gcode = Mock()
+        mock_print_stats = Mock()
         
         mock_kinematics.get_status = Mock(return_value={'homed_axes': 'xyz'})
         mock_toolhead.get_kinematics = Mock(return_value=mock_kinematics)
         mock_reactor.monotonic = Mock(return_value=1.0)
         mock_printer.get_reactor = Mock(return_value=mock_reactor)
-        mock_printer.lookup_object = Mock(side_effect=lambda obj, default=None: {
-            'toolhead': mock_toolhead,
-            'gcode': mock_gcode,
-            'print_stats': None
-        }.get(obj, default))
+        
+        # Mock print_stats to indicate PRINTING (so dialog is shown instead of exception)
+        mock_print_stats.get_status = Mock(return_value={'state': 'printing'})
+        
+        def lookup_side_effect(obj, default=None):
+            if obj == 'toolhead':
+                return mock_toolhead
+            elif obj == 'gcode':
+                return mock_gcode
+            elif obj == 'print_stats':
+                return mock_print_stats
+            return default if default is not None else Mock()
+        
+        mock_printer.lookup_object = Mock(side_effect=lookup_side_effect)
         
         # Error message with quotes
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(
