@@ -253,7 +253,10 @@ If you have KlipperScreen installed, link the ACE Pro panel:
 ln -sf ~/ACEPRO/KlipperScreen/acepro.py ~/KlipperScreen/panels/acepro.py
 sudo systemctl restart KlipperScreen
 ```
-and then add the add the panel to your KlipperScreen configuration, e.g. add:
+
+
+#### Add KlipperScreen Panel to main screen to make it visible (required)
+Add the panel to your KlipperScreen configuration, e.g. add:
 ```
 [menu __main acepro]
 name: ACE Pro
