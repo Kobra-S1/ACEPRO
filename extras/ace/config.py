@@ -95,6 +95,7 @@ def read_ace_config(config):
     ace_config["purge_multiplier"] = config.getfloat("purge_multiplier", "1.0")
     ace_config["pre_cut_retract_length"] = config.getint("pre_cut_retract_length", "2")
     ace_config["status_debug_logging"] = config.getboolean("status_debug_logging", False)
+    ace_config["runout_debounce_count"] = config.getint("runout_debounce_count", 1)
     ace_config["ace_connection_supervision"] = config.getboolean(
         "ace_connection_supervision", True
     )

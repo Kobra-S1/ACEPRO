@@ -344,6 +344,8 @@ last_print_state                    # Last raw print state ("idle", "printing", 
 runout_detection_active             # Is runout detection enabled?
 runout_handling_in_progress         # Are we handling a runout now?
 monitor_debug_counter               # For periodic debug logging (~15 min interval)
+runout_debounce_count               # Consecutive absent readings required (config, default 3)
+_runout_false_count                 # Current consecutive absent reading counter
 ```
 
 **Runout Detection Logic:**
@@ -361,10 +363,21 @@ Sensor State Check
 │  └─ No transition detected → Skip
 └─ Sensor state CHANGED?
    ├─ Is new state = TRIGGERED (filament present)?
-   │  └─ Likely sensor toggle noise → Reset baseline → Skip
+   │  └─ Reset debounce counter → Reset baseline → Skip
    └─ Is new state = CLEAR (filament absent)?
-      └─ THIS IS RUNOUT! Call _handle_runout_detected(tool_index)
+      ├─ Increment debounce counter (_runout_false_count)
+      ├─ Counter < runout_debounce_count?
+      │  └─ Not yet confirmed → Keep prev as True → Poll again (50ms)
+      └─ Counter >= runout_debounce_count?
+         └─ CONFIRMED RUNOUT! Reset counter → Call _handle_runout_detected()
 ```
+
+**Debounce:**
+The sensor reads raw (undebounced) `filament_present` from Klipper. To filter
+transient glitches, `runout_debounce_count` (default 3) consecutive absent
+readings are required before confirming a runout. At the 50ms poll interval,
+3 readings ≈ 150ms debounce window. The counter resets to 0 whenever the sensor
+reads present again, or on any baseline reset (pause, stop, no active tool).
 
 **Print Start Detection:**
 - Detects: `is_printing=True` and `was_printing_active=False`
@@ -794,6 +807,7 @@ def ace_get_instance_and_slot(gcmd):
    ↓
 2. RunoutMonitor._monitor_runout() (50ms interval)
    - Detects state change (present → absent)
+   - Debounce: requires N consecutive absent readings (default 3 ≈ 150ms)
    - Guards: not during toolchange, printing active, detection enabled
    - Tracks previous sensor state for transition detection
    ↓
@@ -973,6 +987,7 @@ pre_cut_retract_length: 2
 heartbeat_interval: 1.0
 max_dryer_temperature: 55
 feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect (deferred until first successful heartbeat)
+runout_debounce_count: 3                     # Consecutive absent sensor readings before confirming runout (default 1 = no debounce)
 ```
 ### Debug Commands
 

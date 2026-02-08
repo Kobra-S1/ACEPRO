@@ -74,7 +74,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 |------|-------|-------------|
 | **test_endless_spool.py** | 33 | Endless spool match modes (exact/material/next), runout handling, cross-instance matching, priority logic |
 | **test_endless_spool_swap.py** | 7 | Endless spool swap execution, retry logic, candidate search validation, inventory state updates |
-| **test_runout_monitor.py** | 61 | Runout detection, sensor polling, toolchange interaction, error handling, auto-recovery, pause/resume, baseline establishment |
+| **test_runout_monitor.py** | 76 | Runout detection, sensor polling, debounce filtering, toolchange interaction, error handling, auto-recovery, pause/resume, baseline establishment |
 | **test_retry_logic.py** | 8 | Feed/retract retry behavior using MAX_RETRIES constant, FORBIDDEN handling, backoff delays between attempts |
 | **test_set_and_save.py** | 15 | Persistent variable storage to saved_variables.cfg, type conversion (bool/str/dict/list/number) |
 | **test_toolchange_integration.py** | 7 | End-to-end tool change scenarios across multiple ACE units, cross-instance changes, sensor validation |
@@ -431,25 +431,39 @@ test_baseline_establishment
 test_no_runout_detection_during_toolchange
 test_runout_blocked_by_toolchange_flag
 test_baseline_reset_after_toolchange_respected
-test_sensor_glitch_after_toolchange_triggers_runout
+test_sensor_glitch_after_toolchange_blocked_by_debounce
 
 # Pause/resume
 test_paused_state_resets_baseline
 test_baseline_reestablished_after_pause_resume
 
-# Error handling (NEW)
+# Error handling
 test_pause_command_error_logged  # PAUSE failure graceful handling
 test_handle_runout_sets_handling_flag  # Flag management
 test_print_stats_exception_handled  # Graceful stats error recovery
 
-# Auto-recovery (NEW)
+# Auto-recovery
 test_auto_recovery_triggers_when_detection_should_be_active
 
-# Edge cases (NEW)
+# Edge cases
 test_runout_with_invalid_instance_uses_defaults  # Invalid tool lookup
 test_runout_handling_exception_clears_flag  # Flag cleared in finally
 test_runout_closes_prompt_before_swap  # Prompt lifecycle
 test_runout_with_none_ace_instance  # None instance handling
+
+# Debounce (sensor noise filtering)
+test_debounce_count_stored                       # Config value stored correctly
+test_debounce_count_minimum_clamped_to_1         # Minimum enforced
+test_single_false_does_not_trigger_with_debounce_3  # 1/3 readings insufficient
+test_two_false_does_not_trigger_with_debounce_3  # 2/3 readings insufficient
+test_three_false_triggers_with_debounce_3        # 3/3 readings confirms runout
+test_counter_resets_when_sensor_returns_to_present  # Glitch recovery
+test_debounce_1_triggers_immediately             # No-debounce mode
+test_debounce_5_requires_5_readings              # Higher threshold
+test_intermittent_glitch_never_triggers          # Alternating noise pattern
+test_brief_glitch_then_real_runout               # Glitch + real runout scenario
+test_debounce_counter_reset_on_print_stop        # Counter cleared on stop
+test_debounce_counter_reset_on_pause             # Counter cleared on pause
 ```
 
 ### Toolchange Integration Tests (`test_toolchange_integration.py`)

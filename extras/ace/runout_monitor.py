@@ -29,7 +29,8 @@ class RunoutMonitor:
     checking sensor states and print status to detect runout events.
     """
 
-    def __init__(self, printer, gcode, reactor, endless_spool, manager):
+    def __init__(self, printer, gcode, reactor, endless_spool, manager,
+                 runout_debounce_count=1):
         """
         Initialize runout monitor.
 
@@ -39,12 +40,20 @@ class RunoutMonitor:
             reactor: Klipper reactor for timer management
             endless_spool: EndlessSpool instance for automatic swapping
             manager: AceManager instance (for sensor queries and state)
+            runout_debounce_count: Number of consecutive sensor-absent readings
+                required before confirming a runout event. At the default 50ms
+                poll interval, 3 readings ≈ 150ms debounce window. Set to 1
+                for immediate (no debounce) behaviour (default).
         """
         self.printer = printer
         self.gcode = gcode
         self.reactor = reactor
         self.endless_spool = endless_spool
         self.manager = manager  # Reference back to manager for sensor queries
+
+        # Debounce configuration
+        self.runout_debounce_count = max(1, int(runout_debounce_count))
+        self._runout_false_count = 0
 
         # State tracking
         self.prev_toolhead_sensor_state = None
@@ -190,7 +199,8 @@ class RunoutMonitor:
                 f"Current sensor: {current_sensor_state}, "
                 f"Detection active: {self.runout_detection_active}, "
                 f"Toolchange: {self.manager.toolchange_in_progress}, "
-                f"Runout handling: {self.runout_handling_in_progress}"
+                f"Runout handling: {self.runout_handling_in_progress}, "
+                f"Debounce: {self._runout_false_count}/{self.runout_debounce_count}"
             )
 
             # For debugging: Auto-recovery check
@@ -224,6 +234,7 @@ class RunoutMonitor:
             if current_tool < 0:
                 # No active tool - nothing to monitor
                 self.prev_toolhead_sensor_state = None
+                self._runout_false_count = 0
                 return eventtime + 0.1
 
             print_just_stopped = old_printing_active and (not is_printing) and (raw_print_state != "paused")
@@ -232,6 +243,7 @@ class RunoutMonitor:
             if print_just_stopped:
                 self.gcode.respond_info("ACE: Print stopped/cancelled - resetting monitor baseline")
                 self.prev_toolhead_sensor_state = None
+                self._runout_false_count = 0
                 self.runout_handling_in_progress = False
 
                 if not self.runout_detection_active:
@@ -250,11 +262,13 @@ class RunoutMonitor:
             # PAUSED or NOT PRINTING - sleep/relax monitoring
             if raw_print_state == "paused" or not is_printing:
                 self.prev_toolhead_sensor_state = None
+                self._runout_false_count = 0
                 return eventtime + 0.2
 
             # Enhanced baseline initialization
             if self.prev_toolhead_sensor_state is None:
                 self.prev_toolhead_sensor_state = current_sensor_state
+                self._runout_false_count = 0
                 filament_pos = variables.get("ace_filament_pos", "bowden")
 
                 self.gcode.respond_info(
@@ -281,19 +295,35 @@ class RunoutMonitor:
 
             # ===== RUNOUT DETECTION - detect present → absent transition =====
             if self.prev_toolhead_sensor_state is True and current_sensor_state is False:
-                # Runout detected!
+                # Sensor went absent - increment debounce counter
+                self._runout_false_count += 1
+
+                if self._runout_false_count < self.runout_debounce_count:
+                    # Not yet confirmed - keep prev as True, poll again quickly
+                    return eventtime + 0.05
+
+                # Debounce threshold reached - confirmed runout
+                self._runout_false_count = 0
+
                 if self.runout_handling_in_progress:
                     self.gcode.respond_info("ACE: Runout detection suppressed (already handling runout)")
+                    self.prev_toolhead_sensor_state = current_sensor_state
                     return eventtime + 0.2
 
                 self.gcode.respond_info(
-                    f"ACE: Runout detected on T{current_tool} (sensor: present → absent)"
+                    f"ACE: Runout detected on T{current_tool} "
+                    f"(sensor: present → absent, confirmed after "
+                    f"{self.runout_debounce_count} readings)"
                 )
 
                 self._handle_runout_detected(current_tool)
 
                 self.prev_toolhead_sensor_state = current_sensor_state
                 return eventtime + 0.2
+
+            # Sensor is present (or was already absent) - reset debounce counter
+            if self._runout_false_count > 0:
+                self._runout_false_count = 0
 
             # Update previous state for next cycle
             self.prev_toolhead_sensor_state = current_sensor_state
@@ -387,6 +417,7 @@ class RunoutMonitor:
         self.gcode.respond_info(f"ACE: Runout detected on T{tool_index}")
         self.runout_handling_in_progress = True
         self.prev_toolhead_sensor_state = None
+        self._runout_false_count = 0
 
         try:
             # Step 1: PAUSE immediately

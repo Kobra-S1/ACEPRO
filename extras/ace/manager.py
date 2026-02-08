@@ -159,7 +159,8 @@ class AceManager:
             self.gcode,
             self.reactor,
             self.endless_spool,
-            self  # Pass manager for sensor access and state
+            self,  # Pass manager for sensor access and state
+            runout_debounce_count=self.ace_config.get("runout_debounce_count", 1)
         )
 
         self.toolchange_in_progress = False
