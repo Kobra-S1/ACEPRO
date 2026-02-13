@@ -99,6 +99,12 @@ def read_ace_config(config):
     ace_config["ace_connection_supervision"] = config.getboolean(
         "ace_connection_supervision", True
     )
+    ace_config["tangle_detection"] = config.getboolean(
+        "tangle_detection", False
+    )
+    ace_config["tangle_detection_length"] = config.getfloat(
+        "tangle_detection_length", 15.0
+    )
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"
     ace_config["feed_speed"] = config.get("feed_speed", "60")

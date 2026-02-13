@@ -3484,7 +3484,7 @@ class TestFullUnloadSlot(unittest.TestCase):
     def test_full_unload_toolhead_only_blocked(self, mock_set_and_save):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
-        manager.get_switch_state = Mock(return_value=True)  # toolhead still blocked
+        manager.get_instant_switch_state = Mock(return_value=True)  # toolhead still blocked
         manager.has_rdm_sensor = Mock(return_value=False)
 
         result = manager.full_unload_slot(0)
@@ -3921,6 +3921,47 @@ class TestExecuteCoordinatedRetraction(unittest.TestCase):
 
         manager.reactor.pause.assert_called()  # ensure loop waited at least once
 
+    def test_disables_feed_assist_before_retraction(self):
+        """Feed assist must be disabled BEFORE retraction starts."""
+        instance = self._make_instance()
+        instance._feed_assist_index = 0  # Feed assist active on slot 0
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.instances[0].inventory = [{"status": "ready"} for _ in range(SLOTS_PER_ACE)]
+        manager.reactor.monotonic = Mock(return_value=0.0)
+
+        # Track call order to prove disable happens before retract
+        call_order = []
+        instance._disable_feed_assist.side_effect = lambda s: call_order.append('disable_feed_assist')
+        instance._retract.side_effect = lambda *a, **k: call_order.append('retract')
+
+        manager.execute_coordinated_retraction(
+            retract_length=10,
+            retract_speed=5,
+            retract_speed_mmmin=600,
+            current_tool=0,
+        )
+
+        instance._disable_feed_assist.assert_called_once_with(0)
+        self.assertEqual(call_order, ['disable_feed_assist', 'retract'])
+
+    def test_skips_feed_assist_disable_when_not_active(self):
+        """No disable call when feed assist is not active on this slot."""
+        instance = self._make_instance()
+        instance._feed_assist_index = -1  # Feed assist not active
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.instances[0].inventory = [{"status": "ready"} for _ in range(SLOTS_PER_ACE)]
+        manager.reactor.monotonic = Mock(return_value=0.0)
+
+        manager.execute_coordinated_retraction(
+            retract_length=10,
+            retract_speed=5,
+            retract_speed_mmmin=600,
+            current_tool=0,
+        )
+
+        instance._disable_feed_assist.assert_not_called()
+        instance._retract.assert_called_once()
+
 
 class TestExtruderMove(unittest.TestCase):
     """Coverage for _extruder_move helper on manager."""
@@ -4209,6 +4250,87 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         instance._stop_feed.assert_called_once_with(0)
         mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
+    @patch('ace.manager.set_and_save_variable')
+    def test_ace_only_disables_feed_assist_before_retraction(self, mock_set_and_save):
+        """CASE 3: Feed assist must be disabled BEFORE ACE-only retraction."""
+        instance = self._make_instance()
+        instance._feed_assist_index = 0  # Feed assist active on slot 0
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.instances[0].inventory = [
+            {"status": "ready"},
+            {"status": "empty"},
+            {"status": "empty"},
+            {"status": "empty"},
+        ]
+
+        # Track call order
+        call_order = []
+        instance._disable_feed_assist.side_effect = lambda s: call_order.append('disable_feed_assist')
+        instance._retract.side_effect = lambda *a, **k: call_order.append('retract')
+
+        # Sensor clears immediately so we exit the loop
+        manager.get_instant_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free = Mock(return_value=True)
+
+        t = [0.0]
+        def fake_monotonic():
+            t[0] += 0.6
+            return t[0]
+        manager.reactor.monotonic = Mock(side_effect=fake_monotonic)
+        manager.reactor.pause = Mock()
+
+        result = manager._cycle_slots_with_sensor_check(
+            current_tool_index=-1,
+            attempted_tool_index=-1,
+            retract_length=5,
+            retract_speed=5,
+            retract_speed_mmmin=300,
+            full_unload_length=20,
+            sensor_name=SENSOR_RDM,
+            use_extruder=False,
+            sensor_to_parking_length=5,
+        )
+
+        instance._disable_feed_assist.assert_called_once_with(0)
+        self.assertEqual(call_order, ['disable_feed_assist', 'retract'])
+
+    def test_ace_only_skips_feed_assist_disable_when_not_active(self):
+        """CASE 3: No disable call when feed assist is not active on tested slot."""
+        instance = self._make_instance()
+        instance._feed_assist_index = -1  # Not active
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.instances[0].inventory = [
+            {"status": "ready"},
+            {"status": "empty"},
+            {"status": "empty"},
+            {"status": "empty"},
+        ]
+
+        manager.get_instant_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free = Mock(return_value=True)
+
+        t = [0.0]
+        def fake_monotonic():
+            t[0] += 0.6
+            return t[0]
+        manager.reactor.monotonic = Mock(side_effect=fake_monotonic)
+        manager.reactor.pause = Mock()
+
+        manager._cycle_slots_with_sensor_check(
+            current_tool_index=-1,
+            attempted_tool_index=-1,
+            retract_length=5,
+            retract_speed=5,
+            retract_speed_mmmin=300,
+            full_unload_length=20,
+            sensor_name=SENSOR_RDM,
+            use_extruder=False,
+            sensor_to_parking_length=5,
+        )
+
+        instance._disable_feed_assist.assert_not_called()
+        instance._retract.assert_called_once()
+
     def test_returns_false_when_no_slots_identified(self):
         instance = self._make_instance()
         # Mark all slots empty to skip
@@ -4290,9 +4412,9 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         ]
         manager.execute_coordinated_retraction = Mock()
         # Sensor stays triggered for all slots
-        manager.get_switch_state = Mock(return_value=True)
+        manager.get_instant_switch_state = Mock(return_value=True)
         manager.reactor.pause = Mock()
-        manager.is_filament_path_free = Mock(return_value=False)
+        manager.is_filament_path_free_instant = Mock(return_value=False)
 
         result = manager._cycle_slots_with_sensor_check(
             current_tool_index=-1,
@@ -4404,7 +4526,7 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         ]
         
         # Sensor always triggered (never clears)
-        manager.get_switch_state = Mock(return_value=True)
+        manager.get_instant_switch_state = Mock(return_value=True)
         
         # Time advances to trigger timeout
         time_val = [0.0]
@@ -4413,7 +4535,7 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
             return time_val[0]
         manager.reactor.monotonic = Mock(side_effect=advance_time)
         manager.reactor.pause = Mock()
-        manager.is_filament_path_free = Mock(return_value=False)
+        manager.is_filament_path_free_instant = Mock(return_value=False)
 
         result = manager._cycle_slots_with_sensor_check(
             current_tool_index=-1,
@@ -4738,6 +4860,8 @@ class TestSetupSensors(unittest.TestCase):
         def lookup_with_error(obj_name, *args):
             if obj_name == "filament_switch_sensor toolhead_sensor":
                 raise Exception("Sensor not found")
+            if obj_name == "filament_tracker toolhead_sensor":
+                raise Exception("Tracker not found")
             return self._lookup_object_side_effect(obj_name, *args)
         
         self.mock_printer.lookup_object = Mock(side_effect=lookup_with_error)
@@ -4749,8 +4873,37 @@ class TestSetupSensors(unittest.TestCase):
         
         # Verify error message was logged
         error_calls = [call for call in self.mock_gcode.respond_info.call_args_list 
-                      if "Missing toolhead sensor" in str(call)]
+                      if "No toolhead sensor" in str(call)]
         self.assertGreater(len(error_calls), 0)
+
+    def test_setup_sensors_uses_named_filament_tracker(self):
+        """filament_tracker <name> is used when filament_switch_sensor <name> is missing."""
+        mock_tracker = Mock()
+        mock_tracker.runout_helper = Mock()
+        mock_tracker.runout_helper.filament_present = True
+        mock_tracker.runout_helper.sensor_enabled = True
+
+        def lookup_fallback(obj_name, *args):
+            if obj_name == "filament_switch_sensor toolhead_sensor":
+                raise Exception("Sensor not found")
+            if obj_name == "filament_tracker toolhead_sensor":
+                return mock_tracker
+            return self._lookup_object_side_effect(obj_name, *args)
+
+        self.mock_printer.lookup_object = Mock(side_effect=lookup_fallback)
+        manager = self._build_manager()
+
+        manager._setup_sensors()
+
+        # Verify toolhead sensor was registered via adapter
+        self.assertIn(SENSOR_TOOLHEAD, manager.sensors)
+        sensor = manager.sensors[SENSOR_TOOLHEAD]
+        self.assertTrue(sensor.filament_present)
+
+        # Verify info message mentions the name and type
+        tracker_calls = [call for call in self.mock_gcode.respond_info.call_args_list
+                        if "filament_tracker" in str(call)]
+        self.assertGreater(len(tracker_calls), 0)
 
     def test_setup_sensors_continues_on_missing_rdm_sensor(self):
         """Test that missing RDM sensor logs warning but continues."""
@@ -4762,6 +4915,8 @@ class TestSetupSensors(unittest.TestCase):
         def lookup_with_rdm_error(obj_name, *args):
             if obj_name == "filament_switch_sensor rdm_sensor":
                 raise Exception("RDM sensor not found")
+            if obj_name == "filament_tracker rdm_sensor":
+                raise Exception("RDM tracker not found")
             return self._lookup_object_side_effect(obj_name, *args)
         
         self.mock_printer.lookup_object = Mock(side_effect=lookup_with_rdm_error)
@@ -4778,8 +4933,40 @@ class TestSetupSensors(unittest.TestCase):
         
         # Verify warning was logged
         warning_calls = [call for call in self.mock_gcode.respond_info.call_args_list 
-                        if "Missing RMS sensor" in str(call)]
+                        if "No RDM sensor" in str(call)]
         self.assertGreater(len(warning_calls), 0)
+
+    def test_setup_sensors_uses_named_filament_tracker_for_rdm(self):
+        """filament_tracker <name> is used for RDM when filament_switch_sensor is missing."""
+        mock_tracker = Mock()
+        mock_tracker.runout_helper = Mock()
+        mock_tracker.runout_helper.filament_present = False
+        mock_tracker.runout_helper.sensor_enabled = True
+
+        def instance_with_rdm(*a, **k):
+            instance = self._make_instance()
+            instance.filament_runout_sensor_name_rdm = "rdm_sensor"
+            return instance
+
+        def lookup_rdm_tracker(obj_name, *args):
+            if obj_name == "filament_switch_sensor rdm_sensor":
+                raise Exception("RDM sensor not found")
+            if obj_name == "filament_tracker rdm_sensor":
+                return mock_tracker
+            return self._lookup_object_side_effect(obj_name, *args)
+
+        self.mock_printer.lookup_object = Mock(side_effect=lookup_rdm_tracker)
+        manager = self._build_manager(instance_with_rdm)
+
+        manager._setup_sensors()
+
+        # Verify RDM sensor was registered via adapter
+        self.assertIn(SENSOR_RDM, manager.sensors)
+
+        # Verify info message mentions filament_tracker
+        tracker_calls = [call for call in self.mock_gcode.respond_info.call_args_list
+                        if "filament_tracker" in str(call) and "RDM" in str(call)]
+        self.assertGreater(len(tracker_calls), 0)
 
     def test_setup_sensors_disables_all_sensors(self):
         """Test that _disable_all_sensor_detection is called."""

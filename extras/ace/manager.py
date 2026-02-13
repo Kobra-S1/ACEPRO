@@ -27,6 +27,53 @@ from .config import read_ace_config
 import logging
 
 
+class FilamentTrackerAdapter:
+    """Thin shim that exposes a filament_tracker's RunoutHelper.
+
+    The ACE manager stores sensors[SENSOR_TOOLHEAD] and expects the
+    RunoutHelper interface (.filament_present, .sensor_enabled).  For a
+    standard filament_switch_sensor we store its .runout_helper directly.
+    For a filament_tracker (which now *has* a RunoutHelper) we do the
+    same, but keep the full tracker reference so callers can still reach
+    encoder-specific data if needed.
+    """
+
+    def __init__(self, tracker):
+        self._tracker = tracker
+        # Expose the embedded RunoutHelper so the manager can treat
+        # this object identically to a plain RunoutHelper.
+        self.runout_helper = tracker.runout_helper
+
+    # Delegate the two attributes the manager touches directly.
+    @property
+    def filament_present(self):
+        return self.runout_helper.filament_present
+
+    @property
+    def sensor_enabled(self):
+        return self.runout_helper.sensor_enabled
+
+    @sensor_enabled.setter
+    def sensor_enabled(self, value):
+        self.runout_helper.sensor_enabled = value
+
+    def is_instantly_clear(self):
+        """Instantaneous raw channel state — no absence timeout.
+
+        Returns True when both encoder channels are currently open,
+        bypassing the normal absence_timeout delay.  Use during active
+        retraction where the caller *knows* filament was recently moving.
+
+        Returns:
+            bool: True if the sensor reads clear right now.
+            None:  If the underlying tracker does not support this query
+                   (graceful fallback — caller should use filament_present).
+        """
+        if hasattr(self._tracker, 'are_both_channels_open'):
+            return self._tracker.are_both_channels_open
+        return None
+
+
 def toolchange_in_progress_guard(method):
     """
     Decorator: Increment/decrement toolchange depth counter.
@@ -160,7 +207,9 @@ class AceManager:
             self.reactor,
             self.endless_spool,
             self,  # Pass manager for sensor access and state
-            runout_debounce_count=self.ace_config.get("runout_debounce_count", 1)
+            runout_debounce_count=self.ace_config.get("runout_debounce_count", 1),
+            tangle_detection=self.ace_config.get("tangle_detection", False),
+            tangle_detection_length=self.ace_config.get("tangle_detection_length", 15.0)
         )
 
         self.toolchange_in_progress = False
@@ -259,29 +308,101 @@ class AceManager:
 
         All instances share the same sensors (toolhead + optional RDM).
         Manager owns the sensors, not instances.
+
+        Toolhead sensor: looked up by the configured name in two forms:
+            1. filament_switch_sensor <name>  (standard Klipper sensor)
+            2. filament_tracker <name>        (encoder-based tracker)
+        No implicit fallbacks — the name must match a section in printer.cfg.
         """
         instance = self.instances[0]
 
+        # --- Toolhead sensor ---
+        toolhead_sensor_name = instance.filament_runout_sensor_name_nozzle
+        toolhead_resolved = False
+
+        # Try standard filament_switch_sensor <name>
         try:
-            toolhead_sensor_name = instance.filament_runout_sensor_name_nozzle
-            toolhead_sensor = self.printer.lookup_object(f"filament_switch_sensor {toolhead_sensor_name}")
+            toolhead_sensor = self.printer.lookup_object(
+                f"filament_switch_sensor {toolhead_sensor_name}")
             self.sensors[SENSOR_TOOLHEAD] = toolhead_sensor.runout_helper
-            self._prev_sensors_enabled_state[SENSOR_TOOLHEAD] = toolhead_sensor.runout_helper.sensor_enabled
-        except Exception as e:
-            self.gcode.respond_info(f"ACE: ERROR - Missing toolhead sensor: {e}")
-            raise self.config.error("Missing filament_switch_sensor for toolhead in printer.cfg")
+            self._prev_sensors_enabled_state[SENSOR_TOOLHEAD] = (
+                toolhead_sensor.runout_helper.sensor_enabled)
+            toolhead_resolved = True
+            self.gcode.respond_info(
+                f"ACE: Toolhead sensor '{toolhead_sensor_name}' "
+                f"(filament_switch_sensor)")
+        except Exception:
+            pass
 
-        if instance.filament_runout_sensor_name_rdm is not None:
+        # Try filament_tracker <name>
+        if not toolhead_resolved:
             try:
-                rms_sensor_name = instance.filament_runout_sensor_name_rdm
-                rms_sensor = self.printer.lookup_object(f"filament_switch_sensor {rms_sensor_name}")
-                self.sensors[SENSOR_RDM] = rms_sensor.runout_helper
-                self._prev_sensors_enabled_state[SENSOR_RDM] = rms_sensor.runout_helper.sensor_enabled
-
-            except Exception as e:
+                tracker = self.printer.lookup_object(
+                    f"filament_tracker {toolhead_sensor_name}")
+                adapter = FilamentTrackerAdapter(tracker)
+                self.sensors[SENSOR_TOOLHEAD] = adapter
+                self._prev_sensors_enabled_state[SENSOR_TOOLHEAD] = (
+                    adapter.sensor_enabled)
+                toolhead_resolved = True
                 self.gcode.respond_info(
-                    f"ACE: ERROR - Missing RMS sensor: {e}, no RDM consistency check will be performed."
-                )
+                    f"ACE: Toolhead sensor '{toolhead_sensor_name}' "
+                    f"(filament_tracker)")
+            except Exception:
+                pass
+
+        if not toolhead_resolved:
+            self.gcode.respond_info(
+                f"ACE: ERROR - No toolhead sensor '{toolhead_sensor_name}' "
+                f"found in printer.cfg (tried [filament_switch_sensor "
+                f"{toolhead_sensor_name}] and [filament_tracker "
+                f"{toolhead_sensor_name}])")
+            raise self.config.error(
+                f"Missing sensor '{toolhead_sensor_name}' in printer.cfg. "
+                f"Add [filament_switch_sensor {toolhead_sensor_name}] or "
+                f"[filament_tracker {toolhead_sensor_name}].")
+
+        # --- RDM sensor (optional) ---
+        if instance.filament_runout_sensor_name_rdm is not None:
+            rms_sensor_name = instance.filament_runout_sensor_name_rdm
+            rdm_resolved = False
+
+            # Try standard filament_switch_sensor <name>
+            try:
+                rms_sensor = self.printer.lookup_object(
+                    f"filament_switch_sensor {rms_sensor_name}")
+                self.sensors[SENSOR_RDM] = rms_sensor.runout_helper
+                self._prev_sensors_enabled_state[SENSOR_RDM] = (
+                    rms_sensor.runout_helper.sensor_enabled)
+                rdm_resolved = True
+                self.gcode.respond_info(
+                    f"ACE: RDM sensor '{rms_sensor_name}' "
+                    f"(filament_switch_sensor)")
+            except Exception:
+                pass
+
+            # Try filament_tracker <name>
+            if not rdm_resolved:
+                try:
+                    rdm_tracker = self.printer.lookup_object(
+                        f"filament_tracker {rms_sensor_name}")
+                    adapter = FilamentTrackerAdapter(rdm_tracker)
+                    self.sensors[SENSOR_RDM] = adapter
+                    self._prev_sensors_enabled_state[SENSOR_RDM] = (
+                        adapter.sensor_enabled)
+                    rdm_resolved = True
+                    self.gcode.respond_info(
+                        f"ACE: RDM sensor '{rms_sensor_name}' "
+                        f"(filament_tracker)")
+                except Exception:
+                    pass
+
+            if not rdm_resolved:
+                self.gcode.respond_info(
+                    f"ACE: WARNING - No RDM sensor '{rms_sensor_name}' "
+                    f"found (tried [filament_switch_sensor "
+                    f"{rms_sensor_name}] and [filament_tracker "
+                    f"{rms_sensor_name}]). "
+                    f"No RDM consistency check will be performed.")
 
         # Disable standard runout detection
         self._disable_all_sensor_detection()
@@ -325,6 +446,58 @@ class AceManager:
 
         sensor = self.sensors[sensor_name]
         return bool(sensor.filament_present)
+
+    def get_instant_switch_state(self, sensor_name):
+        """Get sensor state using instantaneous raw channel reading.
+
+        Like :meth:`get_switch_state`, but bypasses the absence_timeout
+        delay on filament_tracker sensors by reading the raw channel state.
+        Falls back to the normal debounced ``filament_present`` when the
+        sensor does not support instantaneous queries (e.g. a plain
+        filament_switch_sensor).
+
+        Use this during active retraction / unloading where the caller
+        knows filament was recently moving and needs the fastest possible
+        response.
+
+        Args:
+            sensor_name: SENSOR_TOOLHEAD or SENSOR_RDM
+
+        Returns:
+            bool: True if filament is present (sensor triggered)
+        """
+        # Check for injected override (for testing)
+        if hasattr(self, '_sensor_override') and self._sensor_override:
+            if sensor_name in self._sensor_override:
+                return self._sensor_override[sensor_name]
+
+        if sensor_name not in self.sensors:
+            return False
+
+        sensor = self.sensors[sensor_name]
+        if hasattr(sensor, 'is_instantly_clear'):
+            instant = sensor.is_instantly_clear()
+            if instant is not None:
+                return not instant  # clear=True means filament absent
+        return bool(sensor.filament_present)
+
+    def is_filament_path_free_instant(self):
+        """Check if filament path is clear using instantaneous sensor reads.
+
+        Same as :meth:`is_filament_path_free` but uses
+        :meth:`get_instant_switch_state` for faster response during
+        active retraction.
+
+        Returns:
+            bool: True if path is clear (no filament detected)
+        """
+        toolhead_blocked = self.get_instant_switch_state(SENSOR_TOOLHEAD)
+
+        if self.has_rdm_sensor():
+            rdm_blocked = self.get_instant_switch_state(SENSOR_RDM)
+            return not (toolhead_blocked or rdm_blocked)
+        else:
+            return not toolhead_blocked
 
     def is_filament_path_free(self):
         """
@@ -412,6 +585,14 @@ class AceManager:
                 f"ACE: Synchronized retraction: extruder + ACE[{instance_num}] slot {local_slot}, "
                 f"{retract_length:.2f}mm at {retract_speed:.2f}mm/s"
             )
+
+            # Disable feed assist BEFORE retraction — feed assist pushes
+            # filament forward, which fights the retraction and can cause jams.
+            if ace_inst._feed_assist_index == local_slot:
+                self.gcode.respond_info(
+                    f"ACE[{instance_num}]: Disabling feed assist on slot {local_slot} before retraction"
+                )
+                ace_inst._disable_feed_assist(local_slot)
 
             ace_inst.wait_ready()
             ace_inst._retract(local_slot, length=retract_length, speed=retract_speed)
@@ -529,14 +710,14 @@ class AceManager:
                 )
 
             # Sensor already clear - simple retract
-            if not self.get_switch_state(SENSOR_TOOLHEAD):
+            if not self.get_instant_switch_state(SENSOR_TOOLHEAD):
                 self.gcode.respond_info(f"ACE: Sensor clear, standard retract of T{tool_index}")
                 parkposition_to_toolhead_length = self._get_config_for_tool(
                     tool_index, "parkposition_to_toolhead_length"
                 )
                 instance._smart_unload_slot(local_slot, length=parkposition_to_toolhead_length)
 
-                if self.is_filament_path_free():
+                if self.is_filament_path_free_instant():
                     set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     return True
@@ -567,7 +748,7 @@ class AceManager:
                 # Wait for extruder to finish
                 self._wait_toolhead_move_finished()
 
-                if unload_ok and self.is_filament_path_free():
+                if unload_ok and self.is_filament_path_free_instant():
                     set_and_save_variable(self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     return True
@@ -818,7 +999,7 @@ class AceManager:
                     # Check sensor with multiple readings for stability
                     sensor_readings = []
                     for i in range(3):
-                        sensor_readings.append(self.get_switch_state(sensor_name))
+                        sensor_readings.append(self.get_instant_switch_state(sensor_name))
                         if i < 2:
                             self.reactor.pause(self.reactor.monotonic() + 0.1)
 
@@ -837,6 +1018,14 @@ class AceManager:
 
                 else:
                     # CASE 3: ACE-only retraction with sensor monitoring
+                    # Disable feed assist BEFORE retraction — it pushes forward
+                    # which fights the retraction.
+                    if instance._feed_assist_index == slot:
+                        self.gcode.respond_info(
+                            f"ACE[{instance_num}]: Disabling feed assist on slot {slot} before retraction"
+                        )
+                        instance._disable_feed_assist(slot)
+
                     instance.wait_ready()
                     instance._retract(slot, length=full_unload_length, speed=retract_speed)
 
@@ -854,7 +1043,7 @@ class AceManager:
                             )
                             break
 
-                        sensor_state = self.get_switch_state(sensor_name)
+                        sensor_state = self.get_instant_switch_state(sensor_name)
 
                         # Detect sensor clearing (triggered → clear)
                         if not sensor_state and trigger_time is None:
@@ -1872,6 +2061,31 @@ class AceManager:
         """Check if RDM sensor is configured and available."""
         return SENSOR_RDM in self.sensors and self.sensors[SENSOR_RDM] is not None
 
+    def is_feed_assist_active(self):
+        """Check if any ACE instance has feed assist active.
+
+        Returns:
+            bool: True if at least one instance has feed_assist enabled.
+        """
+        for instance in self.instances:
+            if instance._feed_assist_index >= 0:
+                return True
+        return False
+
+    def get_rdm_encoder_pulse(self):
+        """Return the RDM filament_tracker encoder_pulse count, or None.
+
+        Only works when the RDM sensor is a filament_tracker wrapped
+        in a FilamentTrackerAdapter.  Returns None if the sensor is a
+        plain filament_switch_sensor or not configured.
+        """
+        if not self.has_rdm_sensor():
+            return None
+        sensor = self.sensors[SENSOR_RDM]
+        if isinstance(sensor, FilamentTrackerAdapter):
+            return sensor._tracker.tracker_status.encoder_pulse
+        return None
+
     def full_unload_slot(self, tool_index):
         """
         Fully unload a slot using fixed-length retraction.
@@ -1935,8 +2149,8 @@ class AceManager:
 
             if has_rdm:
                 # Both sensors available - check both
-                toolhead_clear = not self.get_switch_state(SENSOR_TOOLHEAD)
-                rdm_clear = not self.get_switch_state(SENSOR_RDM)
+                toolhead_clear = not self.get_instant_switch_state(SENSOR_TOOLHEAD)
+                rdm_clear = not self.get_instant_switch_state(SENSOR_RDM)
                 path_clear = toolhead_clear and rdm_clear
 
                 if path_clear:
@@ -1957,7 +2171,7 @@ class AceManager:
                     return False
             else:
                 # RDM not available - check only toolhead
-                toolhead_clear = not self.get_switch_state(SENSOR_TOOLHEAD)
+                toolhead_clear = not self.get_instant_switch_state(SENSOR_TOOLHEAD)
 
                 if toolhead_clear:
                     self.gcode.respond_info(

@@ -1,13 +1,25 @@
 """
-Runout monitoring module for ACE Pro filament management system.
+Runout and tangle monitoring module for ACE Pro filament management system.
 
 This module handles filament runout detection during printing, coordinating
 with the endless spool system for automatic material swapping when runout
 is detected.
+
+Optional tangle detection (``tangle_detection: True`` in ``[ace]``):
+    While printing with feed-assist active, compares extruder stepper
+    movement against RDM encoder pulses.  If the extruder extrudes more
+    than ``tangle_detection_length`` (default 15 mm, configurable in
+    ``[ace]``) without any encoder activity, and both RDM and nozzle
+    sensors still show filament present, a spool tangle is declared —
+    the filament is stuck between the spool and RDM while the extruder
+    consumes the RDM-to-nozzle buffer.
 """
+
+import logging
 
 from .config import (
     SENSOR_TOOLHEAD,
+    SENSOR_RDM,
     get_instance_from_tool,
     get_local_slot,
     ACE_INSTANCES,
@@ -21,6 +33,7 @@ class RunoutMonitor:
     Responsibilities:
     - Track sensor state changes during print
     - Detect filament runout (sensor present → absent transition)
+    - Detect spool tangle (extruder moves but encoder is stalled)
     - Coordinate with endless spool for automatic material swapping
     - Show user prompts when manual intervention needed
     - Manage runout handling state machine
@@ -29,8 +42,16 @@ class RunoutMonitor:
     checking sensor states and print status to detect runout events.
     """
 
+    # Default detection length for tangle checking (mm).
+    DEFAULT_TANGLE_DETECTION_LENGTH = 15.0
+
+    # How often the tangle check runs (seconds).  250 ms matches the
+    # Klipper filament_motion_sensor cadence.
+    TANGLE_CHECK_INTERVAL = 0.250
+
     def __init__(self, printer, gcode, reactor, endless_spool, manager,
-                 runout_debounce_count=1):
+                 runout_debounce_count=1, tangle_detection=False,
+                 tangle_detection_length=None):
         """
         Initialize runout monitor.
 
@@ -44,6 +65,11 @@ class RunoutMonitor:
                 required before confirming a runout event. At the default 50ms
                 poll interval, 3 readings ≈ 150ms debounce window. Set to 1
                 for immediate (no debounce) behaviour (default).
+            tangle_detection: When True, monitor encoder vs extruder
+                movement to detect spool tangles while printing.
+            tangle_detection_length: Distance in mm the extruder must
+                move without encoder activity before a tangle is declared.
+                Defaults to DEFAULT_TANGLE_DETECTION_LENGTH (15.0 mm).
         """
         self.printer = printer
         self.gcode = gcode
@@ -67,6 +93,20 @@ class RunoutMonitor:
 
         # Timer handle
         self._monitoring_timer = None
+
+        # --- Tangle detection state ---
+        self.tangle_detection_enabled = bool(tangle_detection)
+        self.tangle_detection_length = float(
+            tangle_detection_length if tangle_detection_length is not None
+            else self.DEFAULT_TANGLE_DETECTION_LENGTH
+        )
+        # Extruder position beyond which a tangle is declared
+        self._tangle_runout_pos = None
+        # Encoder pulse snapshot at the time the window was set
+        self._tangle_encoder_snapshot = None
+        # Klipper objects resolved at first use
+        self._extruder = None
+        self._estimated_print_time = None
 
     def start_monitoring(self):
         """Start runout detection monitor loop."""
@@ -228,6 +268,7 @@ class RunoutMonitor:
 
         # Early exit if detection disabled or toolchange in progress
         if not self.runout_detection_active or self.manager.toolchange_in_progress:
+            self._tangle_runout_pos = None
             return eventtime + 0.2
 
         try:
@@ -244,6 +285,7 @@ class RunoutMonitor:
                 self.gcode.respond_info("ACE: Print stopped/cancelled - resetting monitor baseline")
                 self.prev_toolhead_sensor_state = None
                 self._runout_false_count = 0
+                self._tangle_runout_pos = None
                 self.runout_handling_in_progress = False
 
                 if not self.runout_detection_active:
@@ -263,6 +305,7 @@ class RunoutMonitor:
             if raw_print_state == "paused" or not is_printing:
                 self.prev_toolhead_sensor_state = None
                 self._runout_false_count = 0
+                self._tangle_runout_pos = None
                 return eventtime + 0.2
 
             # Enhanced baseline initialization
@@ -325,6 +368,10 @@ class RunoutMonitor:
             if self._runout_false_count > 0:
                 self._runout_false_count = 0
 
+            # ===== TANGLE DETECTION (optional) =====
+            if self.tangle_detection_enabled and not self.runout_handling_in_progress:
+                self._check_tangle(eventtime, current_tool)
+
             # Update previous state for next cycle
             self.prev_toolhead_sensor_state = current_sensor_state
             return eventtime + 0.05
@@ -344,6 +391,161 @@ class RunoutMonitor:
         except Exception as e:
             self.gcode.respond_info(f"ACE: Monitor error: {e}")
             return eventtime + 1.0
+
+    # ========== Tangle Detection ==========
+
+    def _resolve_extruder(self):
+        """Lazily look up the Klipper extruder and estimated_print_time.
+
+        Called once on the first tangle check.  Returns True on success.
+        """
+        if self._extruder is not None:
+            return True
+        try:
+            self._extruder = self.printer.lookup_object("extruder")
+            mcu = self.printer.lookup_object("mcu")
+            self._estimated_print_time = mcu.estimated_print_time
+            return True
+        except Exception as e:
+            logging.warning("ACE: Tangle detection: cannot resolve extruder: %s", e)
+            return False
+
+    def _get_extruder_pos(self, eventtime):
+        """Return extruder stepper position in mm at *eventtime*."""
+        print_time = self._estimated_print_time(eventtime)
+        return self._extruder.find_past_position(print_time)
+
+    def _reset_tangle_window(self, eventtime):
+        """Reset the tangle detection window.
+
+        Snapshots the current extruder position and encoder pulse count
+        so the next check starts fresh.
+        """
+        if not self._resolve_extruder():
+            self._tangle_runout_pos = None
+            return
+        encoder_pulse = self.manager.get_rdm_encoder_pulse()
+        if encoder_pulse is None:
+            self._tangle_runout_pos = None
+            return
+        extruder_pos = self._get_extruder_pos(eventtime)
+        self._tangle_runout_pos = extruder_pos + self.tangle_detection_length
+        self._tangle_encoder_snapshot = encoder_pulse
+
+    def _check_tangle(self, eventtime, current_tool):
+        """Check for spool tangle condition.
+
+        Tangle is declared when ALL of the following are true:
+            1. Print state is "printing" (already guaranteed by caller)
+            2. ACE feed-assist is active
+            3. RDM detect pin shows filament present
+            4. Nozzle sensor shows filament present
+            5. Extruder moved >= TANGLE_DETECTION_LENGTH since last reset
+            6. RDM encoder pulse count has NOT changed since last reset
+
+        When any condition fails, the detection window is reset so we
+        never accumulate stale state.
+
+        Args:
+            eventtime: Current reactor eventtime.
+            current_tool: Global tool index being printed.
+        """
+        # Condition 2: feed-assist must be active
+        if not self.manager.is_feed_assist_active():
+            self._tangle_runout_pos = None
+            return
+
+        # Condition 3: RDM sensor shows filament present
+        if not self.manager.get_switch_state(SENSOR_RDM):
+            self._tangle_runout_pos = None
+            return
+
+        # Condition 4: Nozzle sensor shows filament present
+        if not self.manager.get_switch_state(SENSOR_TOOLHEAD):
+            self._tangle_runout_pos = None
+            return
+
+        # Get current encoder pulse count from RDM tracker
+        current_encoder = self.manager.get_rdm_encoder_pulse()
+        if current_encoder is None:
+            # RDM is not a filament_tracker — cannot do tangle detection
+            return
+
+        # Initialize window if not set
+        if self._tangle_runout_pos is None:
+            self._reset_tangle_window(eventtime)
+            return
+
+        # Condition 6: If encoder has moved, filament is flowing — reset window
+        if current_encoder != self._tangle_encoder_snapshot:
+            self._reset_tangle_window(eventtime)
+            return
+
+        # Condition 5: Check extruder position
+        if not self._resolve_extruder():
+            return
+        extruder_pos = self._get_extruder_pos(eventtime)
+        if extruder_pos < self._tangle_runout_pos:
+            # Extruder hasn't moved far enough yet — no tangle
+            return
+
+        # ===== ALL 6 CONDITIONS MET — TANGLE DETECTED =====
+        logging.warning(
+            "ACE: TANGLE DETECTED on T%d — extruder at %.1f mm "
+            "(window was %.1f mm), encoder stuck at %d pulses",
+            current_tool, extruder_pos,
+            self._tangle_runout_pos - self.tangle_detection_length,
+            current_encoder,
+        )
+        self._handle_tangle_detected(current_tool)
+
+    def _handle_tangle_detected(self, tool_index):
+        """Handle a confirmed spool tangle.
+
+        Pauses the print and shows a Mainsail prompt informing the user
+        that a tangle was detected.  Resets the tangle window so that
+        after the user resolves the tangle and resumes, detection starts
+        fresh.
+
+        Args:
+            tool_index: Global tool index where the tangle was detected.
+        """
+        self.runout_handling_in_progress = True
+        self._tangle_runout_pos = None
+
+        try:
+            self.gcode.respond_info(
+                f"ACE: Spool tangle detected on T{tool_index}! "
+                f"Filament stuck between spool and RDM. Pausing print."
+            )
+            self._pause_for_runout()
+
+            # Build prompt
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_begin Spool Tangle Detected"'
+            )
+            self.gcode.run_script_from_command(
+                f'RESPOND TYPE=command MSG="action:prompt_text '
+                f'Spool tangle detected on T{tool_index}! '
+                f'The extruder is consuming the tube buffer but no filament '
+                f'is passing through the RDM encoder. '
+                f'Check the spool for tangles, then resume."'
+            )
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_footer_button '
+                'Resume|RESUME|primary"'
+            )
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_footer_button '
+                'Cancel Print|CANCEL_PRINT|error"'
+            )
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_show"'
+            )
+        except Exception as e:
+            self.gcode.respond_info(f"ACE: Tangle handling error: {e}")
+        finally:
+            self.runout_handling_in_progress = False
 
     def _show_runout_prompt(self, tool_index, instance_num, local_slot, material, color):
         """
