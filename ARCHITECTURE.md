@@ -1057,6 +1057,9 @@ moonraker_lane_sync_url: http://127.0.0.1:7125
 moonraker_lane_sync_namespace: lane_data
 moonraker_lane_sync_api_key:                # optional
 moonraker_lane_sync_timeout: 2.0
+moonraker_lane_sync_unknown_material_mode: passthrough   # passthrough|empty|map
+moonraker_lane_sync_unknown_material_markers: ???,unknown,n/a,none
+moonraker_lane_sync_unknown_material_map_to: PLA         # used when mode=map
 ```
 
 ## Test & Debug (Moonraker DB)

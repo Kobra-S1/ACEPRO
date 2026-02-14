@@ -25,7 +25,7 @@ class DummyManager:
         self.instances = instances
 
 
-def make_adapter(instances, enabled=True):
+def make_adapter(instances, enabled=True, **overrides):
     gcode = DummyGCode()
     manager = DummyManager(instances)
     config = {
@@ -34,7 +34,11 @@ def make_adapter(instances, enabled=True):
         "moonraker_lane_sync_namespace": "lane_data",
         "moonraker_lane_sync_api_key": None,
         "moonraker_lane_sync_timeout": 0.1,
+        "moonraker_lane_sync_unknown_material_mode": "passthrough",
+        "moonraker_lane_sync_unknown_material_markers": "???,unknown,n/a,none",
+        "moonraker_lane_sync_unknown_material_map_to": "",
     }
+    config.update(overrides)
     return MoonrakerLaneSyncAdapter(gcode, manager, config), gcode
 
 
@@ -114,6 +118,69 @@ def test_sync_now_warns_once_when_unavailable(monkeypatch):
     assert len(warnings) == 1
 
 
+def test_unknown_material_passthrough_default():
+    instances = [
+        DummyInstance(
+            0,
+            [
+                {"status": "ready", "material": "???", "color": [12, 34, 56], "temp": 205},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+            ],
+        ),
+    ]
+    adapter, _ = make_adapter(instances, enabled=True)
+    lane1 = adapter._build_lane_payload()["lane1"]
+    assert lane1["material"] == "???"
+    assert lane1["color"] == "#0C2238"
+
+
+def test_unknown_material_mode_empty_clears_material_and_color():
+    instances = [
+        DummyInstance(
+            0,
+            [
+                {"status": "ready", "material": "???", "color": [12, 34, 56], "temp": 205},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+            ],
+        ),
+    ]
+    adapter, _ = make_adapter(
+        instances,
+        enabled=True,
+        moonraker_lane_sync_unknown_material_mode="empty",
+    )
+    lane1 = adapter._build_lane_payload()["lane1"]
+    assert lane1["material"] == ""
+    assert lane1["color"] == ""
+
+
+def test_unknown_material_mode_map_replaces_marker():
+    instances = [
+        DummyInstance(
+            0,
+            [
+                {"status": "ready", "material": "???", "color": [12, 34, 56], "temp": 205},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+            ],
+        ),
+    ]
+    adapter, _ = make_adapter(
+        instances,
+        enabled=True,
+        moonraker_lane_sync_unknown_material_mode="map",
+        moonraker_lane_sync_unknown_material_map_to="PLA",
+    )
+    lane1 = adapter._build_lane_payload()["lane1"]
+    assert lane1["material"] == "PLA"
+    assert lane1["color"] == "#0C2238"
+
+
 def test_build_lane_payload_includes_spool_id_and_min_bed_temp_fallback():
     instances = [
         DummyInstance(
@@ -167,6 +234,9 @@ def test_headers_include_api_key_when_set():
         "moonraker_lane_sync_namespace": "lane_data",
         "moonraker_lane_sync_api_key": "secret",
         "moonraker_lane_sync_timeout": 0.1,
+        "moonraker_lane_sync_unknown_material_mode": "passthrough",
+        "moonraker_lane_sync_unknown_material_markers": "???,unknown",
+        "moonraker_lane_sync_unknown_material_map_to": "",
     }
     adapter = MoonrakerLaneSyncAdapter(gcode, manager, config)
     headers = adapter._headers()

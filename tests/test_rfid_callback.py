@@ -502,3 +502,22 @@ class TestRfidTempModeConfig:
         result = read_ace_config(mock_config)
         
         assert result["rfid_temp_mode"] == "average"
+
+    def test_moonraker_unknown_material_mode_invalid_defaults_to_passthrough(self):
+        """Invalid moonraker unknown material mode should fall back safely."""
+        from extras.ace.config import read_ace_config
+
+        mock_config = MagicMock()
+        mock_config.getint = MagicMock(return_value=1)
+        mock_config.getfloat = MagicMock(return_value=1.0)
+        mock_config.getboolean = MagicMock(return_value=True)
+
+        def get_side_effect(key, default=""):
+            if key == "moonraker_lane_sync_unknown_material_mode":
+                return "bad_mode"
+            return default
+
+        mock_config.get = MagicMock(side_effect=get_side_effect)
+
+        result = read_ace_config(mock_config)
+        assert result["moonraker_lane_sync_unknown_material_mode"] == "passthrough"

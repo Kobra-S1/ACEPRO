@@ -116,6 +116,25 @@ def read_ace_config(config):
     ace_config["moonraker_lane_sync_timeout"] = config.getfloat(
         "moonraker_lane_sync_timeout", 2.0
     )
+    # Handling for placeholder/unknown material labels when publishing to lane_data.
+    # - passthrough: publish value as-is (default)
+    # - empty:       publish as empty material
+    # - map:         publish moonraker_lane_sync_unknown_material_map_to
+    ace_config["moonraker_lane_sync_unknown_material_mode"] = config.get(
+        "moonraker_lane_sync_unknown_material_mode", "passthrough"
+    ).strip().lower()
+    if ace_config["moonraker_lane_sync_unknown_material_mode"] not in (
+        "passthrough",
+        "empty",
+        "map",
+    ):
+        ace_config["moonraker_lane_sync_unknown_material_mode"] = "passthrough"
+    ace_config["moonraker_lane_sync_unknown_material_markers"] = config.get(
+        "moonraker_lane_sync_unknown_material_markers", "???,unknown,n/a,none"
+    )
+    ace_config["moonraker_lane_sync_unknown_material_map_to"] = config.get(
+        "moonraker_lane_sync_unknown_material_map_to", ""
+    )
     ace_config["tangle_detection"] = config.getboolean(
         "tangle_detection", False
     )

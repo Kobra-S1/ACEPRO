@@ -23,6 +23,15 @@ class MoonrakerLaneSyncAdapter:
         self.namespace = str(ace_config.get("moonraker_lane_sync_namespace", "lane_data"))
         self.api_key = ace_config.get("moonraker_lane_sync_api_key")
         self.timeout_s = float(ace_config.get("moonraker_lane_sync_timeout", 2.0))
+        self.unknown_material_mode = str(
+            ace_config.get("moonraker_lane_sync_unknown_material_mode", "passthrough")
+        ).strip().lower()
+        self.unknown_material_map_to = str(
+            ace_config.get("moonraker_lane_sync_unknown_material_map_to", "") or ""
+        ).strip()
+        self.unknown_material_markers = self._parse_markers(
+            ace_config.get("moonraker_lane_sync_unknown_material_markers", "???,unknown,n/a,none")
+        )
         self._last_payload = None
         self._warned_unavailable = False
 
@@ -71,7 +80,7 @@ class MoonrakerLaneSyncAdapter:
                     inv = instance.inventory[local_slot] or {}
 
                 status = str(inv.get("status", "empty"))
-                material = str(inv.get("material", "") or "").strip()
+                material = self._normalize_material(inv.get("material", ""))
                 has_filament = status == "ready" and bool(material)
 
                 entry = {
@@ -97,6 +106,38 @@ class MoonrakerLaneSyncAdapter:
                 lanes[lane_key] = entry
 
         return lanes
+
+    @staticmethod
+    def _parse_markers(raw):
+        if raw is None:
+            return set()
+        if isinstance(raw, str):
+            parts = raw.split(",")
+        elif isinstance(raw, (list, tuple, set)):
+            parts = list(raw)
+        else:
+            parts = [str(raw)]
+        markers = set()
+        for item in parts:
+            marker = str(item or "").strip()
+            if marker:
+                markers.add(marker.upper())
+        return markers
+
+    def _normalize_material(self, material):
+        value = str(material or "").strip()
+        if not value:
+            return ""
+        mode = self.unknown_material_mode
+        if mode not in ("passthrough", "empty", "map"):
+            mode = "passthrough"
+        if value.upper() not in self.unknown_material_markers:
+            return value
+        if mode == "empty":
+            return ""
+        if mode == "map":
+            return self.unknown_material_map_to
+        return value
 
     @staticmethod
     def _is_lane_key(key):
@@ -191,4 +232,3 @@ class MoonrakerLaneSyncAdapter:
     def _delete_item(self, key):
         query = parse.urlencode({"namespace": self.namespace, "key": key})
         self._http_json("DELETE", f"/server/database/item?{query}")
-
