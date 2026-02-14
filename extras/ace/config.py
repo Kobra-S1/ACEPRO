@@ -99,6 +99,23 @@ def read_ace_config(config):
     ace_config["ace_connection_supervision"] = config.getboolean(
         "ace_connection_supervision", True
     )
+    # Orca filament sync via Moonraker database namespace "lane_data"
+    # Disabled by default to avoid unexpected network writes.
+    ace_config["moonraker_lane_sync_enabled"] = config.getboolean(
+        "moonraker_lane_sync_enabled", False
+    )
+    ace_config["moonraker_lane_sync_url"] = config.get(
+        "moonraker_lane_sync_url", "http://127.0.0.1:7125"
+    )
+    ace_config["moonraker_lane_sync_namespace"] = config.get(
+        "moonraker_lane_sync_namespace", "lane_data"
+    )
+    ace_config["moonraker_lane_sync_api_key"] = config.get(
+        "moonraker_lane_sync_api_key", None
+    )
+    ace_config["moonraker_lane_sync_timeout"] = config.getfloat(
+        "moonraker_lane_sync_timeout", 2.0
+    )
     ace_config["tangle_detection"] = config.getboolean(
         "tangle_detection", False
     )

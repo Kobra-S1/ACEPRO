@@ -997,3 +997,103 @@ ACE_DEBUG_STATE                    # Check manager state
 ACE_GET_STATUS INSTANCE=0          # Query ACE hardware (compact JSON)
 ACE_GET_STATUS INSTANCE=0 VERBOSE=1 # Query ACE hardware (detailed output)
 ```
+
+## Moonraker `lane_data` Sync Architecture (Orca Filament Sync)
+
+### Purpose
+
+This feature publishes ACE slot metadata into Moonraker's database namespace
+(`lane_data`) so Orca can pull filament lane info using its Moonraker adapter.
+
+### Module Documentation
+
+- `extras/ace/moonraker_lane_sync.py`
+  - Implements `MoonrakerLaneSyncAdapter`.
+  - Builds lane payload from all ACE instances and writes Moonraker DB items.
+- `extras/ace/config.py`
+  - Adds `moonraker_lane_sync_*` settings.
+- `extras/ace/manager.py`
+  - Creates adapter once during manager init.
+  - Triggers sync on startup and whenever inventory persistence occurs.
+
+### Data Flow
+
+```
+ACE heartbeat/status response
+  -> AceInstance._status_update_callback()
+     -> inventory changed?
+        -> manager._sync_inventory_to_persistent(instance_num)
+           -> SAVE_VARIABLE (existing inventory persistence)
+           -> manager._sync_moonraker_lane_data(...)
+              -> MoonrakerLaneSyncAdapter.sync_now(...)
+                 -> GET existing namespace
+                 -> POST changed lane keys
+                 -> DELETE stale lane keys
+```
+
+Additionally, manager does a forced sync on `klippy:ready` to populate the
+initial `lane_data` snapshot.
+
+### Lane Mapping & Payload Rules
+
+- Lane index: `instance.tool_offset + local_slot`.
+- DB key: `lane{index+1}` (`lane1`, `lane2`, ...).
+- Required payload fields:
+  - `lane` (0-based string)
+  - `material`
+  - `color` (`#RRGGBB`)
+- Optional payload fields:
+  - `nozzle_temp`
+  - `bed_temp`
+  - `spool_id`
+- Empty slots are still published with the same lane index and empty
+  `material`/`color`.
+
+### Config (`[ace]`)
+
+```ini
+moonraker_lane_sync_enabled: False          # default off
+moonraker_lane_sync_url: http://127.0.0.1:7125
+moonraker_lane_sync_namespace: lane_data
+moonraker_lane_sync_api_key:                # optional
+moonraker_lane_sync_timeout: 2.0
+```
+
+## Test & Debug (Moonraker DB)
+
+1. Enable `moonraker_lane_sync_enabled: True` in `[ace]`, then restart.
+2. Read namespace content:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" | jq .
+```
+
+Expected:
+- `.result.namespace` is `lane_data`
+- `.result.value` contains `lane1`, `lane2`, ... entries
+
+3. Human-readable lane summary:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" \
+| jq -r '.result.value | to_entries[] | "\(.key): T\(.value.lane) material=\(.value.material // "") color=\(.value.color // "") nozzle=\(.value.nozzle_temp // "-") bed=\(.value.bed_temp // "-")"'
+```
+
+4. Watch updates while changing slots (`ACE_SET_SLOT`, RFID updates, load/unload):
+
+```bash
+watch -n1 'curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" | jq ".result.value"'
+```
+
+5. If Moonraker requires API key:
+
+```bash
+curl -s -H "X-Api-Key: YOUR_KEY" \
+  "http://127.0.0.1:7125/server/database/item?namespace=lane_data" | jq .
+```
+
+Troubleshooting:
+- If namespace is empty, verify `moonraker_lane_sync_enabled`.
+- Trigger inventory-changing events (`ACE_SET_SLOT`, slot status change) or do
+  `FIRMWARE_RESTART`.
+- Check Klipper logs for `Moonraker lane sync unavailable` warnings.

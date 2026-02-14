@@ -22,6 +22,7 @@ import json
 from .instance import AceInstance
 from .endless_spool import EndlessSpool
 from .runout_monitor import RunoutMonitor
+from .moonraker_lane_sync import MoonrakerLaneSyncAdapter
 from . import commands
 from .config import read_ace_config
 import logging
@@ -180,6 +181,11 @@ class AceManager:
         # Load persisted inventory for all instances
         self._load_all_inventories()
 
+        # Optional adapter for Orca/Moonraker filament sync.
+        self._moonraker_lane_sync = MoonrakerLaneSyncAdapter(
+            self.gcode, self, self.ace_config
+        )
+
         self._ace_state_timer = None
 
         # Initialize global filament position
@@ -289,6 +295,9 @@ class AceManager:
             self._setup_sensors()
         else:
             self.gcode.respond_info("ACE: ACE Pro disabled on startup - skipping connections")
+
+        # Publish initial lane_data snapshot for Orca pull-mode sync.
+        self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
 
         self._start_monitoring()
 
@@ -1287,12 +1296,26 @@ class AceManager:
             payload = json.dumps(instance.inventory).replace("true", "True").replace("false", "False")
             cmd = f"SAVE_VARIABLE VARIABLE={varname} VALUE='{payload}'"
             self.gcode.run_script_from_command(cmd)
+            self._sync_moonraker_lane_data(
+                force=False, reason=f"inventory_update_instance_{instance_num}"
+            )
 
             # self.gcode.respond_info(f"ACE[{instance_num}]: Inventory synced to persistent")
         else:
             # Sync all instances
             for inst in self.instances:
                 self._sync_inventory_to_persistent(inst.instance_num)
+
+    def _sync_moonraker_lane_data(self, force=False, reason="manual"):
+        """Push ACE slot metadata to Moonraker DB lane_data for Orca sync."""
+        adapter = getattr(self, "_moonraker_lane_sync", None)
+        if not adapter:
+            return False
+        try:
+            return adapter.sync_now(force=force, reason=reason)
+        except Exception as e:
+            logging.warning("ACE: Moonraker lane sync failed (%s): %s", reason, e)
+            return False
 
     def _start_monitoring(self):
         """Start runout detection monitor loop."""
