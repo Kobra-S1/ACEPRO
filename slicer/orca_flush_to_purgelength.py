@@ -112,10 +112,9 @@ def process_gcode(
             length_mm = volume_to_length_mm(vol, filament_diameter)
             length_str = f"{round(length_mm, round_digits):.{round_digits}f}"
 
-            # Replace the line with PURGELENGTH appended
-            # Keep any trailing comment by reconstructing cleanly
-            new_line = f"T{new_tool} PURGELENGTH={length_str}\n"
-            out_lines.append(new_line)
+            # Prepend an ACE purge command and keep the original tool-change line intact
+            out_lines.append(f"ACE_SET_PURGE_AMOUNT PURGELENGTH={length_str}\n")
+            out_lines.append(ln)
 
             toolchange_count += 1
             current_tool = new_tool
