@@ -42,6 +42,13 @@ def make_adapter(instances, enabled=True, **overrides):
     return MoonrakerLaneSyncAdapter(gcode, manager, config), gcode
 
 
+def test_adapter_enabled_by_default_when_flag_missing():
+    gcode = DummyGCode()
+    manager = DummyManager([])
+    adapter = MoonrakerLaneSyncAdapter(gcode, manager, {})
+    assert adapter.enabled is True
+
+
 def test_build_lane_payload_maps_slots_to_global_lanes():
     instances = [
         DummyInstance(

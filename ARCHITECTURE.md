@@ -1052,7 +1052,7 @@ initial `lane_data` snapshot.
 ### Config (`[ace]`)
 
 ```ini
-moonraker_lane_sync_enabled: False          # default off
+moonraker_lane_sync_enabled: True           # default on (set False to disable Moonraker writes)
 moonraker_lane_sync_url: http://127.0.0.1:7125
 moonraker_lane_sync_namespace: lane_data
 moonraker_lane_sync_api_key:                # optional
@@ -1064,7 +1064,7 @@ moonraker_lane_sync_unknown_material_map_to: PLA         # used when mode=map
 
 ## Test & Debug (Moonraker DB)
 
-1. Enable `moonraker_lane_sync_enabled: True` in `[ace]`, then restart.
+1. Ensure `moonraker_lane_sync_enabled: True` in `[ace]` (default), then restart after changes.
 2. Read namespace content:
 
 ```bash

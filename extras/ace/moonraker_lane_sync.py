@@ -18,7 +18,7 @@ class MoonrakerLaneSyncAdapter:
     def __init__(self, gcode, manager, ace_config):
         self.gcode = gcode
         self.manager = manager
-        self.enabled = bool(ace_config.get("moonraker_lane_sync_enabled", False))
+        self.enabled = bool(ace_config.get("moonraker_lane_sync_enabled", True))
         self.base_url = str(ace_config.get("moonraker_lane_sync_url", "http://127.0.0.1:7125")).rstrip("/")
         self.namespace = str(ace_config.get("moonraker_lane_sync_namespace", "lane_data"))
         self.api_key = ace_config.get("moonraker_lane_sync_api_key")

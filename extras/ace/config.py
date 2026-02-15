@@ -100,9 +100,10 @@ def read_ace_config(config):
         "ace_connection_supervision", True
     )
     # Orca filament sync via Moonraker database namespace "lane_data"
-    # Disabled by default to avoid unexpected network writes.
+    # Enabled by default to keep Orca lane data up to date. Set to False to opt-out
+    # of Moonraker writes.
     ace_config["moonraker_lane_sync_enabled"] = config.getboolean(
-        "moonraker_lane_sync_enabled", False
+        "moonraker_lane_sync_enabled", True
     )
     ace_config["moonraker_lane_sync_url"] = config.get(
         "moonraker_lane_sync_url", "http://127.0.0.1:7125"
