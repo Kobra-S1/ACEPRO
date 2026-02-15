@@ -60,6 +60,7 @@ class TestAceManagerInitialization(unittest.TestCase):
         self.mock_config.get.side_effect = self._mock_config_get
         self.mock_config.getint.side_effect = self._mock_config_getint
         self.mock_config.getfloat.side_effect = self._mock_config_getfloat
+        self.mock_config.getboolean.side_effect = self._mock_config_getboolean
 
     def _mock_lookup_object(self, name, default=None):
         """Mock printer lookup_object."""
@@ -117,6 +118,17 @@ class TestAceManagerInitialization(unittest.TestCase):
         }
         val = config_values.get(key, default)
         return float(val) if val is not None else default
+
+    def _mock_config_getboolean(self, key, default=None):
+        """Mock config.getboolean()."""
+        config_values = {
+            'feed_assist_active_after_ace_connect': True,
+            'rfid_inventory_sync_enabled': True,
+            # Disable Moonraker lane sync during tests to avoid live Moonraker writes
+            'moonraker_lane_sync_enabled': False,
+        }
+        val = config_values.get(key, default)
+        return bool(val) if val is not None else (default if default is not None else False)
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -324,6 +336,7 @@ class TestHandleReady(unittest.TestCase):
                 "feed_assist_active_after_ace_connect": True,
                 "rfid_inventory_sync_enabled": True,
                 "ace_connection_supervision": True,
+                "moonraker_lane_sync_enabled": False,  # avoid live Moonraker writes in tests
             }.get(key, default if default is not None else False)
 
         self.mock_config.getint.side_effect = getint
@@ -437,6 +450,7 @@ class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
                 "feed_assist_active_after_ace_connect": True,
                 "rfid_inventory_sync_enabled": True,
                 "ace_connection_supervision": True,
+                "moonraker_lane_sync_enabled": False,  # avoid live Moonraker writes in tests
             }.get(key, default if default is not None else False)
 
         self.mock_config.getint.side_effect = getint

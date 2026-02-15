@@ -2,6 +2,7 @@ import io
 
 import pytest
 from urllib import error
+from unittest.mock import MagicMock
 
 from ace.moonraker_lane_sync import MoonrakerLaneSyncAdapter
 
@@ -200,6 +201,7 @@ def test_build_lane_payload_includes_spool_id_and_min_bed_temp_fallback():
                     "temp": 245,
                     "hotbed_temp": {"max": 0, "min": 105},
                     "sku": "12345",
+                    "brand": "Anycubic",
                 },
                 {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
                 {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
@@ -211,7 +213,58 @@ def test_build_lane_payload_includes_spool_id_and_min_bed_temp_fallback():
     lane1 = adapter._build_lane_payload()["lane1"]
 
     assert lane1["spool_id"] == 12345
+    assert lane1["vendor"] == "Anycubic"
+    assert lane1["sku"] == "12345"
     assert lane1["bed_temp"] == 105
+
+
+def test_build_lane_payload_includes_vendor_and_sku_without_spool_id_for_non_numeric_sku():
+    instances = [
+        DummyInstance(
+            0,
+            [
+                {
+                    "status": "ready",
+                    "material": "PLA",
+                    "color": [10, 20, 30],
+                    "temp": 200,
+                    "sku": "PLA-ORANGE",
+                    "brand": "Prusa",
+                },
+            ],
+        )
+    ]
+    adapter, _ = make_adapter(instances, enabled=True)
+    lane1 = adapter._build_lane_payload()["lane1"]
+
+    assert "spool_id" not in lane1
+    assert lane1["vendor"] == "Prusa"
+    assert lane1["sku"] == "PLA-ORANGE"
+
+
+def test_build_lane_payload_skips_instances_with_invalid_tool_offset():
+    # Guard against MagicMock tool_offset leaking into lane keys
+    bad_instance = MagicMock()
+    bad_instance.tool_offset = MagicMock()  # not an int
+    bad_instance.inventory = []
+
+    adapter, _ = make_adapter([bad_instance], enabled=True)
+    assert adapter._build_lane_payload() == {}
+
+
+def test_sync_now_cleans_invalid_lane_keys(monkeypatch):
+    adapter, gcode = make_adapter([], enabled=True)
+    invalid_key = "lane<MagicMock name='AceInstance()"
+    deletes = []
+
+    monkeypatch.setattr(adapter, "_get_namespace_items", lambda: {invalid_key: {"lane": "x"}})
+    monkeypatch.setattr(adapter, "_set_item", lambda k, v: None)
+    monkeypatch.setattr(adapter, "_delete_item", lambda k: deletes.append(k))
+
+    # With no lanes to publish, the only action should be deleting the bad key
+    assert adapter.sync_now(force=True, reason="clean_invalid") is True
+    assert invalid_key in deletes
+    assert any("Removed invalid Moonraker lane keys" in msg for msg in gcode.messages)
 
 
 def test_lane_key_and_conversion_edge_cases():

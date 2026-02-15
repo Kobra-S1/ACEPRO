@@ -47,6 +47,27 @@ class MoonrakerLaneSyncAdapter:
 
         try:
             existing = self._get_namespace_items()
+            # Remove malformed lane keys (e.g., from mocked tool offsets)
+            invalid_keys = [
+                key for key in existing.keys()
+                if isinstance(key, str) and key.startswith("lane") and not self._is_lane_key(key)
+            ]
+            for key in invalid_keys:
+                self._delete_item(key)
+                existing.pop(key, None)
+            if invalid_keys:
+                msg = f"ACE: Removed invalid Moonraker lane keys: {', '.join(invalid_keys)}"
+                logging.warning(msg)
+                try:
+                    self.gcode.respond_info(msg)
+                except Exception:
+                    pass
+            # Clean up malformed lane keys (e.g., from mocked tool offsets)
+            for key in list(existing.keys()):
+                if key.startswith("lane") and not self._is_lane_key(key):
+                    self._delete_item(key)
+                    existing.pop(key, None)
+
             for key, value in lanes.items():
                 if not force and existing.get(key) == value:
                     continue
@@ -71,8 +92,13 @@ class MoonrakerLaneSyncAdapter:
     def _build_lane_payload(self):
         lanes = {}
         for instance in self.manager.instances:
+            tool_offset = getattr(instance, "tool_offset", None)
+            if not isinstance(tool_offset, int):
+                # Skip unknown/mocked instances to avoid emitting invalid lane keys
+                continue
+
             for local_slot in range(SLOTS_PER_ACE):
-                lane_index = instance.tool_offset + local_slot
+                lane_index = tool_offset + local_slot
                 lane_key = f"lane{lane_index + 1}"
 
                 inv = {}
@@ -100,7 +126,12 @@ class MoonrakerLaneSyncAdapter:
                     entry["bed_temp"] = bed_temp
 
                 spool_id = self._extract_spool_id(inv)
-                if spool_id is not None:
+                if has_filament and inv.get("brand"):
+                    entry["vendor"] = str(inv.get("brand"))
+                if has_filament and inv.get("sku"):
+                    entry["sku"] = str(inv.get("sku"))
+
+                if has_filament and spool_id is not None:
                     entry["spool_id"] = spool_id
 
                 lanes[lane_key] = entry

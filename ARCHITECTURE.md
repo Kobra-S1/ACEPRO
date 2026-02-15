@@ -1045,9 +1045,13 @@ initial `lane_data` snapshot.
 - Optional payload fields:
   - `nozzle_temp`
   - `bed_temp`
+  - `vendor` (RFID brand/manufacturer when present)
+  - `sku` (RFID SKU/part number)
   - `spool_id`
 - Empty slots are still published with the same lane index and empty
   `material`/`color`.
+- `spool_id` is derived from `sku` when it is a numeric value; non-numeric SKUs are still published for
+  slicer-side matching but won't become a `spool_id`.
 
 ### Config (`[ace]`)
 
@@ -1075,6 +1079,13 @@ Expected:
 - `.result.namespace` is `lane_data`
 - `.result.value` contains `lane1`, `lane2`, ... entries
 
+Check just the keys to spot stray entries:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" \
+| jq -r '.result.value | keys[]'
+```
+
 3. Human-readable lane summary:
 
 ```bash
@@ -1093,6 +1104,30 @@ watch -n1 'curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_da
 ```bash
 curl -s -H "X-Api-Key: YOUR_KEY" \
   "http://127.0.0.1:7125/server/database/item?namespace=lane_data" | jq .
+```
+
+6. Cleanup (stray/stale keys):
+
+- Delete a single key safely (handles spaces/quotes):
+
+```bash
+curl -s -X DELETE --get \
+  --data-urlencode "namespace=lane_data" \
+  --data-urlencode "key=lane7" \
+  http://127.0.0.1:7125/server/database/item
+```
+
+- Delete all keys in the namespace:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" \
+| jq -r '.result.value | keys[]' \
+| while IFS= read -r key; do
+    curl -s -X DELETE --get \
+      --data-urlencode "namespace=lane_data" \
+      --data-urlencode "key=${key}" \
+      http://127.0.0.1:7125/server/database/item >/dev/null
+  done
 ```
 
 Troubleshooting:
