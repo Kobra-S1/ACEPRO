@@ -2039,8 +2039,8 @@ class TestToolChangeIntegration:
             assert any("Resume|RESUME" in c for c in calls)
             assert any("Cancel Print|CANCEL_PRINT" in c for c in calls)
 
-    def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_turns_off_heater(self, mock_gcmd, setup_mocks):
-        """Test tool change failure when NOT printing - should turn off heater and raise exception."""
+    def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_keeps_current_tool_and_turns_off_heater(self, mock_gcmd, setup_mocks):
+        """Test idle/startup failure keeps current tool state and turns off heater."""
         mock_gcmd.get_int = Mock(return_value=1)
         mock_gcmd.error = Exception  # Make gcmd.error return an Exception class
         
@@ -2075,9 +2075,11 @@ class TestToolChangeIntegration:
         # Mock perform_tool_change to raise exception
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Load failed"))
         
+        mock_set_and_save = Mock()
+
         with patch('ace.commands.get_printer', return_value=mock_printer), \
              patch('ace.commands.get_variable', return_value=0), \
-             patch('ace.commands.set_and_save_variable'):
+             patch('ace.commands.set_and_save_variable', mock_set_and_save):
             # Should raise exception for non-printing startup failure
             with pytest.raises(Exception) as exc_info:
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
@@ -2088,6 +2090,62 @@ class TestToolChangeIntegration:
             assert mock_gcode.run_script_from_command.called
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("M104 S0" in c for c in calls)
+
+            # Verify idle/startup failure keeps the previous active tool (0), not target (1)
+            mock_set_and_save.assert_called_with(mock_printer, mock_gcode, "ace_current_index", 0)
+            assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=0" in c for c in calls)
+
+    def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_after_unload_sets_no_active_tool(self, mock_gcmd, setup_mocks):
+        """Test idle/startup failure sets active tool to -1 when filament is already in bowden."""
+        mock_gcmd.get_int = Mock(return_value=1)
+        mock_gcmd.error = Exception
+
+        # Mock printer objects
+        mock_printer = Mock()
+        mock_toolhead = Mock()
+        mock_kinematics = Mock()
+        mock_reactor = Mock()
+        mock_gcode = Mock()
+        mock_print_stats = Mock()
+        mock_save_vars = Mock()
+        mock_save_vars.allVariables = {"ace_filament_pos": "bowden"}
+
+        # Mock homed
+        mock_kinematics.get_status = Mock(return_value={'homed_axes': 'xyz'})
+        mock_toolhead.get_kinematics = Mock(return_value=mock_kinematics)
+        mock_reactor.monotonic = Mock(return_value=1.0)
+        mock_printer.get_reactor = Mock(return_value=mock_reactor)
+
+        # Mock print_stats to indicate NOT printing
+        mock_print_stats.get_status = Mock(return_value={'state': 'ready'})
+
+        def lookup_side_effect(obj, default=None):
+            if obj == 'toolhead':
+                return mock_toolhead
+            elif obj == 'gcode':
+                return mock_gcode
+            elif obj == 'print_stats':
+                return mock_print_stats
+            elif obj == 'save_variables':
+                return mock_save_vars
+            return default if default is not None else Mock()
+
+        mock_printer.lookup_object = Mock(side_effect=lookup_side_effect)
+
+        INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Load failed after unload"))
+
+        mock_set_and_save = Mock()
+
+        with patch('ace.commands.get_printer', return_value=mock_printer), \
+             patch('ace.commands.get_variable', return_value=0), \
+             patch('ace.commands.set_and_save_variable', mock_set_and_save):
+            with pytest.raises(Exception):
+                ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
+
+            # Idle/startup + bowden state: clear active tool.
+            mock_set_and_save.assert_called_with(mock_printer, mock_gcode, "ace_current_index", -1)
+            calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
+            assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1" in c for c in calls)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_updates_state_before_dialog(self, mock_gcmd, setup_mocks):
         """Test that tool state is updated even when tool change fails during printing."""
@@ -3184,4 +3242,3 @@ class TestQuerySlotsCommand:
         assert "ColorMix" in output
         # Verify rgba field is NOT in output (removed)
         assert "rgba=" not in output
-
