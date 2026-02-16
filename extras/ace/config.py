@@ -118,18 +118,18 @@ def read_ace_config(config):
         "moonraker_lane_sync_timeout", 2.0
     )
     # Handling for placeholder/unknown material labels when publishing to lane_data.
-    # - passthrough: publish value as-is (default)
+    # - passthrough: publish value as-is
     # - empty:       publish as empty material
     # - map:         publish moonraker_lane_sync_unknown_material_map_to
     ace_config["moonraker_lane_sync_unknown_material_mode"] = config.get(
-        "moonraker_lane_sync_unknown_material_mode", "passthrough"
+        "moonraker_lane_sync_unknown_material_mode", "empty"
     ).strip().lower()
     if ace_config["moonraker_lane_sync_unknown_material_mode"] not in (
         "passthrough",
         "empty",
         "map",
     ):
-        ace_config["moonraker_lane_sync_unknown_material_mode"] = "passthrough"
+        ace_config["moonraker_lane_sync_unknown_material_mode"] = "empty"
     ace_config["moonraker_lane_sync_unknown_material_markers"] = config.get(
         "moonraker_lane_sync_unknown_material_markers", "???,unknown,n/a,none"
     )

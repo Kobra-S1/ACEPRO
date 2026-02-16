@@ -24,7 +24,7 @@ class MoonrakerLaneSyncAdapter:
         self.api_key = ace_config.get("moonraker_lane_sync_api_key")
         self.timeout_s = float(ace_config.get("moonraker_lane_sync_timeout", 2.0))
         self.unknown_material_mode = str(
-            ace_config.get("moonraker_lane_sync_unknown_material_mode", "passthrough")
+            ace_config.get("moonraker_lane_sync_unknown_material_mode", "empty")
         ).strip().lower()
         self.unknown_material_map_to = str(
             ace_config.get("moonraker_lane_sync_unknown_material_map_to", "") or ""
@@ -161,7 +161,7 @@ class MoonrakerLaneSyncAdapter:
             return ""
         mode = self.unknown_material_mode
         if mode not in ("passthrough", "empty", "map"):
-            mode = "passthrough"
+            mode = "empty"
         if value.upper() not in self.unknown_material_markers:
             return value
         if mode == "empty":

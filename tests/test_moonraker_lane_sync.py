@@ -26,6 +26,16 @@ class DummyManager:
         self.instances = instances
 
 
+@pytest.fixture(autouse=True)
+def block_live_moonraker_network(monkeypatch):
+    """Prevent accidental writes to a live Moonraker instance during tests."""
+
+    def _fail_urlopen(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("Live network access is blocked in moonraker lane sync tests")
+
+    monkeypatch.setattr("ace.moonraker_lane_sync.request.urlopen", _fail_urlopen)
+
+
 def make_adapter(instances, enabled=True, **overrides):
     gcode = DummyGCode()
     manager = DummyManager(instances)
@@ -35,7 +45,7 @@ def make_adapter(instances, enabled=True, **overrides):
         "moonraker_lane_sync_namespace": "lane_data",
         "moonraker_lane_sync_api_key": None,
         "moonraker_lane_sync_timeout": 0.1,
-        "moonraker_lane_sync_unknown_material_mode": "passthrough",
+        "moonraker_lane_sync_unknown_material_mode": "empty",
         "moonraker_lane_sync_unknown_material_markers": "???,unknown,n/a,none",
         "moonraker_lane_sync_unknown_material_map_to": "",
     }
@@ -126,7 +136,7 @@ def test_sync_now_warns_once_when_unavailable(monkeypatch):
     assert len(warnings) == 1
 
 
-def test_unknown_material_passthrough_default():
+def test_unknown_material_default_empty_clears_material_and_color():
     instances = [
         DummyInstance(
             0,
@@ -140,11 +150,11 @@ def test_unknown_material_passthrough_default():
     ]
     adapter, _ = make_adapter(instances, enabled=True)
     lane1 = adapter._build_lane_payload()["lane1"]
-    assert lane1["material"] == "???"
-    assert lane1["color"] == "#0C2238"
+    assert lane1["material"] == ""
+    assert lane1["color"] == ""
 
 
-def test_unknown_material_mode_empty_clears_material_and_color():
+def test_unknown_material_mode_passthrough_keeps_marker_and_color():
     instances = [
         DummyInstance(
             0,
@@ -159,11 +169,11 @@ def test_unknown_material_mode_empty_clears_material_and_color():
     adapter, _ = make_adapter(
         instances,
         enabled=True,
-        moonraker_lane_sync_unknown_material_mode="empty",
+        moonraker_lane_sync_unknown_material_mode="passthrough",
     )
     lane1 = adapter._build_lane_payload()["lane1"]
-    assert lane1["material"] == ""
-    assert lane1["color"] == ""
+    assert lane1["material"] == "???"
+    assert lane1["color"] == "#0C2238"
 
 
 def test_unknown_material_mode_map_replaces_marker():
