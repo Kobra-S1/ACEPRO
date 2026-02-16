@@ -95,8 +95,52 @@ def read_ace_config(config):
     ace_config["purge_multiplier"] = config.getfloat("purge_multiplier", "1.0")
     ace_config["pre_cut_retract_length"] = config.getint("pre_cut_retract_length", "2")
     ace_config["status_debug_logging"] = config.getboolean("status_debug_logging", False)
+    ace_config["runout_debounce_count"] = config.getint("runout_debounce_count", 1)
     ace_config["ace_connection_supervision"] = config.getboolean(
         "ace_connection_supervision", True
+    )
+    # Orca filament sync via Moonraker database namespace "lane_data"
+    # Enabled by default to keep Orca lane data up to date. Set to False to opt-out
+    # of Moonraker writes.
+    ace_config["moonraker_lane_sync_enabled"] = config.getboolean(
+        "moonraker_lane_sync_enabled", True
+    )
+    ace_config["moonraker_lane_sync_url"] = config.get(
+        "moonraker_lane_sync_url", "http://127.0.0.1:7125"
+    )
+    ace_config["moonraker_lane_sync_namespace"] = config.get(
+        "moonraker_lane_sync_namespace", "lane_data"
+    )
+    ace_config["moonraker_lane_sync_api_key"] = config.get(
+        "moonraker_lane_sync_api_key", None
+    )
+    ace_config["moonraker_lane_sync_timeout"] = config.getfloat(
+        "moonraker_lane_sync_timeout", 2.0
+    )
+    # Handling for placeholder/unknown material labels when publishing to lane_data.
+    # - passthrough: publish value as-is
+    # - empty:       publish as empty material
+    # - map:         publish moonraker_lane_sync_unknown_material_map_to
+    ace_config["moonraker_lane_sync_unknown_material_mode"] = config.get(
+        "moonraker_lane_sync_unknown_material_mode", "empty"
+    ).strip().lower()
+    if ace_config["moonraker_lane_sync_unknown_material_mode"] not in (
+        "passthrough",
+        "empty",
+        "map",
+    ):
+        ace_config["moonraker_lane_sync_unknown_material_mode"] = "empty"
+    ace_config["moonraker_lane_sync_unknown_material_markers"] = config.get(
+        "moonraker_lane_sync_unknown_material_markers", "???,unknown,n/a,none"
+    )
+    ace_config["moonraker_lane_sync_unknown_material_map_to"] = config.get(
+        "moonraker_lane_sync_unknown_material_map_to", ""
+    )
+    ace_config["tangle_detection"] = config.getboolean(
+        "tangle_detection", False
+    )
+    ace_config["tangle_detection_length"] = config.getfloat(
+        "tangle_detection_length", 15.0
     )
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"

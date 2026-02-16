@@ -344,6 +344,8 @@ last_print_state                    # Last raw print state ("idle", "printing", 
 runout_detection_active             # Is runout detection enabled?
 runout_handling_in_progress         # Are we handling a runout now?
 monitor_debug_counter               # For periodic debug logging (~15 min interval)
+runout_debounce_count               # Consecutive absent readings required (config, default 3)
+_runout_false_count                 # Current consecutive absent reading counter
 ```
 
 **Runout Detection Logic:**
@@ -361,10 +363,21 @@ Sensor State Check
 │  └─ No transition detected → Skip
 └─ Sensor state CHANGED?
    ├─ Is new state = TRIGGERED (filament present)?
-   │  └─ Likely sensor toggle noise → Reset baseline → Skip
+   │  └─ Reset debounce counter → Reset baseline → Skip
    └─ Is new state = CLEAR (filament absent)?
-      └─ THIS IS RUNOUT! Call _handle_runout_detected(tool_index)
+      ├─ Increment debounce counter (_runout_false_count)
+      ├─ Counter < runout_debounce_count?
+      │  └─ Not yet confirmed → Keep prev as True → Poll again (50ms)
+      └─ Counter >= runout_debounce_count?
+         └─ CONFIRMED RUNOUT! Reset counter → Call _handle_runout_detected()
 ```
+
+**Debounce:**
+The sensor reads raw (undebounced) `filament_present` from Klipper. To filter
+transient glitches, `runout_debounce_count` (default 3) consecutive absent
+readings are required before confirming a runout. At the 50ms poll interval,
+3 readings ≈ 150ms debounce window. The counter resets to 0 whenever the sensor
+reads present again, or on any baseline reset (pause, stop, no active tool).
 
 **Print Start Detection:**
 - Detects: `is_printing=True` and `was_printing_active=False`
@@ -794,6 +807,7 @@ def ace_get_instance_and_slot(gcmd):
    ↓
 2. RunoutMonitor._monitor_runout() (50ms interval)
    - Detects state change (present → absent)
+   - Debounce: requires N consecutive absent readings (default 3 ≈ 150ms)
    - Guards: not during toolchange, printing active, detection enabled
    - Tracks previous sensor state for transition detection
    ↓
@@ -973,6 +987,7 @@ pre_cut_retract_length: 2
 heartbeat_interval: 1.0
 max_dryer_temperature: 55
 feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect (deferred until first successful heartbeat)
+runout_debounce_count: 3                     # Consecutive absent sensor readings before confirming runout (default 1 = no debounce)
 ```
 ### Debug Commands
 
@@ -982,3 +997,141 @@ ACE_DEBUG_STATE                    # Check manager state
 ACE_GET_STATUS INSTANCE=0          # Query ACE hardware (compact JSON)
 ACE_GET_STATUS INSTANCE=0 VERBOSE=1 # Query ACE hardware (detailed output)
 ```
+
+## Moonraker `lane_data` Sync Architecture (Orca Filament Sync)
+
+### Purpose
+
+This feature publishes ACE slot metadata into Moonraker's database namespace
+(`lane_data`) so Orca can pull filament lane info using its Moonraker adapter.
+
+### Module Documentation
+
+- `extras/ace/moonraker_lane_sync.py`
+  - Implements `MoonrakerLaneSyncAdapter`.
+  - Builds lane payload from all ACE instances and writes Moonraker DB items.
+- `extras/ace/config.py`
+  - Adds `moonraker_lane_sync_*` settings.
+- `extras/ace/manager.py`
+  - Creates adapter once during manager init.
+  - Triggers sync on startup and whenever inventory persistence occurs.
+
+### Data Flow
+
+```
+ACE heartbeat/status response
+  -> AceInstance._status_update_callback()
+     -> inventory changed?
+        -> manager._sync_inventory_to_persistent(instance_num)
+           -> SAVE_VARIABLE (existing inventory persistence)
+           -> manager._sync_moonraker_lane_data(...)
+              -> MoonrakerLaneSyncAdapter.sync_now(...)
+                 -> GET existing namespace
+                 -> POST changed lane keys
+                 -> DELETE stale lane keys
+```
+
+Additionally, manager does a forced sync on `klippy:ready` to populate the
+initial `lane_data` snapshot.
+
+### Lane Mapping & Payload Rules
+
+- Lane index: `instance.tool_offset + local_slot`.
+- DB key: `lane{index+1}` (`lane1`, `lane2`, ...).
+- Required payload fields:
+  - `lane` (0-based string)
+  - `material`
+  - `color` (`#RRGGBB`)
+- Optional payload fields:
+  - `nozzle_temp`
+  - `bed_temp`
+  - `vendor` (RFID brand/manufacturer when present)
+  - `sku` (RFID SKU/part number)
+  - `spool_id`
+- Empty slots are still published with the same lane index and empty
+  `material`/`color`.
+- `spool_id` is derived from `sku` when it is a numeric value; non-numeric SKUs are still published for
+  slicer-side matching but won't become a `spool_id`.
+
+### Config (`[ace]`)
+
+```ini
+moonraker_lane_sync_enabled: True           # default on (set False to disable Moonraker writes)
+moonraker_lane_sync_url: http://127.0.0.1:7125
+moonraker_lane_sync_namespace: lane_data
+moonraker_lane_sync_api_key:                # optional
+moonraker_lane_sync_timeout: 2.0
+moonraker_lane_sync_unknown_material_mode: passthrough   # passthrough|empty|map
+moonraker_lane_sync_unknown_material_markers: ???,unknown,n/a,none
+moonraker_lane_sync_unknown_material_map_to: PLA         # used when mode=map
+```
+
+## Test & Debug (Moonraker DB)
+
+1. Ensure `moonraker_lane_sync_enabled: True` in `[ace]` (default), then restart after changes.
+2. Read namespace content:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" | jq .
+```
+
+Expected:
+- `.result.namespace` is `lane_data`
+- `.result.value` contains `lane1`, `lane2`, ... entries
+
+Check just the keys to spot stray entries:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" \
+| jq -r '.result.value | keys[]'
+```
+
+3. Human-readable lane summary:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" \
+| jq -r '.result.value | to_entries[] | "\(.key): T\(.value.lane) material=\(.value.material // "") color=\(.value.color // "") nozzle=\(.value.nozzle_temp // "-") bed=\(.value.bed_temp // "-")"'
+```
+
+4. Watch updates while changing slots (`ACE_SET_SLOT`, RFID updates, load/unload):
+
+```bash
+watch -n1 'curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" | jq ".result.value"'
+```
+
+5. If Moonraker requires API key:
+
+```bash
+curl -s -H "X-Api-Key: YOUR_KEY" \
+  "http://127.0.0.1:7125/server/database/item?namespace=lane_data" | jq .
+```
+
+6. Cleanup (stray/stale keys):
+
+- Delete a single key safely (handles spaces/quotes):
+
+```bash
+curl -s -X DELETE --get \
+  --data-urlencode "namespace=lane_data" \
+  --data-urlencode "key=lane7" \
+  http://127.0.0.1:7125/server/database/item
+```
+
+- Delete all keys in the namespace:
+
+```bash
+curl -s "http://127.0.0.1:7125/server/database/item?namespace=lane_data" \
+| jq -r '.result.value | keys[]' \
+| while IFS= read -r key; do
+    curl -s -X DELETE --get \
+      --data-urlencode "namespace=lane_data" \
+      --data-urlencode "key=${key}" \
+      http://127.0.0.1:7125/server/database/item >/dev/null
+  done
+```
+
+Troubleshooting:
+- If namespace is empty, verify `moonraker_lane_sync_enabled`.
+- Trigger inventory-changing events (`ACE_SET_SLOT`, slot status change) or do
+  `FIRMWARE_RESTART`.
+- Check Klipper logs for `Moonraker lane sync unavailable` warnings.

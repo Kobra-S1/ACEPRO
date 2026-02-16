@@ -502,3 +502,43 @@ class TestRfidTempModeConfig:
         result = read_ace_config(mock_config)
         
         assert result["rfid_temp_mode"] == "average"
+
+    def test_moonraker_unknown_material_mode_invalid_defaults_to_empty(self):
+        """Invalid moonraker unknown material mode should fall back safely."""
+        from extras.ace.config import read_ace_config
+
+        mock_config = MagicMock()
+        mock_config.getint = MagicMock(return_value=1)
+        mock_config.getfloat = MagicMock(return_value=1.0)
+        mock_config.getboolean = MagicMock(return_value=True)
+
+        def get_side_effect(key, default=""):
+            if key == "moonraker_lane_sync_unknown_material_mode":
+                return "bad_mode"
+            return default
+
+        mock_config.get = MagicMock(side_effect=get_side_effect)
+
+        result = read_ace_config(mock_config)
+        assert result["moonraker_lane_sync_unknown_material_mode"] == "empty"
+
+
+class TestMoonrakerLaneSyncConfigDefaults:
+    """Config defaults for Moonraker lane sync."""
+
+    def test_lane_sync_enabled_by_default(self):
+        """Lane sync should opt-in by default to feed Orca lane_data."""
+        from extras.ace.config import read_ace_config
+
+        mock_config = MagicMock()
+        mock_config.getint = MagicMock(return_value=1)
+        mock_config.getfloat = MagicMock(return_value=1.0)
+
+        def getboolean_side_effect(key, default=False):
+            return default
+
+        mock_config.getboolean = MagicMock(side_effect=getboolean_side_effect)
+        mock_config.get = MagicMock(side_effect=lambda key, default="": default)
+
+        result = read_ace_config(mock_config)
+        assert result["moonraker_lane_sync_enabled"] is True

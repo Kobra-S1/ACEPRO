@@ -1357,20 +1357,6 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     except Exception as e:
         gcode = printer.lookup_object("gcode")
 
-        set_and_save_variable(
-            printer,
-            gcode,
-            "ace_current_index",
-            tool_index
-        )
-
-        gcode.run_script_from_command(
-            f"SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE={tool_index}"
-        )
-
-        gcode.respond_info(f"ACE: Tool change to T{tool_index} FAILED: {e}")
-        gcode.respond_info(f"ACE: State updated - current tool marked as T{tool_index} (failed load)")
-
         print_stats = printer.lookup_object('print_stats', None)
         is_printing = False
 
@@ -1378,6 +1364,47 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             reactor = printer.get_reactor()
             stats = print_stats.get_status(reactor.monotonic())
             is_printing = stats.get('state') in ['printing', 'paused']
+
+        # Keep existing print/pause recovery behavior (set requested tool),
+        # but use smarter fallback while idle/startup.
+        fallback_tool = current_tool if 'current_tool' in locals() else get_variable("ace_current_index", -1)
+        filament_pos = None
+        try:
+            save_vars = printer.lookup_object("save_variables", None)
+            if save_vars is not None:
+                filament_pos = save_vars.allVariables.get("ace_filament_pos")
+        except Exception:
+            filament_pos = None
+
+        if is_printing:
+            active_tool = tool_index
+        else:
+            # If unload already completed, clear active tool in idle/startup mode.
+            active_tool = -1 if filament_pos == FILAMENT_STATE_BOWDEN else fallback_tool
+
+        set_and_save_variable(
+            printer,
+            gcode,
+            "ace_current_index",
+            active_tool
+        )
+
+        gcode.run_script_from_command(
+            f"SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE={active_tool}"
+        )
+
+        gcode.respond_info(f"ACE: Tool change to T{tool_index} FAILED: {e}")
+        if is_printing:
+            gcode.respond_info(
+                f"ACE: State updated - current tool marked as T{tool_index} (failed load, print recovery)"
+            )
+        else:
+            if active_tool == -1 and filament_pos == FILAMENT_STATE_BOWDEN:
+                gcode.respond_info("ACE: State updated - no active tool (idle/startup failure after unload)")
+            else:
+                gcode.respond_info(
+                    f"ACE: State preserved - current tool remains T{active_tool} (idle/startup failure)"
+                )
 
         # Check if this is a startup toolchange (G9111) vs regular print toolchange
         # During G9111: startup_toolchange=1 -> raise exception to abort macro
