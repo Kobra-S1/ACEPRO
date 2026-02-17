@@ -7,6 +7,7 @@ using the structure expected by OrcaSlicer's MoonrakerPrinterAgent.
 
 import json
 import logging
+import threading
 from urllib import error, parse, request
 
 from .config import SLOTS_PER_ACE
@@ -35,6 +36,56 @@ class MoonrakerLaneSyncAdapter:
         self._last_payload = None
         self._warned_unavailable = False
 
+        # Worker thread state
+        self._pending_sync = threading.Event()
+        self._pending_force = False
+        self._pending_reason = "manual"
+        self._shutdown = threading.Event()
+        self._lock = threading.Lock()
+
+        # Start persistent worker thread
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name="MoonrakerLaneSyncWorker",
+            daemon=True
+        )
+        self._worker_thread.start()
+
+    def shutdown(self):
+        """Signal worker thread to exit and wait for it to finish.
+        Gives the worker up to 3 seconds to complete any in-progress sync,
+        then forcefully terminates via daemon thread cleanup.
+        """
+        self._shutdown.set()
+        self._pending_sync.set()  # Wake up worker if waiting
+        if self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=3.0)
+            if self._worker_thread.is_alive():
+                logging.warning("ACE: Moonraker sync worker did not exit cleanly")
+
+    def _worker_loop(self):
+        """Background worker that processes sync requests."""
+        while not self._shutdown.is_set():
+            # Wait for sync request or shutdown (check every 1s for shutdown)
+            triggered = self._pending_sync.wait(timeout=1.0)
+            if self._shutdown.is_set():
+                break
+            if not triggered:
+                continue
+
+            # Grab pending request parameters
+            with self._lock:
+                self._pending_sync.clear()
+                force = self._pending_force
+                reason = self._pending_reason
+                self._pending_force = False
+                self._pending_reason = "manual"
+
+            # Perform the actual sync (blocking HTTP, but in background thread)
+            # Check shutdown flag one more time before expensive operation
+            if not self._shutdown.is_set():
+                self._do_sync(force=force, reason=reason)
+
     def _is_printing_or_paused(self):
         """Check if printer is in a printing or paused state.
 
@@ -58,11 +109,35 @@ class MoonrakerLaneSyncAdapter:
             return False
 
     def sync_now(self, force=False, reason="manual"):
-        """Push current lane payload to Moonraker DB.
+        """Queue a sync request to the background worker.
+
+        This method returns immediately without blocking. The actual HTTP
+        operations are performed by the worker thread.
+
+        Args:
+            force: If True, sync even during print and ignore debounce.
+            reason: Descriptive reason for logging.
+
+        Returns:
+            bool: True if request was queued, False if disabled.
         """
         if not self.enabled:
             return False
 
+        with self._lock:
+            # Force flag is sticky - if any request wants force, we force
+            self._pending_force = self._pending_force or force
+            self._pending_reason = reason
+            self._pending_sync.set()
+
+        return True
+
+    def _do_sync(self, force=False, reason="manual"):
+        """Perform the actual sync (called by worker thread).
+
+        This method does blocking HTTP I/O and should only be called
+        from the background worker thread.
+        """
         if not force and self._is_printing_or_paused():
             logging.debug("ACE: Skipping Moonraker lane sync during print (%s)", reason)
             return False
@@ -106,9 +181,12 @@ class MoonrakerLaneSyncAdapter:
         except Exception as e:
             if not self._warned_unavailable:
                 self._warned_unavailable = True
-                self.gcode.respond_info(
-                    f"ACE: Moonraker lane sync unavailable ({e})"
-                )
+                try:
+                    self.gcode.respond_info(
+                        f"ACE: Moonraker lane sync unavailable ({e})"
+                    )
+                except Exception:
+                    pass
             return False
 
         self._warned_unavailable = False

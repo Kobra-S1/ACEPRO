@@ -53,6 +53,94 @@ def make_adapter(instances, enabled=True, **overrides):
     return MoonrakerLaneSyncAdapter(gcode, manager, config), gcode
 
 
+def test_sync_now_queues_work_and_returns_immediately():
+    """Test that sync_now queues work to background thread without blocking."""
+    import time
+    instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
+    adapter, _ = make_adapter(instances, enabled=True)
+
+    sync_started = []
+    sync_completed = []
+
+    original_do_sync = adapter._do_sync
+
+    def slow_do_sync(force=False, reason="manual"):
+        sync_started.append(time.time())
+        time.sleep(0.05)  # Simulate slow HTTP
+        result = original_do_sync(force=force, reason=reason)
+        sync_completed.append(time.time())
+        return result
+
+    adapter._do_sync = slow_do_sync
+
+    # sync_now should return immediately
+    start = time.time()
+    result = adapter.sync_now(force=True, reason="test")
+    call_time = time.time() - start
+
+    assert result is True  # Request was queued
+    assert call_time < 0.01  # Should return nearly instantly
+
+    # Wait for worker to complete
+    time.sleep(0.15)
+    assert len(sync_completed) == 1  # Worker processed the request
+
+    # Cleanup
+    adapter.shutdown()
+
+
+def test_sync_now_disabled_returns_false_immediately():
+    """Test that sync_now returns False when disabled without queueing."""
+    instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
+    adapter, _ = make_adapter(instances, enabled=False)
+
+    result = adapter.sync_now(force=True, reason="test")
+    assert result is False
+
+    adapter.shutdown()
+
+
+def test_worker_thread_debounces_rapid_requests():
+    """Test that rapid sync requests are debounced by the worker."""
+    import time
+    instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
+    adapter, _ = make_adapter(instances, enabled=True)
+
+    call_count = []
+
+    def counting_do_sync(force=False, reason="manual"):
+        call_count.append(1)
+        time.sleep(0.02)  # Small delay to simulate work
+        return True
+
+    adapter._do_sync = counting_do_sync
+
+    # Queue multiple rapid requests
+    for _ in range(5):
+        adapter.sync_now(force=False, reason="rapid")
+
+    # Wait for worker to process
+    time.sleep(0.2)
+
+    # Due to debouncing, should have processed fewer than 5 requests
+    # (likely 1-2 since they're queued while worker is busy)
+    assert len(call_count) < 5
+
+    adapter.shutdown()
+
+
+def test_shutdown_stops_worker_thread():
+    """Test that shutdown() properly stops the worker thread."""
+    instances = [DummyInstance(0, [{"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0}] * 4)]
+    adapter, _ = make_adapter(instances, enabled=True)
+
+    assert adapter._worker_thread.is_alive()
+
+    adapter.shutdown()
+
+    assert not adapter._worker_thread.is_alive()
+
+
 def test_adapter_enabled_by_default_when_flag_missing():
     gcode = DummyGCode()
     manager = DummyManager([])
@@ -91,6 +179,7 @@ def test_build_lane_payload_maps_slots_to_global_lanes():
 
 
 def test_sync_now_deletes_stale_lane_keys_and_debounces_identical_payload(monkeypatch):
+    """Test _do_sync deletes stale keys and debounces identical payloads."""
     instances = [
         DummyInstance(
             0,
@@ -111,7 +200,8 @@ def test_sync_now_deletes_stale_lane_keys_and_debounces_identical_payload(monkey
     monkeypatch.setattr(adapter, "_set_item", lambda k, v: calls["set"].append((k, v)))
     monkeypatch.setattr(adapter, "_delete_item", lambda k: calls["delete"].append(k))
 
-    assert adapter.sync_now(force=False, reason="test_first") is True
+    # Test _do_sync directly (synchronous) since sync_now now queues async work
+    assert adapter._do_sync(force=False, reason="test_first") is True
     assert "lane99" in calls["delete"]
     # lane1 was unchanged, but lane2-lane4 should be posted
     posted_keys = {k for k, _ in calls["set"]}
@@ -119,25 +209,27 @@ def test_sync_now_deletes_stale_lane_keys_and_debounces_identical_payload(monkey
 
     calls["set"].clear()
     calls["delete"].clear()
-    assert adapter.sync_now(force=False, reason="test_second") is False
+    assert adapter._do_sync(force=False, reason="test_second") is False
     assert calls["set"] == []
     assert calls["delete"] == []
 
 
 def test_sync_now_warns_once_when_unavailable(monkeypatch):
+    """Test _do_sync warns once when Moonraker is unavailable."""
     instances = [DummyInstance(0, [{"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0}] * 4)]
     adapter, gcode = make_adapter(instances, enabled=True)
 
     monkeypatch.setattr(adapter, "_get_namespace_items", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
-    assert adapter.sync_now(force=True, reason="first") is False
-    assert adapter.sync_now(force=True, reason="second") is False
+    # Test _do_sync directly since sync_now now queues async work
+    assert adapter._do_sync(force=True, reason="first") is False
+    assert adapter._do_sync(force=True, reason="second") is False
 
     warnings = [m for m in gcode.messages if "Moonraker lane sync unavailable" in m]
     assert len(warnings) == 1
 
 
 def test_sync_now_skips_during_print_unless_forced(monkeypatch):
-    """Verify sync is skipped during print to avoid blocking motion queue."""
+    """Verify _do_sync is skipped during print to avoid blocking motion queue."""
     instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
     adapter, _ = make_adapter(instances, enabled=True)
 
@@ -145,7 +237,8 @@ def test_sync_now_skips_during_print_unless_forced(monkeypatch):
     monkeypatch.setattr(adapter, "_is_printing_or_paused", lambda: True)
 
     # Non-forced sync should be skipped during print
-    assert adapter.sync_now(force=False, reason="inventory_update") is False
+    # Test _do_sync directly since sync_now now queues async work
+    assert adapter._do_sync(force=False, reason="inventory_update") is False
 
     # Forced sync should still work (e.g., on klippy_ready)
     http_calls = []
@@ -160,12 +253,12 @@ def test_sync_now_skips_during_print_unless_forced(monkeypatch):
     monkeypatch.setattr(adapter, "_get_namespace_items", mock_get_namespace_items)
     monkeypatch.setattr(adapter, "_set_item", mock_set_item)
 
-    assert adapter.sync_now(force=True, reason="klippy_ready") is True
+    assert adapter._do_sync(force=True, reason="klippy_ready") is True
     assert "get" in http_calls  # HTTP calls were made despite print
 
 
 def test_sync_now_works_when_not_printing(monkeypatch):
-    """Verify sync proceeds normally when printer is idle."""
+    """Verify _do_sync proceeds normally when printer is idle."""
     instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
     adapter, _ = make_adapter(instances, enabled=True)
 
@@ -184,7 +277,8 @@ def test_sync_now_works_when_not_printing(monkeypatch):
     monkeypatch.setattr(adapter, "_get_namespace_items", mock_get_namespace_items)
     monkeypatch.setattr(adapter, "_set_item", mock_set_item)
 
-    assert adapter.sync_now(force=False, reason="inventory_update") is True
+    # Test _do_sync directly since sync_now now queues async work
+    assert adapter._do_sync(force=False, reason="inventory_update") is True
     assert "get" in http_calls
 
 
@@ -315,6 +409,7 @@ def test_build_lane_payload_skips_instances_with_invalid_tool_offset():
 
 
 def test_sync_now_cleans_invalid_lane_keys(monkeypatch):
+    """Test _do_sync cleans invalid lane keys."""
     adapter, gcode = make_adapter([], enabled=True)
     invalid_key = "lane<MagicMock name='AceInstance()"
     deletes = []
@@ -324,7 +419,8 @@ def test_sync_now_cleans_invalid_lane_keys(monkeypatch):
     monkeypatch.setattr(adapter, "_delete_item", lambda k: deletes.append(k))
 
     # With no lanes to publish, the only action should be deleting the bad key
-    assert adapter.sync_now(force=True, reason="clean_invalid") is True
+    # Test _do_sync directly since sync_now now queues async work
+    assert adapter._do_sync(force=True, reason="clean_invalid") is True
     assert invalid_key in deletes
     assert any("Removed invalid Moonraker lane keys" in msg for msg in gcode.messages)
 
