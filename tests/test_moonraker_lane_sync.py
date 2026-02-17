@@ -136,6 +136,58 @@ def test_sync_now_warns_once_when_unavailable(monkeypatch):
     assert len(warnings) == 1
 
 
+def test_sync_now_skips_during_print_unless_forced(monkeypatch):
+    """Verify sync is skipped during print to avoid blocking motion queue."""
+    instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
+    adapter, _ = make_adapter(instances, enabled=True)
+
+    # Mock _is_printing_or_paused to return True (printing)
+    monkeypatch.setattr(adapter, "_is_printing_or_paused", lambda: True)
+
+    # Non-forced sync should be skipped during print
+    assert adapter.sync_now(force=False, reason="inventory_update") is False
+
+    # Forced sync should still work (e.g., on klippy_ready)
+    http_calls = []
+
+    def mock_get_namespace_items():
+        http_calls.append("get")
+        return {}
+
+    def mock_set_item(key, value):
+        http_calls.append(("set", key))
+
+    monkeypatch.setattr(adapter, "_get_namespace_items", mock_get_namespace_items)
+    monkeypatch.setattr(adapter, "_set_item", mock_set_item)
+
+    assert adapter.sync_now(force=True, reason="klippy_ready") is True
+    assert "get" in http_calls  # HTTP calls were made despite print
+
+
+def test_sync_now_works_when_not_printing(monkeypatch):
+    """Verify sync proceeds normally when printer is idle."""
+    instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
+    adapter, _ = make_adapter(instances, enabled=True)
+
+    # Mock _is_printing_or_paused to return False (idle)
+    monkeypatch.setattr(adapter, "_is_printing_or_paused", lambda: False)
+
+    http_calls = []
+
+    def mock_get_namespace_items():
+        http_calls.append("get")
+        return {}
+
+    def mock_set_item(key, value):
+        http_calls.append(("set", key))
+
+    monkeypatch.setattr(adapter, "_get_namespace_items", mock_get_namespace_items)
+    monkeypatch.setattr(adapter, "_set_item", mock_set_item)
+
+    assert adapter.sync_now(force=False, reason="inventory_update") is True
+    assert "get" in http_calls
+
+
 def test_unknown_material_default_empty_clears_material_and_color():
     instances = [
         DummyInstance(

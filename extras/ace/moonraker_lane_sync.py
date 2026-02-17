@@ -35,9 +35,36 @@ class MoonrakerLaneSyncAdapter:
         self._last_payload = None
         self._warned_unavailable = False
 
+    def _is_printing_or_paused(self):
+        """Check if printer is in a printing or paused state.
+
+        Returns:
+            bool: True if printing or paused, False otherwise
+        """
+        try:
+            printer = getattr(self.manager, "printer", None)
+            if not printer:
+                return False
+            print_stats = printer.lookup_object("print_stats", None)
+            if not print_stats:
+                return False
+            reactor = getattr(self.manager, "reactor", None)
+            if not reactor:
+                return False
+            stats = print_stats.get_status(reactor.monotonic())
+            state = (stats.get("state") or "").lower()
+            return state in ["printing", "paused"]
+        except Exception:
+            return False
+
     def sync_now(self, force=False, reason="manual"):
-        """Push current lane payload to Moonraker DB."""
+        """Push current lane payload to Moonraker DB.
+        """
         if not self.enabled:
+            return False
+
+        if not force and self._is_printing_or_paused():
+            logging.debug("ACE: Skipping Moonraker lane sync during print (%s)", reason)
             return False
 
         lanes = self._build_lane_payload()
