@@ -1264,6 +1264,8 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
             gcmd.respond_info(
                 f"ACE: Feed assist disabled on all instances except ACE[{active_instance}] (T{tool_index})")
 
+        # Refresh Orca lane_data snapshot after print end even when keeping filament loaded
+        manager._sync_moonraker_lane_data(force=True, reason="print_end_skip_cut")
         return
 
     try:
@@ -1285,6 +1287,9 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
 
     except Exception as e:
         gcmd.respond_info(f"ACE: PRINT_END error: {e}")
+    finally:
+        # Always refresh Moonraker lane_data so Orca sees the latest inventory post-print.
+        manager._sync_moonraker_lane_data(force=True, reason="print_end")
 
 
 def cmd_ACE_SMART_LOAD(gcmd):

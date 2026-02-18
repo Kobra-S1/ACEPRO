@@ -8,6 +8,7 @@ using the structure expected by OrcaSlicer's MoonrakerPrinterAgent.
 import json
 import logging
 import threading
+import time
 from urllib import error, parse, request
 
 from .config import SLOTS_PER_ACE
@@ -42,6 +43,10 @@ class MoonrakerLaneSyncAdapter:
         self._pending_reason = "manual"
         self._shutdown = threading.Event()
         self._lock = threading.Lock()
+        self._post_print_retry_scheduled = False
+        self._post_print_retry_delay_s = float(
+            ace_config.get("moonraker_lane_sync_post_print_retry_delay", 2.0)
+        )
 
         # Start persistent worker thread
         self._worker_thread = threading.Thread(
@@ -52,16 +57,11 @@ class MoonrakerLaneSyncAdapter:
         self._worker_thread.start()
 
     def shutdown(self):
-        """Signal worker thread to exit and wait for it to finish.
-        Gives the worker up to 3 seconds to complete any in-progress sync,
-        then forcefully terminates via daemon thread cleanup.
-        """
+        """Signal worker thread to exit and wait for it to finish."""
         self._shutdown.set()
         self._pending_sync.set()  # Wake up worker if waiting
         if self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
-            if self._worker_thread.is_alive():
-                logging.warning("ACE: Moonraker sync worker did not exit cleanly")
 
     def _worker_loop(self):
         """Background worker that processes sync requests."""
@@ -82,9 +82,33 @@ class MoonrakerLaneSyncAdapter:
                 self._pending_reason = "manual"
 
             # Perform the actual sync (blocking HTTP, but in background thread)
-            # Check shutdown flag one more time before expensive operation
-            if not self._shutdown.is_set():
-                self._do_sync(force=force, reason=reason)
+            self._do_sync(force=force, reason=reason)
+
+    def _schedule_post_print_retry(self, reason):
+        """Schedule a deferred sync once printing/paused state clears."""
+        with self._lock:
+            if self._shutdown.is_set() or self._post_print_retry_scheduled:
+                return
+            self._post_print_retry_scheduled = True
+
+        def _wait_for_idle():
+            try:
+                while not self._shutdown.is_set():
+                    if not self._is_printing_or_paused():
+                        with self._lock:
+                            self._pending_reason = f"{reason}_post_print"
+                            self._pending_sync.set()
+                        break
+                    time.sleep(self._post_print_retry_delay_s)
+            finally:
+                with self._lock:
+                    self._post_print_retry_scheduled = False
+
+        threading.Thread(
+            target=_wait_for_idle,
+            name="MoonrakerLaneSyncPostPrintRetry",
+            daemon=True,
+        ).start()
 
     def _is_printing_or_paused(self):
         """Check if printer is in a printing or paused state.
@@ -140,6 +164,7 @@ class MoonrakerLaneSyncAdapter:
         """
         if not force and self._is_printing_or_paused():
             logging.debug("ACE: Skipping Moonraker lane sync during print (%s)", reason)
+            self._schedule_post_print_retry(reason)
             return False
 
         lanes = self._build_lane_payload()

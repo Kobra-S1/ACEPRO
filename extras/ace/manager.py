@@ -305,15 +305,17 @@ class AceManager:
         """Called on Klipper shutdown. Stops monitoring and disconnects all ACE instances."""
         self.gcode.respond_info("ACE: Disconnecting")
 
-        # Shutdown Moonraker sync worker thread first
-        if hasattr(self, '_moonraker_lane_sync') and self._moonraker_lane_sync:
-            self._moonraker_lane_sync.shutdown()
-
         for instance in self.instances:
             instance.serial_mgr.disconnect()
 
         self._stop_monitoring()
         self._restore_sensors()
+        adapter = getattr(self, "_moonraker_lane_sync", None)
+        if adapter:
+            try:
+                adapter.shutdown()
+            except Exception as e:
+                logging.warning("ACE: Moonraker lane sync shutdown failed: %s", e)
 
     def _setup_sensors(self):
         """

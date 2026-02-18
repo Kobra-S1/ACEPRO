@@ -257,6 +257,36 @@ def test_sync_now_skips_during_print_unless_forced(monkeypatch):
     assert "get" in http_calls  # HTTP calls were made despite print
 
 
+def test_sync_request_retries_after_print_completes(monkeypatch):
+    """Ensure deferred sync runs once printer leaves printing/paused state."""
+    import time
+
+    instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [1, 2, 3], "temp": 200}] * 4)]
+    adapter, _ = make_adapter(instances, enabled=True)
+    adapter._post_print_retry_delay_s = 0.02  # speed up test polling
+
+    state = {"printing": True}
+    monkeypatch.setattr(adapter, "_is_printing_or_paused", lambda: state["printing"])
+
+    calls = []
+    monkeypatch.setattr(adapter, "_get_namespace_items", lambda: {})
+    monkeypatch.setattr(adapter, "_set_item", lambda k, v: calls.append(k))
+    monkeypatch.setattr(adapter, "_delete_item", lambda k: None)
+
+    adapter.sync_now(force=False, reason="during_print")
+    time.sleep(0.05)
+    assert calls == []  # still printing, so sync deferred
+
+    state["printing"] = False
+    # Allow deferred worker to run (worker wait loop uses a 1s timeout)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not calls:
+        time.sleep(0.02)
+    assert calls  # sync completed after print finished
+
+    adapter.shutdown()
+
+
 def test_sync_now_works_when_not_printing(monkeypatch):
     """Verify _do_sync proceeds normally when printer is idle."""
     instances = [DummyInstance(0, [{"status": "ready", "material": "PLA", "color": [255, 0, 0], "temp": 210}] * 4)]
