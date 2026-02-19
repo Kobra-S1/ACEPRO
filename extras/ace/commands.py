@@ -23,7 +23,6 @@ from .config import (
     get_instance_from_tool,
     get_local_slot,
     OVERRIDABLE_PARAMS,
-    set_and_save_variable,
 )
 
 
@@ -1079,28 +1078,16 @@ def cmd_ACE_QUERY_SLOTS(gcmd):
 
 def cmd_ACE_ENABLE_ENDLESS_SPOOL(gcmd):
     """Enable endless spool (automatic material matching on runout)."""
-    printer = get_printer()
-    save_vars = printer.lookup_object("save_variables")
-
-    variables = save_vars.allVariables
-    variables["ace_endless_spool_enabled"] = True
-
-    gcode = printer.lookup_object("gcode")
-    gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=ace_endless_spool_enabled VALUE=True")
+    manager = ace_get_manager(0)
+    manager.state.set_and_save("ace_endless_spool_enabled", True)
 
     logging.info("ACE: Endless spool ENABLED (persisted)")
 
 
 def cmd_ACE_DISABLE_ENDLESS_SPOOL(gcmd):
     """Disable endless spool (stop automatic material matching on runout)."""
-    printer = get_printer()
-    save_vars = printer.lookup_object("save_variables")
-
-    variables = save_vars.allVariables
-    variables["ace_endless_spool_enabled"] = False
-
-    gcode = printer.lookup_object("gcode")
-    gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=ace_endless_spool_enabled VALUE=False")
+    manager = ace_get_manager(0)
+    manager.state.set_and_save("ace_endless_spool_enabled", False)
 
     logging.info("ACE: Endless spool DISABLED (persisted)")
 
@@ -1122,8 +1109,9 @@ def cmd_ACE_RESET_PERSISTENT_INVENTORY(gcmd):
         for inst_num in sorted(ACE_INSTANCES.keys()):
             ace = ACE_INSTANCES[inst_num]
             ace.reset_persistent_inventory()
-            manager._sync_inventory_to_persistent(inst_num)
+            manager._sync_inventory_to_persistent(inst_num, flush=False)
             gcmd.respond_info(f"ACE[{inst_num}]: Inventory reset to empty")
+        manager.state.flush()
         gcmd.respond_info(f"All {len(ACE_INSTANCES)} ACE instances reset")
 
 
@@ -1134,8 +1122,8 @@ def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
         ace.reset_feed_assist_state()
 
     manager = ace_get_manager()
-    manager.set_and_save_variable("ace_current_index", -1)
-    manager.set_and_save_variable("ace_filament_pos", "unknown")
+    manager.state.set("ace_current_index", -1)
+    manager.state.set_and_save("ace_filament_pos", "unknown")
 
     manager.gcode.run_script_from_command(
         "SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1"
@@ -1146,21 +1134,16 @@ def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
 
 def cmd_ACE_GET_CURRENT_INDEX(gcmd):
     """Query currently loaded tool index from persistent storage (returns -1 if no tool loaded)."""
-    printer = get_printer()
-    save_vars = printer.lookup_object("save_variables")
-    variables = save_vars.allVariables
-
-    current_index = variables.get("ace_current_index", -1)
+    manager = ace_get_manager(0)
+    current_index = manager.state.get("ace_current_index", -1)
     gcmd.respond_info(f"Current tool index: {current_index}")
 
 
 def cmd_ACE_ENDLESS_SPOOL_STATUS(gcmd):
     """Show endless spool status (enabled/disabled and scope across all instances)."""
     try:
-        printer = get_printer()
-        save_vars = printer.lookup_object("save_variables")
-        variables = save_vars.allVariables
-        endless_spool_enabled = variables.get("ace_endless_spool_enabled", False)
+        manager = ace_get_manager(0)
+        endless_spool_enabled = manager.state.get("ace_endless_spool_enabled", False)
 
         gcmd.respond_info("=== ACE Endless Spool Status ===")
         gcmd.respond_info(f"Endless spool enabled: {endless_spool_enabled}")
@@ -1191,31 +1174,6 @@ def cmd_ACE_DEBUG(gcmd):
     ace.send_request(request, callback)
 
 
-def get_vars():
-    """Helper to get save variables dictionary."""
-    printer = get_printer()
-    save_vars = printer.lookup_object("save_variables")
-    return save_vars.allVariables
-
-
-def get_variable(varname, default=None):
-    """
-    Get a variable from save_variables (fetched fresh, not cached).
-
-    Always retrieves latest value from persistent storage.
-
-    Args:
-        varname: Variable name to retrieve
-        default: Default value if variable doesn't exist
-
-    Returns:
-        Variable value or default
-    """
-    printer = get_printer()
-    save_vars = printer.lookup_object("save_variables")
-    return save_vars.allVariables.get(varname, default)
-
-
 def cmd_ACE_SMART_UNLOAD(gcmd):
     """Unload with sensor-aware fallback strategy. [TOOL=] - omit for current tool."""
     manager = ace_get_manager(0)
@@ -1225,7 +1183,7 @@ def cmd_ACE_SMART_UNLOAD(gcmd):
 
     tool_index = gcmd.get_int("TOOL", -1)
     if tool_index < 0:
-        tool_index = get_variable("ace_current_index", -1)
+        tool_index = manager.state.get("ace_current_index", -1)
 
     gcmd.respond_info(f"ACE: Smart unload tool {tool_index}")
 
@@ -1233,7 +1191,7 @@ def cmd_ACE_SMART_UNLOAD(gcmd):
         success = manager.smart_unload(tool_index)
         if success:
             gcmd.respond_info("ACE: Smart unload succeeded")
-            manager.set_and_save_variable("ace_current_index", -1)
+            manager.state.set_and_save("ace_current_index", -1)
         else:
             gcmd.respond_info("ACE: Smart unload failed - path blocked")
     except Exception as e:
@@ -1256,7 +1214,7 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
         gcmd.respond_info("ACE: Print end - skipping unload (CUT_TIP=0), tool remains loaded")
 
         # Disable feed assist on all instances except the one with the loaded tool
-        tool_index = get_variable("ace_current_index", -1)
+        tool_index = manager.state.get("ace_current_index", -1)
         if tool_index >= 0:
             active_instance = get_instance_from_tool(tool_index)
             for_each_instance(lambda inst_num, mgr, instance:
@@ -1266,10 +1224,12 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
 
         # Refresh Orca lane_data snapshot after print end even when keeping filament loaded
         manager._sync_moonraker_lane_data(force=True, reason="print_end_skip_cut")
+        # Flush deferred state to disk
+        manager.state.flush()
         return
 
     try:
-        tool_index = get_variable("ace_current_index", -1)
+        tool_index = manager.state.get("ace_current_index", -1)
 
         if tool_index < 0:
             gcmd.respond_info("ACE: No active tool for print end")
@@ -1280,7 +1240,7 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
         success = manager.smart_unload(tool_index, prepare_toolhead=True)
         if success:
             gcmd.respond_info(f"ACE: Tool T{tool_index} successfully unloaded")
-            manager.set_and_save_variable("ace_current_index", -1)
+            manager.state.set("ace_current_index", -1)
             for_each_instance(lambda inst_num, mgr, instance: instance.reset_feed_assist_state())
         else:
             gcmd.respond_info(f"ACE: WARNING - Tool T{tool_index} unload may have failed")
@@ -1288,6 +1248,11 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
     except Exception as e:
         gcmd.respond_info(f"ACE: PRINT_END error: {e}")
     finally:
+        # Flush all deferred state changes to disk now that the print is over.
+        try:
+            manager.state.flush()
+        except Exception:
+            logging.exception("ACE: Failed to flush state at print end")
         # Always refresh Moonraker lane_data so Orca sees the latest inventory post-print.
         manager._sync_moonraker_lane_data(force=True, reason="print_end")
 
@@ -1320,13 +1285,13 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     printer = get_printer()
 
     if tool_index == -1:
-        current_tool = get_variable("ace_current_index", -1)
+        current_tool = manager.state.get("ace_current_index", -1)
 
         try:
             success = manager.smart_unload(current_tool)
             if success:
                 # gcmd.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
-                manager.set_and_save_variable("ace_current_index", -1)
+                manager.state.set("ace_current_index", -1)
             else:
                 gcmd.respond_info(f"ACE: Smart unload of tool {current_tool} failed")
         except Exception as e:
@@ -1352,7 +1317,7 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         gcode.respond_info(f"ACE: Warning - could not verify homing: {e}")
 
     try:
-        current_tool = get_variable("ace_current_index", -1)
+        current_tool = manager.state.get("ace_current_index", -1)
 
         status = manager.perform_tool_change(current_tool, tool_index)
         printer.lookup_object("gcode").respond_info(f"ACE: perform_tool_change result status: {status}")
@@ -1372,12 +1337,10 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
         # Keep existing print/pause recovery behavior (set requested tool),
         # but use smarter fallback while idle/startup.
-        fallback_tool = current_tool if 'current_tool' in locals() else get_variable("ace_current_index", -1)
+        fallback_tool = current_tool if 'current_tool' in locals() else manager.state.get("ace_current_index", -1)
         filament_pos = None
         try:
-            save_vars = printer.lookup_object("save_variables", None)
-            if save_vars is not None:
-                filament_pos = save_vars.allVariables.get("ace_filament_pos")
+            filament_pos = manager.state.get("ace_filament_pos")
         except Exception:
             filament_pos = None
 
@@ -1387,9 +1350,7 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             # If unload already completed, clear active tool in idle/startup mode.
             active_tool = -1 if filament_pos == FILAMENT_STATE_BOWDEN else fallback_tool
 
-        set_and_save_variable(
-            printer,
-            gcode,
+        manager.state.set(
             "ace_current_index",
             active_tool
         )
@@ -1756,7 +1717,9 @@ def cmd_ACE_SET_ENDLESS_SPOOL_MODE(gcmd):
             return
 
         manager = ace_get_manager(0)
-        manager.set_and_save_variable("ace_endless_spool_match_mode", mode)
+        manager.state.set_and_save(
+            "ace_endless_spool_match_mode", mode
+        )
         gcmd.respond_info(f"ACE: Endless spool mode set to: {valid_modes[mode]}")
 
     except Exception as e:
@@ -1766,9 +1729,8 @@ def cmd_ACE_SET_ENDLESS_SPOOL_MODE(gcmd):
 def cmd_ACE_GET_ENDLESS_SPOOL_MODE(gcmd):
     """Query endless spool match mode (EXACT, MATERIAL, or NEXT READY)."""
     try:
-        printer = get_printer()
-        save_vars = printer.lookup_object("save_variables")
-        mode = save_vars.allVariables.get("ace_endless_spool_match_mode", "exact")
+        manager = ace_get_manager(0)
+        mode = manager.state.get("ace_endless_spool_match_mode", "exact")
         mode_display = {"exact": "EXACT", "material": "MATERIAL", "next": "NEXT READY"}.get(mode, "EXACT")
 
         gcmd.respond_info(f"ACE: Endless spool mode: {mode_display}")
@@ -1797,9 +1759,8 @@ def cmd_ACE_FULL_UNLOAD(gcmd):
 
         if tool_param and str(tool_param).upper() == "ALL":
             # Get current state
-            save_vars = manager.printer.lookup_object("save_variables")
-            current_tool_index = save_vars.allVariables.get("ace_current_index", -1)
-            filament_pos = save_vars.allVariables.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+            current_tool_index = manager.state.get("ace_current_index", -1)
+            filament_pos = manager.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
             # Full unload all non-empty slots across all instances
             gcmd.respond_info("ACE: Full unload ALL - processing all non-empty slots")
@@ -1875,16 +1836,16 @@ def cmd_ACE_FULL_UNLOAD(gcmd):
 
             # Clear current tool index if all successful
             if success_count == total_slots and total_slots > 0:
-                set_and_save_variable(manager.printer, manager.gcode, "ace_current_index", -1)
+                manager.state.set("ace_current_index", -1)
                 gcmd.respond_info("\nACE: All slots fully unloaded - current tool cleared")
 
+            manager.state.flush()
             return
 
         tool = gcmd.get_int('TOOL', -1)
 
         if tool < 0:
-            save_vars = manager.printer.lookup_object("save_variables")
-            tool = save_vars.allVariables.get("ace_current_index", -1)
+            tool = manager.state.get("ace_current_index", -1)
 
         if tool < 0:
             raise gcmd.error("No tool specified and no current tool set. Use TOOL=<index> or TOOL=ALL")
@@ -1892,7 +1853,7 @@ def cmd_ACE_FULL_UNLOAD(gcmd):
         success = manager.full_unload_slot(tool)
 
         if success:
-            set_and_save_variable(manager.printer, manager.gcode, "ace_current_index", -1)
+            manager.state.set_and_save("ace_current_index", -1)
             gcmd.respond_info(f"ACE: Tool {tool} fully unloaded")
         else:
             gcmd.respond_info(f"ACE: Tool {tool} full unload failed or incomplete")
@@ -2079,6 +2040,16 @@ def cmd_ACE_SHOW_INSTANCE_CONFIG(gcmd):
         gcmd.respond_info(f"ACE_SHOW_INSTANCE_CONFIG error: {e}")
 
 
+def cmd_ACE_FLUSH(gcmd):
+    """Persist any pending variable changes to disk immediately."""
+    manager = ace_get_manager(0)
+    if manager.state.has_pending:
+        manager.state.flush()
+        gcmd.respond_info("ACE: Pending state flushed to disk")
+    else:
+        gcmd.respond_info("ACE: No pending state to flush")
+
+
 ACE_COMMANDS = [
     ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. INSTANCE= or TOOL=, VERBOSE=1 for detailed output"),
     ("ACE_GET_CONNECTION_STATUS", cmd_ACE_GET_CONNECTION_STATUS,
@@ -2127,6 +2098,8 @@ ACE_COMMANDS = [
      "Full unload until slot empty. TOOL=<index> or TOOL=ALL or [no TOOL=current]"),
     ("ACE_SHOW_INSTANCE_CONFIG", cmd_ACE_SHOW_INSTANCE_CONFIG,
      "Show resolved config for ACE instance(s). [INSTANCE=<num>]"),
+    ("ACE_FLUSH", cmd_ACE_FLUSH,
+     "Persist any pending variable changes to disk immediately"),
 ]
 
 

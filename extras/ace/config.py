@@ -304,51 +304,6 @@ def create_status_dict(slot_count=SLOTS_PER_ACE):
     }
 
 
-def set_and_save_variable(printer, gcode, varname, value):
-    """
-    Set and persist a save_variable to Klipper's save_variables.
-
-    Converts Python types to Klipper-compatible format:
-    - Booleans: True/False (uppercase, Python literals)
-    - Strings: Wrapped in single quotes + double quotes for proper escaping
-    - Dicts/Lists: JSON serialized
-    - Numbers: String representation
-
-    Args:
-        printer: Klipper printer object
-        gcode: Klipper gcode object
-        varname: Variable name (string)
-        value: Value to save (any JSON-serializable type)
-    """
-    import json
-
-    save_vars = printer.lookup_object("save_variables")
-    variables = save_vars.allVariables
-
-    variables[varname] = value
-
-    if isinstance(value, bool):
-        formatted_value = "True" if value else "False"
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE={formatted_value}"
-        )
-    elif isinstance(value, str):
-        # Match working manager.py version: wrap in single quotes + double quotes
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE='\"{value}\"'"
-        )
-    elif isinstance(value, (dict, list)):
-        # Dicts/Lists: JSON serialized
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE={json.dumps(value)}"
-        )
-    else:
-        # Numbers and other types
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE={value}"
-        )
-
-
 def parse_instance_config(config_value, instance_num, param_name):
     """
     Parse config value that may contain per-instance overrides.

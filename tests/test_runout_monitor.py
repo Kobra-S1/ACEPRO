@@ -19,6 +19,8 @@ class TestRunoutMonitorInitialization:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         self.monitor = RunoutMonitor(
@@ -69,6 +71,8 @@ class TestStartStopMonitoring:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         self.monitor = RunoutMonitor(
@@ -134,6 +138,8 @@ class TestSetDetectionActive:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         self.monitor = RunoutMonitor(
@@ -191,6 +197,8 @@ class TestToolchangeGuard:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         
         # Mock print_stats
         self.print_stats = Mock()
@@ -262,6 +270,8 @@ class TestPrintStateTracking:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=False)
         
@@ -344,6 +354,8 @@ class TestBaselineInitialization:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats - printing with active tool
@@ -420,6 +432,8 @@ class TestPrintStartDetection:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -498,6 +512,8 @@ class TestPrintStopDetection:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -571,6 +587,8 @@ class TestRunoutDetection:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats - printing with active tool
@@ -687,6 +705,8 @@ class TestRunoutSuppression:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats
@@ -761,6 +781,8 @@ class TestRunoutHandling:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats
@@ -900,6 +922,8 @@ class TestNoActiveToolHandling:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=False)
         
@@ -956,6 +980,8 @@ class TestPausedStateHandling:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -1012,6 +1038,8 @@ class TestMonitorReturnInterval:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -1085,6 +1113,8 @@ class TestToolchangeRunoutInteraction:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats - printing state
@@ -1261,6 +1291,8 @@ class TestMonitorErrorHandling:
         self.reactor.NEVER = float('inf')
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.print_stats = Mock()
         self.save_vars = Mock()
         
@@ -1363,6 +1395,8 @@ class TestAutoRecoveryLogic:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.print_stats = Mock()
         self.save_vars = Mock()
         
@@ -1431,6 +1465,8 @@ class TestRunoutHandlingEdgeCases:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.print_stats = Mock()
         self.save_vars = Mock()
         
@@ -1534,6 +1570,8 @@ class TestMonitorRunoutEdgeCases:
         self.reactor.NEVER = 999
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.runout_handling_in_progress = False
         self.manager.get_switch_state = Mock(return_value=sensor_state)
@@ -1726,6 +1764,8 @@ class TestRunoutDebounce:
         endless_spool = Mock()
         manager = Mock()
         manager.toolchange_in_progress = False
+        manager.state = Mock()
+        manager.state.get = lambda key, default=None: save_vars.allVariables.get(key, default)
 
         print_stats = Mock()
         print_stats.get_status = Mock(return_value={

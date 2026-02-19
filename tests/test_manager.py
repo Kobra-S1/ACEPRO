@@ -258,16 +258,14 @@ class TestGlobalEnableDisable(unittest.TestCase):
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
-    @patch('ace.manager.set_and_save_variable')
-    def test_set_ace_global_enabled(self, mock_set_var, mock_endless_spool, mock_ace_instance):
+    def test_set_ace_global_enabled(self, mock_endless_spool, mock_ace_instance):
         """Test setting global enabled state."""
         manager = AceManager(self.mock_config)
+        manager.state.set_and_save = Mock()
         
         manager.set_ace_global_enabled(False)
         
-        mock_set_var.assert_called_with(
-            self.mock_printer,
-            self.mock_gcode,
+        manager.state.set_and_save.assert_called_with(
             'ace_global_enabled',
             False
         )
@@ -2452,10 +2450,10 @@ class TestSmartUnload(unittest.TestCase):
              patch('ace.manager.RunoutMonitor'):
             return AceManager(self.mock_config, dummy_ace_count=1)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_known_tool_sensor_clear_success(self, mock_set_and_save):
+    def test_known_tool_sensor_clear_success(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         # Reset inventory to ready after manager init overwrote it
         for slot in manager.instances[0].inventory:
             slot["status"] = "ready"
@@ -2467,24 +2465,24 @@ class TestSmartUnload(unittest.TestCase):
 
         self.assertTrue(result)
         instance._smart_unload_slot.assert_called_once()
-        mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_known_tool_empty_slot_raises(self, mock_set_and_save):
+    def test_known_tool_empty_slot_raises(self):
         instance = self._make_instance()
         instance.inventory[1]["status"] = "empty"
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         manager.get_switch_state = Mock(return_value=False)
 
         with self.assertRaises(Exception):
             manager.smart_unload(tool_index=1, prepare_toolhead=False)
 
-        mock_set_and_save.assert_not_called()
+        manager.state.set.assert_not_called()
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_known_tool_sensor_triggered_path(self, mock_set_and_save):
+    def test_known_tool_sensor_triggered_path(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         for slot in manager.instances[0].inventory:
             slot["status"] = "ready"
         manager.prepare_toolhead_for_filament_retraction = Mock()
@@ -2497,7 +2495,7 @@ class TestSmartUnload(unittest.TestCase):
 
         self.assertTrue(result)
         instance._smart_unload_slot.assert_called_once()
-        mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
     def test_known_tool_invalid_instance_raises(self):
         instance = self._make_instance()
@@ -2507,10 +2505,10 @@ class TestSmartUnload(unittest.TestCase):
         with self.assertRaises(Exception):
             manager.smart_unload(tool_index=20, prepare_toolhead=False)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_unknown_tool_sensor_triggered_cycles(self, mock_set_and_save):
+    def test_unknown_tool_sensor_triggered_cycles(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         self.variables["ace_current_index"] = -1
         manager.get_switch_state = Mock(side_effect=[True, False])  # toolhead triggered
         manager.has_rdm_sensor = Mock(return_value=False)
@@ -2521,12 +2519,12 @@ class TestSmartUnload(unittest.TestCase):
 
         self.assertTrue(result)
         manager._identify_and_unload_by_cycling.assert_called_once()
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_unknown_tool_sensors_clear_no_current_tool(self, mock_set_and_save):
+    def test_unknown_tool_sensors_clear_no_current_tool(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         self.variables["ace_current_index"] = -1
         manager.get_switch_state = Mock(return_value=False)
         manager.has_rdm_sensor = Mock(return_value=False)
@@ -2534,12 +2532,12 @@ class TestSmartUnload(unittest.TestCase):
         result = manager.smart_unload(tool_index=-1, prepare_toolhead=False)
 
         self.assertTrue(result)
-        mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_unknown_tool_sensors_clear_with_current_tool(self, mock_set_and_save):
+    def test_unknown_tool_sensors_clear_with_current_tool(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         self.variables["ace_current_index"] = 0
         manager.get_switch_state = Mock(return_value=False)
         manager.has_rdm_sensor = Mock(return_value=False)
@@ -2547,13 +2545,13 @@ class TestSmartUnload(unittest.TestCase):
         result = manager.smart_unload(tool_index=-1, prepare_toolhead=False)
 
         self.assertTrue(result)
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_current_index", -1)
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_any_call("ace_current_index", -1)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_unknown_tool_invalid_state_raises(self, mock_set_and_save):
+    def test_unknown_tool_invalid_state_raises(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         self.variables["ace_current_index"] = -1
         manager.get_switch_state = Mock(return_value=False)
         manager.has_rdm_sensor = Mock(return_value=False)
@@ -2668,6 +2666,8 @@ class TestUpdateAceSupportActiveState(unittest.TestCase):
         varname = "ace_inventory_0"
         self.assertIn(varname, save_vars.allVariables)
         self.assertEqual(save_vars.allVariables[varname], self.instance.inventory)
+        # flush=True (default) uses set_and_save() for immediate disk write
+        self.assertFalse(self.manager.state.has_pending)
         self.manager.gcode.run_script_from_command.assert_called_once()
 
     def test_sync_inventory_all_instances(self):
@@ -2685,7 +2685,48 @@ class TestUpdateAceSupportActiveState(unittest.TestCase):
         self.assertIn("ace_inventory_0", save_vars.allVariables)
         self.assertIn("ace_inventory_1", save_vars.allVariables)
         self.assertEqual(save_vars.allVariables["ace_inventory_1"], second.inventory)
+        # flush=True (default) uses set_and_save() for immediate disk write
+        self.assertFalse(self.manager.state.has_pending)
         self.assertGreaterEqual(self.manager.gcode.run_script_from_command.call_count, 2)
+
+    def test_flush_if_idle_flushes_when_not_printing(self):
+        """Dirty state is flushed by _flush_if_idle when printer is idle."""
+        self.manager.state.set("ace_current_index", 3)
+        self.assertTrue(self.manager.state.has_pending)
+
+        # print_stats returns 'standby' → idle
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "standby"}
+        self.mock_printer.lookup_object.side_effect = lambda name, default=None: (
+            mock_print_stats if name == "print_stats" else
+            self.mock_printer.lookup_object.return_value
+        )
+
+        self.manager._flush_if_idle(0.0)
+        self.assertFalse(self.manager.state.has_pending)
+
+    def test_flush_if_idle_skips_when_printing(self):
+        """Dirty state is NOT flushed by _flush_if_idle during a print."""
+        self.manager.state.set("ace_current_index", 3)
+        self.assertTrue(self.manager.state.has_pending)
+
+        # print_stats returns 'printing'
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "printing"}
+        self.mock_printer.lookup_object.side_effect = lambda name, default=None: (
+            mock_print_stats if name == "print_stats" else
+            self.mock_printer.lookup_object.return_value
+        )
+
+        self.manager._flush_if_idle(0.0)
+        self.assertTrue(self.manager.state.has_pending)
+
+    def test_flush_if_idle_noop_when_clean(self):
+        """_flush_if_idle does nothing when there are no dirty vars."""
+        self.assertFalse(self.manager.state.has_pending)
+        self.manager.gcode.run_script_from_command = Mock()
+        self.manager._flush_if_idle(0.0)
+        self.manager.gcode.run_script_from_command.assert_not_called()
 
 
 class TestIdentifyAndUnloadByCycling(unittest.TestCase):
@@ -2758,10 +2799,10 @@ class TestIdentifyAndUnloadByCycling(unittest.TestCase):
         inst.feed_speed = 100
         return inst
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_path_clear_returns_true(self, mock_set_and_save):
+    def test_path_clear_returns_true(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         manager.get_switch_state = Mock(return_value=False)
         manager.has_rdm_sensor = Mock(return_value=True)
 
@@ -2775,7 +2816,7 @@ class TestIdentifyAndUnloadByCycling(unittest.TestCase):
         )
 
         self.assertTrue(result)
-        mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
     def test_toolhead_triggered_uses_extruder_path(self):
         instance = self._make_instance()
@@ -3123,10 +3164,10 @@ class TestSmartLoad(unittest.TestCase):
         self.assertFalse(result)
         instance._feed_filament_to_verification_sensor.assert_not_called()
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_rdm_successful_load_updates_positions(self, mock_set_and_save):
+    def test_rdm_successful_load_updates_positions(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         # Only slot 0 has filament
         manager.instances[0].inventory = [
             {"status": "ready"},
@@ -3145,15 +3186,15 @@ class TestSmartLoad(unittest.TestCase):
             0, SENSOR_RDM, instance.toolchange_load_length
         )
         instance._retract.assert_called_once_with(0, length=instance.parkposition_to_rdm_length, speed=instance.retract_speed)
-        # Positions updated to splitter during loop and bowden at end
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER)
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_current_index", -1)
+        # Positions updated: splitter via set() during loop, bowden via set() at end, index via set()
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_SPLITTER)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_any_call("ace_current_index", -1)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_sensor_not_triggered_safety_retract(self, mock_set_and_save):
+    def test_sensor_not_triggered_safety_retract(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         manager.instances[0].inventory = [
             {"status": "ready"},
             {"status": "empty"},
@@ -3169,13 +3210,13 @@ class TestSmartLoad(unittest.TestCase):
         self.assertFalse(result)
         instance._stop_feed.assert_called_once_with(0)
         instance._retract.assert_called_once_with(0, length=instance.parkposition_to_toolhead_length, speed=instance.retract_speed)
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_exception_during_feed_returns_false(self, mock_set_and_save):
+    def test_exception_during_feed_returns_false(self):
         instance = self._make_instance()
         instance._feed_filament_to_verification_sensor.side_effect = RuntimeError("fail")
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         manager.has_rdm_sensor = Mock(return_value=False)
         manager.get_switch_state = Mock(return_value=True)
         manager.is_filament_path_free = Mock(return_value=True)
@@ -3183,12 +3224,12 @@ class TestSmartLoad(unittest.TestCase):
         result = manager.smart_load()
 
         self.assertFalse(result)
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_toolhead_success_sets_positions(self, mock_set_and_save):
+    def test_toolhead_success_sets_positions(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         manager.instances[0].inventory = [
             {"status": "ready"},
             {"status": "empty"},
@@ -3202,15 +3243,16 @@ class TestSmartLoad(unittest.TestCase):
         result = manager.smart_load()
 
         self.assertTrue(result)
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
-        mock_set_and_save.assert_any_call(self.mock_printer, self.mock_gcode, "ace_current_index", -1)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_any_call("ace_current_index", -1)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_toolhead_path_never_sets_splitter_state(self, mock_set_and_save):
+    def test_toolhead_path_never_sets_splitter_state(self):
         """Non-RDM setups must not write FILAMENT_STATE_SPLITTER."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        manager.state.set_and_save = Mock()
         manager.instances[0].inventory = [
             {"status": "ready"},
             {"status": "empty"},
@@ -3224,8 +3266,12 @@ class TestSmartLoad(unittest.TestCase):
         result = manager.smart_load()
 
         self.assertTrue(result)
+        all_state_calls = (
+            list(manager.state.set.call_args_list)
+            + list(manager.state.set_and_save.call_args_list)
+        )
         self.assertTrue(
-            all(call.args[3] != FILAMENT_STATE_SPLITTER for call in mock_set_and_save.call_args_list),
+            all(call.args[1] != FILAMENT_STATE_SPLITTER for call in all_state_calls),
             "Unexpected splitter state recorded for non-RDM topology",
         )
 
@@ -3470,21 +3516,21 @@ class TestFullUnloadSlot(unittest.TestCase):
              patch('ace.manager.RunoutMonitor'):
             return AceManager(self.mock_config, dummy_ace_count=1)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_full_unload_skips_empty(self, mock_set_and_save):
+    def test_full_unload_skips_empty(self):
         instance = self._make_instance()
         instance.inventory[1]["status"] = "empty"
         instance._info["slots"][1]["status"] = "empty"
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         result = manager.full_unload_slot(1)
         self.assertTrue(result)
         instance._retract.assert_not_called()
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_full_unload_rdm_success(self, mock_set_and_save):
+    def test_full_unload_rdm_success(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         manager.get_switch_state = Mock(side_effect=[False, False])  # both sensors clear after retract
         manager.has_rdm_sensor = Mock(return_value=True)
 
@@ -3492,12 +3538,12 @@ class TestFullUnloadSlot(unittest.TestCase):
 
         self.assertTrue(result)
         instance._retract.assert_called_once_with(0, length=instance.total_max_feeding_length, speed=instance.retract_speed)
-        mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_full_unload_toolhead_only_blocked(self, mock_set_and_save):
+    def test_full_unload_toolhead_only_blocked(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         manager.get_instant_switch_state = Mock(return_value=True)  # toolhead still blocked
         manager.has_rdm_sensor = Mock(return_value=False)
 
@@ -3505,7 +3551,7 @@ class TestFullUnloadSlot(unittest.TestCase):
 
         self.assertFalse(result)
         instance._retract.assert_called_once()
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
     def test_full_unload_invalid_tool(self):
         instance = self._make_instance()
@@ -4176,10 +4222,10 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         inst._stop_feed = Mock()
         return inst
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_use_extruder_identifies_and_unloads(self, mock_set_and_save):
+    def test_use_extruder_identifies_and_unloads(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         # Ensure only slot 0 has filament after manager init
         manager.instances[0].inventory = [
             {"status": "ready"},
@@ -4216,12 +4262,12 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
 
         self.assertTrue(result)
         instance._smart_unload_slot.assert_called_once_with(0, length=40)
-        mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_ace_only_sensor_clears_and_stops_feed(self, mock_set_and_save):
+    def test_ace_only_sensor_clears_and_stops_feed(self):
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
         manager.instances[0].inventory = [
             {"status": "ready"},
             {"status": "empty"},
@@ -4262,14 +4308,14 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
 
         self.assertTrue(result)
         instance._stop_feed.assert_called_once_with(0)
-        mock_set_and_save.assert_called_with(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_ace_only_disables_feed_assist_before_retraction(self, mock_set_and_save):
+    def test_ace_only_disables_feed_assist_before_retraction(self):
         """CASE 3: Feed assist must be disabled BEFORE ACE-only retraction."""
         instance = self._make_instance()
         instance._feed_assist_index = 0  # Feed assist active on slot 0
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         manager.instances[0].inventory = [
             {"status": "ready"},
             {"status": "empty"},
@@ -4368,11 +4414,11 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
 
         self.assertFalse(result)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_prioritizes_current_tool_index(self, mock_set_and_save):
+    def test_prioritizes_current_tool_index(self):
         """Test that current_tool_index is prioritized in slot list when different from attempted."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
         manager.instances[0].inventory = [
             {"status": "ready"},  # T0
             {"status": "ready"},  # T1 - current_tool
@@ -4494,8 +4540,7 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         # Should complete unload for slot 1
         instance._smart_unload_slot.assert_called_once_with(1, length=40)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_use_extruder_error_during_full_unload_returns_false(self, mock_set_and_save):
+    def test_use_extruder_error_during_full_unload_returns_false(self):
         """Test error during _smart_unload_slot after identification returns False."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
@@ -4620,8 +4665,7 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(instance._retract.call_count, 2)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_path_blocked_after_successful_identification_returns_false(self, mock_set_and_save):
+    def test_path_blocked_after_successful_identification_returns_false(self):
         """Test that False is returned when path is still blocked after successful unload."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
@@ -4688,8 +4732,7 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         # Should still find and unload slot 0
         instance._smart_unload_slot.assert_called_once_with(0, length=40)
 
-    @patch('ace.manager.set_and_save_variable')
-    def test_ace_only_uses_sensor_to_parking_length_for_delay(self, mock_set_and_save):
+    def test_ace_only_uses_sensor_to_parking_length_for_delay(self):
         """Test ACE-only mode uses sensor_to_parking_length to calculate delay after trigger."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)

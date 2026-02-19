@@ -44,11 +44,7 @@ class EndlessSpool:
             str: "exact" (material + color), "material" (material only),
                  or "next" (first ready spool regardless of material/color)
         """
-        save_vars = self.printer.lookup_object("save_variables", None)
-        mode = "exact"
-
-        if save_vars:
-            mode = save_vars.allVariables.get("ace_endless_spool_match_mode", "exact")
+        mode = self.manager.state.get("ace_endless_spool_match_mode", "exact")
 
         # Normalize/guardrail unexpected values
         if mode not in {"exact", "material", "next"}:
@@ -206,7 +202,7 @@ class EndlessSpool:
                         ace_inst = self.manager.instances[from_inst_num]
                         if ace_inst:
                             ace_inst.inventory[from_slot]["status"] = "empty"
-                            self.manager._sync_inventory_to_persistent(from_inst_num)
+                            self.manager._sync_inventory_to_persistent(from_inst_num, flush=False)
                             self.gcode.respond_info(f"ACE: Marked T{from_tool} as empty")
 
                     status = self.manager.perform_tool_change(from_tool, current_target_tool, is_endless_spool=True)
@@ -244,7 +240,7 @@ class EndlessSpool:
                             )
 
                             ace_inst.inventory[to_slot]["status"] = "empty"
-                            self.manager._sync_inventory_to_persistent(to_inst_num)
+                            self.manager._sync_inventory_to_persistent(to_inst_num, flush=False)
                             self.gcode.respond_info(f"ACE: Marked T{current_target_tool} as empty (failed swap)")
 
                     except Exception as unload_error:
@@ -302,7 +298,7 @@ class EndlessSpool:
                 if ace_inst:
                     # Restore status for retry
                     ace_inst.inventory[from_slot]["status"] = "ready"
-                    self.manager._sync_inventory_to_persistent(from_inst_num)
+                    self.manager._sync_inventory_to_persistent(from_inst_num, flush=False)
 
                     # Get material info for prompt
                     inv = ace_inst.inventory[from_slot]

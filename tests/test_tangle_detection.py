@@ -34,6 +34,8 @@ def _make_monitor(tangle_detection=True):
     endless_spool = Mock()
     manager = Mock()
     manager.toolchange_in_progress = False
+    manager.state = Mock()
+    manager.state.get = Mock(return_value=-1)
 
     monitor = RunoutMonitor(
         printer, gcode, reactor, endless_spool, manager,
@@ -63,7 +65,8 @@ def _setup_printing_state(monitor, printer, manager, gcode,
     # save_variables
     save_vars = Mock()
     save_vars.allVariables = {"ace_current_index": 0}
-    # Override lookup_object for save_variables
+    manager.state = Mock()
+    manager.state.get = lambda key, default=None: save_vars.allVariables.get(key, default)
     original_side_effect = printer.lookup_object.side_effect
 
     def lookup(name, default=None):

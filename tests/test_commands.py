@@ -98,6 +98,14 @@ def mock_ace_manager():
     manager.set_and_save_variable = Mock()
     manager._sync_inventory_to_persistent = Mock()
     manager._sensor_override = None
+
+    # PersistentState mock – commands.py now uses manager.state.*
+    state = Mock()
+    state.get = Mock(return_value=None)
+    state.get_all = Mock(return_value={})
+    state.set = Mock()
+    state.set_and_save = Mock()
+    manager.state = state
     
     mock_printer = Mock()
     mock_printer.lookup_object = Mock(return_value=Mock())
@@ -681,15 +689,9 @@ class TestCommandSmoke:
 
     def test_cmd_ACE_GET_CURRENT_INDEX(self, mock_gcmd, setup_mocks):
         """Test ACE_GET_CURRENT_INDEX."""
-        with patch('ace.commands.get_printer') as mock_get_printer:
-            mock_printer = Mock()
-            mock_save_vars = Mock()
-            mock_save_vars.allVariables = {"ace_current_index": 0}
-            mock_printer.lookup_object = Mock(return_value=mock_save_vars)
-            mock_get_printer.return_value = mock_printer
-            
-            ace.commands.cmd_ACE_GET_CURRENT_INDEX(mock_gcmd)
-            assert mock_gcmd.respond_info.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
+        ace.commands.cmd_ACE_GET_CURRENT_INDEX(mock_gcmd)
+        assert mock_gcmd.respond_info.called
 
     def test_cmd_ACE_FEED(self, mock_gcmd, setup_mocks):
         """Test ACE_FEED command."""
@@ -1190,39 +1192,23 @@ class TestDryingCommands:
 
     def test_cmd_ACE_ENABLE_ENDLESS_SPOOL(self, mock_gcmd, setup_mocks):
         """Test ACE_ENABLE_ENDLESS_SPOOL."""
-        with patch('ace.commands.get_printer') as mock_get_printer:
-            mock_printer = Mock()
-            mock_save_vars = Mock()
-            mock_save_vars.allVariables = {}
-            mock_printer.lookup_object = Mock(return_value=mock_save_vars)
-            mock_get_printer.return_value = mock_printer
-            
-            ace.commands.cmd_ACE_ENABLE_ENDLESS_SPOOL(mock_gcmd)
-            assert mock_save_vars.allVariables.get("ace_endless_spool_enabled") is True
+        ace.commands.cmd_ACE_ENABLE_ENDLESS_SPOOL(mock_gcmd)
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call(
+            "ace_endless_spool_enabled", True
+        )
 
     def test_cmd_ACE_DISABLE_ENDLESS_SPOOL(self, mock_gcmd, setup_mocks):
         """Test ACE_DISABLE_ENDLESS_SPOOL."""
-        with patch('ace.commands.get_printer') as mock_get_printer:
-            mock_printer = Mock()
-            mock_save_vars = Mock()
-            mock_save_vars.allVariables = {}
-            mock_printer.lookup_object = Mock(return_value=mock_save_vars)
-            mock_get_printer.return_value = mock_printer
-            
-            ace.commands.cmd_ACE_DISABLE_ENDLESS_SPOOL(mock_gcmd)
-            assert mock_save_vars.allVariables.get("ace_endless_spool_enabled") is False
+        ace.commands.cmd_ACE_DISABLE_ENDLESS_SPOOL(mock_gcmd)
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call(
+            "ace_endless_spool_enabled", False
+        )
 
     def test_cmd_ACE_ENDLESS_SPOOL_STATUS(self, mock_gcmd, setup_mocks):
         """Test ACE_ENDLESS_SPOOL_STATUS."""
-        with patch('ace.commands.get_printer') as mock_get_printer:
-            mock_printer = Mock()
-            mock_save_vars = Mock()
-            mock_save_vars.allVariables = {"ace_endless_spool_enabled": True}
-            mock_printer.lookup_object = Mock(return_value=mock_save_vars)
-            mock_get_printer.return_value = mock_printer
-            
-            ace.commands.cmd_ACE_ENDLESS_SPOOL_STATUS(mock_gcmd)
-            assert mock_gcmd.respond_info.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=True)
+        ace.commands.cmd_ACE_ENDLESS_SPOOL_STATUS(mock_gcmd)
+        assert mock_gcmd.respond_info.called
 
     def test_cmd_ACE_DEBUG(self, mock_gcmd, setup_mocks):
         """Test ACE_DEBUG command."""
@@ -1235,24 +1221,24 @@ class TestDryingCommands:
     def test_cmd_ACE_SMART_UNLOAD(self, mock_gcmd, setup_mocks):
         """Test ACE_SMART_UNLOAD."""
         mock_gcmd.get_int = Mock(return_value=0)
-        
-        with patch('ace.commands.get_variable', return_value=0):
-            ace.commands.cmd_ACE_SMART_UNLOAD(mock_gcmd)
-            assert INSTANCE_MANAGERS[0].smart_unload.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
+
+        ace.commands.cmd_ACE_SMART_UNLOAD(mock_gcmd)
+        assert INSTANCE_MANAGERS[0].smart_unload.called
 
     def test_cmd_ACE_HANDLE_PRINT_END(self, mock_gcmd, setup_mocks):
         """Test ACE_HANDLE_PRINT_END with CUT_TIP=1 (default)."""
         mock_gcmd.get_int = Mock(return_value=1)  # CUT_TIP=1
-        with patch('ace.commands.get_variable', return_value=0):
-            ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
-            assert INSTANCE_MANAGERS[0].smart_unload.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
+        ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
+        assert INSTANCE_MANAGERS[0].smart_unload.called
 
     def test_cmd_ACE_HANDLE_PRINT_END_skip_cut(self, mock_gcmd, setup_mocks):
         """Test ACE_HANDLE_PRINT_END with CUT_TIP=0 skips unload."""
         mock_gcmd.get_int = Mock(return_value=0)  # CUT_TIP=0
-        with patch('ace.commands.get_variable', return_value=0):
-            ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
-            assert not INSTANCE_MANAGERS[0].smart_unload.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
+        ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
+        assert not INSTANCE_MANAGERS[0].smart_unload.called
 
     def test_cmd_ACE_SMART_LOAD(self, mock_gcmd, setup_mocks):
         """Test ACE_SMART_LOAD."""
@@ -1415,19 +1401,25 @@ class TestDryingCommands:
         """Test ACE_SET_ENDLESS_SPOOL_MODE with exact mode."""
         mock_gcmd.get = Mock(return_value="exact")
         ace.commands.cmd_ACE_SET_ENDLESS_SPOOL_MODE(mock_gcmd)
-        assert INSTANCE_MANAGERS[0].set_and_save_variable.called
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call(
+            "ace_endless_spool_match_mode", "exact"
+        )
 
     def test_cmd_ACE_SET_ENDLESS_SPOOL_MODE_material(self, mock_gcmd, setup_mocks):
         """Test ACE_SET_ENDLESS_SPOOL_MODE with material mode."""
         mock_gcmd.get = Mock(return_value="material")
         ace.commands.cmd_ACE_SET_ENDLESS_SPOOL_MODE(mock_gcmd)
-        assert INSTANCE_MANAGERS[0].set_and_save_variable.called
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call(
+            "ace_endless_spool_match_mode", "material"
+        )
 
     def test_cmd_ACE_SET_ENDLESS_SPOOL_MODE_next(self, mock_gcmd, setup_mocks):
         """Test ACE_SET_ENDLESS_SPOOL_MODE with next-ready mode."""
         mock_gcmd.get = Mock(return_value="next")
         ace.commands.cmd_ACE_SET_ENDLESS_SPOOL_MODE(mock_gcmd)
-        assert INSTANCE_MANAGERS[0].set_and_save_variable.called
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call(
+            "ace_endless_spool_match_mode", "next"
+        )
 
     def test_cmd_ACE_SET_ENDLESS_SPOOL_MODE_invalid(self, mock_gcmd, setup_mocks):
         """Test ACE_SET_ENDLESS_SPOOL_MODE with invalid mode."""
@@ -1437,41 +1429,23 @@ class TestDryingCommands:
 
     def test_cmd_ACE_GET_ENDLESS_SPOOL_MODE(self, mock_gcmd, setup_mocks):
         """Test ACE_GET_ENDLESS_SPOOL_MODE."""
-        with patch('ace.commands.get_printer') as mock_get_printer:
-            mock_printer = Mock()
-            mock_save_vars = Mock()
-            mock_save_vars.allVariables = {"ace_endless_spool_match_mode": "exact"}
-            mock_printer.lookup_object = Mock(return_value=mock_save_vars)
-            mock_get_printer.return_value = mock_printer
-            
-            ace.commands.cmd_ACE_GET_ENDLESS_SPOOL_MODE(mock_gcmd)
-            assert mock_gcmd.respond_info.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value="exact")
+        ace.commands.cmd_ACE_GET_ENDLESS_SPOOL_MODE(mock_gcmd)
+        assert mock_gcmd.respond_info.called
 
     def test_cmd_ACE_GET_ENDLESS_SPOOL_MODE_next(self, mock_gcmd, setup_mocks):
         """Test ACE_GET_ENDLESS_SPOOL_MODE for next-ready mode."""
-        with patch('ace.commands.get_printer') as mock_get_printer:
-            mock_printer = Mock()
-            mock_save_vars = Mock()
-            mock_save_vars.allVariables = {"ace_endless_spool_match_mode": "next"}
-            mock_printer.lookup_object = Mock(return_value=mock_save_vars)
-            mock_get_printer.return_value = mock_printer
-
-            ace.commands.cmd_ACE_GET_ENDLESS_SPOOL_MODE(mock_gcmd)
-            assert mock_gcmd.respond_info.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value="next")
+        ace.commands.cmd_ACE_GET_ENDLESS_SPOOL_MODE(mock_gcmd)
+        assert mock_gcmd.respond_info.called
 
     def test_cmd_ACE_CHANGE_TOOL_WRAPPER(self, mock_gcmd, setup_mocks):
         """Test ACE_CHANGE_TOOL_WRAPPER."""
         mock_gcmd.get_int = Mock(return_value=0)
-        
-        with patch('ace.commands.get_printer') as mock_get_printer:
-            mock_printer = Mock()
-            mock_printer.lookup_object = Mock(return_value=Mock())
-            mock_printer.get_reactor = Mock(return_value=Mock())
-            mock_get_printer.return_value = mock_printer
-            
-            with patch('ace.commands.get_variable', return_value=-1):
-                ace.commands.cmd_ACE_CHANGE_TOOL_WRAPPER(mock_gcmd)
-                assert INSTANCE_MANAGERS[0].perform_tool_change.called or mock_gcmd.respond_info.called
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=-1)
+
+        ace.commands.cmd_ACE_CHANGE_TOOL_WRAPPER(mock_gcmd)
+        assert INSTANCE_MANAGERS[0].perform_tool_change.called or mock_gcmd.respond_info.called
 
     def test_cmd_ACE_FULL_UNLOAD_single(self, mock_gcmd, setup_mocks):
         """Test ACE_FULL_UNLOAD for single tool."""
@@ -1810,21 +1784,19 @@ class TestAceChangeTool:
         manager = INSTANCE_MANAGERS[0]
         manager.get_ace_global_enabled.return_value = True
         manager.smart_unload.return_value = True
-        manager.set_and_save_variable = Mock()
-        with patch('ace.commands.get_variable', return_value=3):
-            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, tool_index=-1)
+        manager.state.get = Mock(return_value=3)
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, tool_index=-1)
         manager.smart_unload.assert_called_once_with(3)
-        manager.set_and_save_variable.assert_called_with("ace_current_index", -1)
+        manager.state.set.assert_any_call("ace_current_index", -1)
 
     def test_change_tool_perform_success_with_homing(self, mock_gcmd, setup_mocks):
         manager = INSTANCE_MANAGERS[0]
         manager.get_ace_global_enabled.return_value = True
         manager.perform_tool_change = Mock(return_value="OK")
-        manager.set_and_save_variable = Mock()
+        manager.state.get = Mock(return_value=0)
         printer, gcode = self._make_printer(homed_axes="xy")  # missing z -> triggers homing
 
-        with patch('ace.commands.get_variable', return_value=0), \
-             patch('ace.commands.get_printer', return_value=printer):
+        with patch('ace.commands.get_printer', return_value=printer):
             ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, tool_index=2)
 
         manager.perform_tool_change.assert_called_once_with(0, 2)
@@ -1887,16 +1859,16 @@ class TestToolChangeIntegration:
         """Test tool unload (TOOL=-1) - happy path."""
         mock_gcmd.get_int = Mock(return_value=-1)
         
-        # Mock get_variable to return current tool
-        with patch('ace.commands.get_variable', return_value=0):
-            ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
-            
-            # Verify smart_unload was called
-            assert INSTANCE_MANAGERS[0].smart_unload.called
-            INSTANCE_MANAGERS[0].smart_unload.assert_called_with(0)
-            
-            # Verify state was cleared
-            assert INSTANCE_MANAGERS[0].set_and_save_variable.called
+        # Mock state.get to return current tool
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
+        ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
+        
+        # Verify smart_unload was called
+        assert INSTANCE_MANAGERS[0].smart_unload.called
+        INSTANCE_MANAGERS[0].smart_unload.assert_called_with(0)
+        
+        # Verify state was cleared
+        assert INSTANCE_MANAGERS[0].state.set.called
 
     def test_cmd_ACE_CHANGE_TOOL_unload_failure(self, mock_gcmd, setup_mocks):
         """Test tool unload failure - error handling."""
@@ -1904,14 +1876,14 @@ class TestToolChangeIntegration:
         
         # Mock smart_unload to fail
         INSTANCE_MANAGERS[0].smart_unload = Mock(return_value=False)
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
         
-        with patch('ace.commands.get_variable', return_value=0):
-            ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
-            
-            # Verify failure message was sent
-            assert mock_gcmd.respond_info.called
-            call_args = [call[0][0] for call in mock_gcmd.respond_info.call_args_list]
-            assert any("failed" in msg.lower() for msg in call_args)
+        ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
+        
+        # Verify failure message was sent
+        assert mock_gcmd.respond_info.called
+        call_args = [call[0][0] for call in mock_gcmd.respond_info.call_args_list]
+        assert any("failed" in msg.lower() for msg in call_args)
 
     def test_cmd_ACE_CHANGE_TOOL_successful_change(self, mock_gcmd, setup_mocks):
         """Test successful tool change - happy path."""
@@ -1936,9 +1908,9 @@ class TestToolChangeIntegration:
         
         # Mock perform_tool_change to succeed
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(return_value="Success")
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
         
-        with patch('ace.commands.get_printer', return_value=mock_printer), \
-             patch('ace.commands.get_variable', return_value=0):
+        with patch('ace.commands.get_printer', return_value=mock_printer):
             ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
             
             # Verify perform_tool_change was called
@@ -1972,9 +1944,9 @@ class TestToolChangeIntegration:
         }.get(obj))
         
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(return_value="Success")
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
         
-        with patch('ace.commands.get_printer', return_value=mock_printer), \
-             patch('ace.commands.get_variable', return_value=0):
+        with patch('ace.commands.get_printer', return_value=mock_printer):
             ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
             
             # Verify G28 (homing) was called
@@ -2016,10 +1988,9 @@ class TestToolChangeIntegration:
         
         # Mock perform_tool_change to raise exception
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Sensor blocked"))
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
         
-        with patch('ace.commands.get_printer', return_value=mock_printer), \
-             patch('ace.commands.get_variable', return_value=0), \
-             patch('ace.commands.set_and_save_variable'):
+        with patch('ace.commands.get_printer', return_value=mock_printer):
             ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
             
             # Verify PAUSE was called
@@ -2074,12 +2045,9 @@ class TestToolChangeIntegration:
         
         # Mock perform_tool_change to raise exception
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Load failed"))
-        
-        mock_set_and_save = Mock()
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
 
-        with patch('ace.commands.get_printer', return_value=mock_printer), \
-             patch('ace.commands.get_variable', return_value=0), \
-             patch('ace.commands.set_and_save_variable', mock_set_and_save):
+        with patch('ace.commands.get_printer', return_value=mock_printer):
             # Should raise exception for non-printing startup failure
             with pytest.raises(Exception) as exc_info:
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
@@ -2092,7 +2060,7 @@ class TestToolChangeIntegration:
             assert any("M104 S0" in c for c in calls)
 
             # Verify idle/startup failure keeps the previous active tool (0), not target (1)
-            mock_set_and_save.assert_called_with(mock_printer, mock_gcode, "ace_current_index", 0)
+            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", 0)
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=0" in c for c in calls)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_after_unload_sets_no_active_tool(self, mock_gcmd, setup_mocks):
@@ -2107,8 +2075,6 @@ class TestToolChangeIntegration:
         mock_reactor = Mock()
         mock_gcode = Mock()
         mock_print_stats = Mock()
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {"ace_filament_pos": "bowden"}
 
         # Mock homed
         mock_kinematics.get_status = Mock(return_value={'homed_axes': 'xyz'})
@@ -2126,24 +2092,27 @@ class TestToolChangeIntegration:
                 return mock_gcode
             elif obj == 'print_stats':
                 return mock_print_stats
-            elif obj == 'save_variables':
-                return mock_save_vars
             return default if default is not None else Mock()
 
         mock_printer.lookup_object = Mock(side_effect=lookup_side_effect)
 
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Load failed after unload"))
 
-        mock_set_and_save = Mock()
+        # state.get returns 0 for ace_current_index, "bowden" for ace_filament_pos
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return 0
+            if varname == "ace_filament_pos":
+                return "bowden"
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
 
-        with patch('ace.commands.get_printer', return_value=mock_printer), \
-             patch('ace.commands.get_variable', return_value=0), \
-             patch('ace.commands.set_and_save_variable', mock_set_and_save):
+        with patch('ace.commands.get_printer', return_value=mock_printer):
             with pytest.raises(Exception):
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
 
             # Idle/startup + bowden state: clear active tool.
-            mock_set_and_save.assert_called_with(mock_printer, mock_gcode, "ace_current_index", -1)
+            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", -1)
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1" in c for c in calls)
 
@@ -2181,17 +2150,14 @@ class TestToolChangeIntegration:
         
         # Mock perform_tool_change to raise exception
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Test failure"))
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
         
-        mock_set_and_save = Mock()
-        
-        with patch('ace.commands.get_printer', return_value=mock_printer), \
-             patch('ace.commands.get_variable', return_value=0), \
-             patch('ace.commands.set_and_save_variable', mock_set_and_save):
+        with patch('ace.commands.get_printer', return_value=mock_printer):
             ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 2)
             
             # Verify state was updated to tool 2 even though it failed
-            assert mock_set_and_save.called
-            mock_set_and_save.assert_called_with(mock_printer, mock_gcode, "ace_current_index", 2)
+            assert INSTANCE_MANAGERS[0].state.set.called
+            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", 2)
             
             # Verify SET_GCODE_VARIABLE was called
             assert mock_gcode.run_script_from_command.called
@@ -2261,10 +2227,9 @@ class TestToolChangeIntegration:
         INSTANCE_MANAGERS[0].perform_tool_change = Mock(
             side_effect=Exception('Sensor "toolhead" blocked')
         )
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
         
-        with patch('ace.commands.get_printer', return_value=mock_printer), \
-             patch('ace.commands.get_variable', return_value=0), \
-             patch('ace.commands.set_and_save_variable'):
+        with patch('ace.commands.get_printer', return_value=mock_printer):
             ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
             
             # Verify quotes were escaped in prompt_text
@@ -2404,20 +2369,18 @@ class TestFullUnloadCommand:
         INSTANCE_MANAGERS[0].printer = mock_printer
         INSTANCE_MANAGERS[0].gcode = mock_gcode
         
-        with patch('ace.commands.set_and_save_variable') as mock_save:
-            ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-            
-            # Verify full_unload_slot was called
-            INSTANCE_MANAGERS[0].full_unload_slot.assert_called_with(2)
-            
-            # Verify state was cleared
-            assert mock_save.called
-            mock_save.assert_called_with(mock_printer, mock_gcode, "ace_current_index", -1)
-            
-            # Verify success message
-            assert mock_gcmd.respond_info.called
-            call_args = str(mock_gcmd.respond_info.call_args_list)
-            assert "fully unloaded" in call_args.lower()
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+        
+        # Verify full_unload_slot was called
+        INSTANCE_MANAGERS[0].full_unload_slot.assert_called_with(2)
+        
+        # Verify state was cleared
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call("ace_current_index", -1)
+        
+        # Verify success message
+        assert mock_gcmd.respond_info.called
+        call_args = str(mock_gcmd.respond_info.call_args_list)
+        assert "fully unloaded" in call_args.lower()
 
     def test_cmd_ACE_FULL_UNLOAD_single_tool_failure(self, mock_gcmd, setup_mocks):
         """Test full unload of a single tool - failure."""
@@ -2442,21 +2405,17 @@ class TestFullUnloadCommand:
         mock_gcmd.get = Mock(return_value=None)
         mock_gcmd.get_int = Mock(return_value=-1)  # No TOOL specified
         
-        # Mock save_vars to return current tool
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {"ace_current_index": 3}
-        mock_printer = Mock()
-        mock_printer.lookup_object = Mock(return_value=mock_save_vars)
+        # Mock state.get to return current tool
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=3)
         
-        INSTANCE_MANAGERS[0].printer = mock_printer
+        INSTANCE_MANAGERS[0].printer = Mock()
         INSTANCE_MANAGERS[0].gcode = Mock()
         INSTANCE_MANAGERS[0].full_unload_slot = Mock(return_value=True)
         
-        with patch('ace.commands.set_and_save_variable'):
-            ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-            
-            # Verify it used the current tool (3)
-            INSTANCE_MANAGERS[0].full_unload_slot.assert_called_with(3)
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+        
+        # Verify it used the current tool (3)
+        INSTANCE_MANAGERS[0].full_unload_slot.assert_called_with(3)
 
     def test_cmd_ACE_FULL_UNLOAD_all_tools_empty_slots_skipped(self, mock_gcmd, setup_mocks):
         """Test TOOL=ALL skips empty slots."""
@@ -2472,26 +2431,24 @@ class TestFullUnloadCommand:
             {"status": "empty"},    # Slot 3: empty - should skip
         ]
         
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {
-            "ace_current_index": -1,
-            "ace_filament_pos": FILAMENT_STATE_BOWDEN
-        }
-        mock_printer = Mock()
-        mock_printer.lookup_object = Mock(return_value=mock_save_vars)
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return -1
+            if varname == "ace_filament_pos":
+                return FILAMENT_STATE_BOWDEN
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
         
-        INSTANCE_MANAGERS[0].printer = mock_printer
         INSTANCE_MANAGERS[0].gcode = Mock()
         INSTANCE_MANAGERS[0].full_unload_slot = Mock(return_value=True)
         
-        with patch('ace.commands.set_and_save_variable'):
-            ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-            
-            # Should only unload slots 0 and 2 (not 1 and 3 which are empty)
-            assert INSTANCE_MANAGERS[0].full_unload_slot.call_count == 2
-            calls = [call[0][0] for call in INSTANCE_MANAGERS[0].full_unload_slot.call_args_list]
-            assert 0 in calls  # Tool 0 (slot 0)
-            assert 2 in calls  # Tool 2 (slot 2)
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+        
+        # Should only unload slots 0 and 2 (not 1 and 3 which are empty)
+        assert INSTANCE_MANAGERS[0].full_unload_slot.call_count == 2
+        calls = [call[0][0] for call in INSTANCE_MANAGERS[0].full_unload_slot.call_args_list]
+        assert 0 in calls  # Tool 0 (slot 0)
+        assert 2 in calls  # Tool 2 (slot 2)
 
     def test_cmd_ACE_FULL_UNLOAD_all_tools_skips_nozzle_loaded(self, mock_gcmd, setup_mocks):
         """Test TOOL=ALL skips tool currently loaded at nozzle."""
@@ -2508,28 +2465,26 @@ class TestFullUnloadCommand:
         ]
         
         # Tool 1 is currently loaded at nozzle
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {
-            "ace_current_index": 1,
-            "ace_filament_pos": FILAMENT_STATE_NOZZLE
-        }
-        mock_printer = Mock()
-        mock_printer.lookup_object = Mock(return_value=mock_save_vars)
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return 1
+            if varname == "ace_filament_pos":
+                return FILAMENT_STATE_NOZZLE
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
         
-        INSTANCE_MANAGERS[0].printer = mock_printer
         INSTANCE_MANAGERS[0].gcode = Mock()
         INSTANCE_MANAGERS[0].full_unload_slot = Mock(return_value=True)
         
-        with patch('ace.commands.set_and_save_variable'):
-            ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-            
-            # Should unload 0, 2, 3 but NOT 1 (loaded at nozzle)
-            assert INSTANCE_MANAGERS[0].full_unload_slot.call_count == 3
-            calls = [call[0][0] for call in INSTANCE_MANAGERS[0].full_unload_slot.call_args_list]
-            assert 0 in calls
-            assert 2 in calls
-            assert 3 in calls
-            assert 1 not in calls  # Should be skipped
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+        
+        # Should unload 0, 2, 3 but NOT 1 (loaded at nozzle)
+        assert INSTANCE_MANAGERS[0].full_unload_slot.call_count == 3
+        calls = [call[0][0] for call in INSTANCE_MANAGERS[0].full_unload_slot.call_args_list]
+        assert 0 in calls
+        assert 2 in calls
+        assert 3 in calls
+        assert 1 not in calls  # Should be skipped
 
     def test_cmd_ACE_FULL_UNLOAD_all_tools_tracks_failures(self, mock_gcmd, setup_mocks):
         """Test TOOL=ALL tracks and reports failures correctly."""
@@ -2544,15 +2499,14 @@ class TestFullUnloadCommand:
             {"status": "empty"},
         ]
         
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {
-            "ace_current_index": -1,
-            "ace_filament_pos": FILAMENT_STATE_BOWDEN
-        }
-        mock_printer = Mock()
-        mock_printer.lookup_object = Mock(return_value=mock_save_vars)
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return -1
+            if varname == "ace_filament_pos":
+                return FILAMENT_STATE_BOWDEN
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
         
-        INSTANCE_MANAGERS[0].printer = mock_printer
         INSTANCE_MANAGERS[0].gcode = Mock()
         
         # Slot 1 will fail, others succeed
@@ -2561,17 +2515,16 @@ class TestFullUnloadCommand:
         
         INSTANCE_MANAGERS[0].full_unload_slot = Mock(side_effect=mock_unload)
         
-        with patch('ace.commands.set_and_save_variable'):
-            ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-            
-            # Verify summary was reported
-            assert mock_gcmd.respond_info.called
-            call_args = "\n".join([str(call[0][0]) for call in mock_gcmd.respond_info.call_args_list])
-            
-            # Should show 3 processed, 2 succeeded, 1 failed
-            assert "3" in call_args  # Total processed
-            assert "2" in call_args  # Succeeded
-            assert "Failed: 1" in call_args or "T1" in call_args  # Failed list
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+        
+        # Verify summary was reported
+        assert mock_gcmd.respond_info.called
+        call_args = "\n".join([str(call[0][0]) for call in mock_gcmd.respond_info.call_args_list])
+        
+        # Should show 3 processed, 2 succeeded, 1 failed
+        assert "3" in call_args  # Total processed
+        assert "2" in call_args  # Succeeded
+        assert "Failed: 1" in call_args or "T1" in call_args  # Failed list
 
     def test_cmd_ACE_FULL_UNLOAD_all_clears_state_on_full_success(self, mock_gcmd, setup_mocks):
         """Test TOOL=ALL clears current tool state when all slots succeed."""
@@ -2586,25 +2539,22 @@ class TestFullUnloadCommand:
             {"status": "empty"},
         ]
         
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {
-            "ace_current_index": -1,
-            "ace_filament_pos": FILAMENT_STATE_BOWDEN
-        }
-        mock_printer = Mock()
-        mock_gcode = Mock()
-        mock_printer.lookup_object = Mock(return_value=mock_save_vars)
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return -1
+            if varname == "ace_filament_pos":
+                return FILAMENT_STATE_BOWDEN
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
         
-        INSTANCE_MANAGERS[0].printer = mock_printer
+        mock_gcode = Mock()
         INSTANCE_MANAGERS[0].gcode = mock_gcode
         INSTANCE_MANAGERS[0].full_unload_slot = Mock(return_value=True)
         
-        with patch('ace.commands.set_and_save_variable') as mock_save:
-            ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-            
-            # Verify state was cleared
-            assert mock_save.called
-            mock_save.assert_called_with(mock_printer, mock_gcode, "ace_current_index", -1)
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+        
+        # Verify state was cleared
+        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
 
     def test_cmd_ACE_FULL_UNLOAD_all_handles_exceptions(self, mock_gcmd, setup_mocks):
         """Test TOOL=ALL handles exceptions from individual unloads."""
@@ -2619,15 +2569,14 @@ class TestFullUnloadCommand:
             {"status": "empty"},
         ]
         
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {
-            "ace_current_index": -1,
-            "ace_filament_pos": FILAMENT_STATE_BOWDEN
-        }
-        mock_printer = Mock()
-        mock_printer.lookup_object = Mock(return_value=mock_save_vars)
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return -1
+            if varname == "ace_filament_pos":
+                return FILAMENT_STATE_BOWDEN
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
         
-        INSTANCE_MANAGERS[0].printer = mock_printer
         INSTANCE_MANAGERS[0].gcode = Mock()
         
         # Slot 0 raises exception, slot 1 succeeds
@@ -2638,13 +2587,12 @@ class TestFullUnloadCommand:
         
         INSTANCE_MANAGERS[0].full_unload_slot = Mock(side_effect=mock_unload)
         
-        with patch('ace.commands.set_and_save_variable'):
-            ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-            
-            # Should report the error
-            assert mock_gcmd.respond_info.called
-            call_args = "\n".join([str(call[0][0]) for call in mock_gcmd.respond_info.call_args_list])
-            assert "Error" in call_args or "Failed" in call_args
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+        
+        # Should report the error
+        assert mock_gcmd.respond_info.called
+        call_args = "\n".join([str(call[0][0]) for call in mock_gcmd.respond_info.call_args_list])
+        assert "Error" in call_args or "Failed" in call_args
 
 
 class TestResetPersistentInventory:
@@ -2674,7 +2622,7 @@ class TestResetPersistentInventory:
             # Verify reset was called
             assert ACE_INSTANCES[0].reset_persistent_inventory.called
             
-            # Verify sync was called with correct instance
+            # Verify sync was called with correct instance (flush=True is the default)
             INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_with(0)
             
             # Verify user feedback

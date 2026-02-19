@@ -243,8 +243,8 @@ class TestToolChangeIntegration(unittest.TestCase):
                 # _feed_filament_into_toolhead must return numeric value (purged amount)
                 # AND update filament_pos to nozzle like the real implementation
                 def mock_feed_into_toolhead(tool, check_pre_condition=True):
-                    from ace.config import set_and_save_variable, FILAMENT_STATE_NOZZLE
-                    set_and_save_variable(manager.printer, manager.gcode, "ace_filament_pos", FILAMENT_STATE_NOZZLE)
+                    from ace.config import FILAMENT_STATE_NOZZLE
+                    manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_NOZZLE)
                     return 50.0
                 instance._feed_filament_into_toolhead = Mock(side_effect=mock_feed_into_toolhead)
                 
@@ -254,8 +254,8 @@ class TestToolChangeIntegration(unittest.TestCase):
             # Mock smart_unload to properly update filament_pos
             def mock_smart_unload(tool_index=-1, prepare_toolhead=True):
                 # Update filament_pos to splitter
-                from ace.config import set_and_save_variable, FILAMENT_STATE_SPLITTER
-                set_and_save_variable(manager.printer, manager.gcode, "ace_filament_pos", FILAMENT_STATE_SPLITTER)
+                from ace.config import FILAMENT_STATE_SPLITTER
+                manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_SPLITTER)
                 return True
             manager.smart_unload = Mock(side_effect=mock_smart_unload)
             
