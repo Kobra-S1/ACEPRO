@@ -2666,9 +2666,10 @@ class TestUpdateAceSupportActiveState(unittest.TestCase):
         varname = "ace_inventory_0"
         self.assertIn(varname, save_vars.allVariables)
         self.assertEqual(save_vars.allVariables[varname], self.instance.inventory)
-        # flush=True (default) uses set_and_save() for immediate disk write
-        self.assertFalse(self.manager.state.has_pending)
-        self.manager.gcode.run_script_from_command.assert_called_once()
+        # Default persistence_mode is "deferred": set_and_save() marks dirty
+        # but does NOT issue a SAVE_VARIABLE GCode command immediately.
+        self.assertTrue(self.manager.state.has_pending)
+        self.manager.gcode.run_script_from_command.assert_not_called()
 
     def test_sync_inventory_all_instances(self):
         self.instance.inventory[1]["status"] = "ready"
@@ -2685,9 +2686,10 @@ class TestUpdateAceSupportActiveState(unittest.TestCase):
         self.assertIn("ace_inventory_0", save_vars.allVariables)
         self.assertIn("ace_inventory_1", save_vars.allVariables)
         self.assertEqual(save_vars.allVariables["ace_inventory_1"], second.inventory)
-        # flush=True (default) uses set_and_save() for immediate disk write
-        self.assertFalse(self.manager.state.has_pending)
-        self.assertGreaterEqual(self.manager.gcode.run_script_from_command.call_count, 2)
+        # Default persistence_mode is "deferred": set_and_save() marks dirty
+        # but does NOT issue SAVE_VARIABLE GCode commands immediately.
+        self.assertTrue(self.manager.state.has_pending)
+        self.manager.gcode.run_script_from_command.assert_not_called()
 
     def test_flush_if_idle_flushes_when_not_printing(self):
         """Dirty state is flushed by _flush_if_idle when printer is idle."""

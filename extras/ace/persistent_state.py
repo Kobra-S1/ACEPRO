@@ -7,15 +7,21 @@ write and persist-to-disk operation goes through a single gateway.
 **Deferred-flush strategy (Option A)**
 
 ``set()`` updates RAM and marks the variable *dirty* for later flushing.
-``set_and_save()`` updates RAM **and** flushes to disk immediately.
+``set_and_save()`` updates RAM and — depending on *persistence_mode* —
+either flushes to disk immediately or defers the write like ``set()``.
 
 Use ``set()`` in time-critical paths (toolchanges, mid-print callbacks)
 where blocking Klipper's single-threaded reactor with synchronous
 ``configparser.write()`` must be avoided.  Call ``flush()`` at a safe
 moment (print end, disconnect) to persist all dirty variables.
 
-Use ``set_and_save()`` in user-facing gcode commands that run outside of
-prints and should persist immediately.
+Persistence modes (set via ``persistence_mode`` in printer.cfg):
+
+- ``deferred`` *(default)*: ``set_and_save()`` behaves like ``set()`` —
+  RAM + dirty mark only.  Disk writes happen only in ``flush()``.
+  Never blocks the reactor mid-print.
+- ``immediate``: ``set_and_save()`` writes to disk right away (legacy).
+  Use when you want key state persisted even without a clean shutdown.
 
 Typical usage::
 
@@ -34,6 +40,7 @@ Typical usage::
     state.flush()
 """
 
+import configparser
 import json
 import logging
 
@@ -47,14 +54,18 @@ class PersistentState:
     ``printer.lookup_object("save_variables")`` directly.
     """
 
-    def __init__(self, printer, gcode):
+    def __init__(self, printer, gcode, persistence_mode="deferred"):
         """
         Args:
-            printer: Klipper printer object
-            gcode:   Klipper gcode object (needed for SAVE_VARIABLE commands)
+            printer:          Klipper printer object
+            gcode:            Klipper gcode object (needed for SAVE_VARIABLE commands)
+            persistence_mode: ``"deferred"`` (default) or ``"immediate"``.
+                              Controls whether ``set_and_save()`` writes to disk
+                              right away or defers to the next ``flush()`` call.
         """
         self.printer = printer
         self.gcode = gcode
+        self._immediate = (persistence_mode == "immediate")
         self._dirty = set()  # variable names awaiting disk flush
 
     # ------------------------------------------------------------------
@@ -147,22 +158,24 @@ class PersistentState:
     # ------------------------------------------------------------------
 
     def set_and_save(self, varname, value):
-        """Update a variable in memory and persist to disk immediately.
+        """Update a variable in memory and persist according to the mode.
 
-        This issues the ``SAVE_VARIABLE`` gcode command right away,
-        so it should only be used in user-facing gcode commands that
-        run outside of active prints.
+        - ``immediate`` mode: writes to disk right away via ``SAVE_VARIABLE``.
+        - ``deferred`` mode: behaves like ``set()`` — RAM update + dirty mark
+          only; the actual disk write is deferred to the next ``flush()``.
 
-        For time-critical / mid-print paths, use ``set()`` instead
-        and call ``flush()`` at a safe moment (print end, disconnect).
+        For unconditionally time-critical paths, use ``set()`` directly.
 
         Args:
             varname: Variable name.
             value:   Any JSON-serialisable value.
         """
         self._variables()[varname] = value
-        self._dirty.discard(varname)  # no longer dirty — writing now
-        self._write_to_disk(varname, value)
+        if self._immediate:
+            self._dirty.discard(varname)  # no longer dirty — writing now
+            self._write_to_disk(varname, value)
+        else:
+            self._dirty.add(varname)  # deferred — will be flushed later
 
     # ------------------------------------------------------------------
     # Flush — persist all dirty variables to disk
@@ -195,3 +208,35 @@ class PersistentState:
                     "ACE: Failed to flush variable %s", varname
                 )
         self._dirty.clear()
+
+    def flush_direct(self):
+        """Write ALL in-memory variables directly to ``saved_variables.cfg``.
+
+        Bypasses the GCode queue entirely — safe to call during shutdown or
+        emergency stop when ``run_script_from_command`` is unavailable or
+        would be rejected with "Printer is shutdown".
+
+        Writes the complete ``allVariables`` dict (not just dirty entries) so
+        that even ``set_and_save()`` calls whose queued ``SAVE_VARIABLE``
+        command was interrupted mid-shutdown are still persisted.
+        """
+        try:
+            save_vars = self.printer.lookup_object("save_variables")
+            filename = save_vars.filename
+            variables = save_vars.allVariables
+
+            cfg = configparser.ConfigParser()
+            cfg.add_section("Variables")
+            for name, val in sorted(variables.items()):
+                cfg.set("Variables", name, repr(val))
+
+            with open(filename, "w") as fh:
+                cfg.write(fh)
+
+            self._dirty.clear()
+            logging.info(
+                "ACE: flush_direct wrote %d variable(s) to %s",
+                len(variables), filename
+            )
+        except Exception:
+            logging.exception("ACE: flush_direct failed")

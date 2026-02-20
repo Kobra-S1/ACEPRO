@@ -142,6 +142,17 @@ def read_ace_config(config):
     ace_config["tangle_detection_length"] = config.getfloat(
         "tangle_detection_length", 15.0
     )
+    # Persistence mode controls when set_and_save() actually writes to disk.
+    # - deferred:  set_and_save() behaves like set() — RAM + dirty mark only;
+    #              disk write is deferred until flush() (print end / disconnect).
+    #              Safest option: never blocks the Klipper reactor mid-print.
+    # - immediate: set_and_save() writes to disk right away (legacy behaviour).
+    #              Suitable if you want key state persisted even without a clean shutdown.
+    ace_config["persistence_mode"] = config.get(
+        "persistence_mode", "deferred"
+    ).strip().lower()
+    if ace_config["persistence_mode"] not in ("deferred", "immediate"):
+        ace_config["persistence_mode"] = "deferred"
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"
     ace_config["feed_speed"] = config.get("feed_speed", "60")

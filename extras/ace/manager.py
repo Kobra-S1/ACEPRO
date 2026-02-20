@@ -141,7 +141,9 @@ class AceManager:
 
         self.gcode.respond_info(f"ACE: Creating {self.ace_count} instance(s) with single AceManager")
 
-        self.state = PersistentState(self.printer, self.gcode)
+        persistence_mode = self.ace_config.get("persistence_mode", "deferred")
+        self.state = PersistentState(self.printer, self.gcode, persistence_mode=persistence_mode)
+        self.gcode.respond_info(f"ACE: Persistence mode: {persistence_mode}")
         self.variables = self.state.get_all()
         initial_ace_enabled = bool(self.state.get("ace_global_enabled", True))
 
@@ -234,6 +236,7 @@ class AceManager:
         handler = self.printer.register_event_handler
         handler("klippy:ready", self._handle_ready)
         handler("klippy:disconnect", self._handle_disconnect)
+        handler("klippy:shutdown", self._handle_shutdown)
 
     def _get_config_for_tool(self, tool_index, param_name):
         """
@@ -293,15 +296,32 @@ class AceManager:
 
         # Validate persisted tool state against live sensor readings.
         # Catches stale state from manual filament removal while powered off.
-        self._validate_startup_tool_state()
+        # self._validate_startup_tool_state()  # disabled pending timing-free rewrite
 
         # Publish initial lane_data snapshot for Orca pull-mode sync.
         self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
 
         self._start_monitoring()
 
+    def _handle_shutdown(self):
+        """Called on Klipper emergency stop or fatal shutdown.
+
+        Uses ``flush_direct()`` to write directly to ``saved_variables.cfg``
+        without going through the GCode queue, which is unavailable (or
+        rejected with "Printer is shutdown") at this point.
+        """
+        pending = list(self.state._dirty)
+        logging.info(
+            "ACE: klippy:shutdown received — flushing %d dirty variable(s) directly: %s",
+            len(pending), pending
+        )
+        try:
+            self.state.flush_direct()
+        except Exception:
+            logging.exception("ACE: Failed to flush state on shutdown")
+
     def _handle_disconnect(self):
-        """Called on Klipper shutdown. Stops monitoring and disconnects all ACE instances."""
+        """Called on Klipper disconnect. Stops monitoring and disconnects all ACE instances."""
         self.gcode.respond_info("ACE: Disconnecting")
 
         # Flush any dirty persistent state to disk before we tear down.
@@ -333,6 +353,15 @@ class AceManager:
         In that case, reset both variables so that the next toolchange
         does not attempt a phantom retraction on a tool that is no longer
         physically loaded.
+
+        .. note:: Klipper's ``RunoutHelper`` initialises ``filament_present``
+            to ``False`` and only updates it once the MCU button-state
+            callbacks have completed — two asynchronous reactor hops after
+            the MCU reports the initial pin state.  Reading the sensors
+            *without* first yielding to the reactor can therefore produce a
+            false "all-clear" result even when filament is physically present.
+            ``reactor.pause()`` is called below specifically to drain those
+            pending callbacks before the sensor values are read.
         """
         current_index = self.state.get("ace_current_index", -1)
         filament_pos = self.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -364,6 +393,17 @@ class AceManager:
         # are registered we cannot validate, so bail out.
         if SENSOR_TOOLHEAD not in self.sensors:
             return
+
+        # Klipper's RunoutHelper initialises filament_present=False and updates
+        # it through two layers of reactor async callbacks:
+        #   MCU → register_async_callback → DebounceButton.button_handler
+        #       → register_callback(_debounce_event) → note_filament_present
+        # Both hops must complete before we read the sensors.  At klippy:ready
+        # time those callbacks may still be queued.  reactor.pause() yields
+        # back to the reactor loop for 0.5 s, which is more than enough for
+        # any pending MCU button-state callbacks to drain and update
+        # filament_present before we read it.
+        self.reactor.pause(self.reactor.monotonic() + 0.5)
 
         toolhead_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_has_filament = (

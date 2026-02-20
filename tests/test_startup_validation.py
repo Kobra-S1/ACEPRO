@@ -403,7 +403,11 @@ class TestValidateStartupToolState(unittest.TestCase):
         self.assertEqual(self.variables["ace_current_index"], -1)
 
     def test_handle_ready_calls_validate(self):
-        """Verify _handle_ready invokes _validate_startup_tool_state."""
+        """_validate_startup_tool_state is currently disabled in _handle_ready.
+
+        The call is commented out pending a timing-free rewrite.  This test
+        confirms it is NOT called so we notice if/when it is re-enabled.
+        """
         manager = self._build_manager()
         manager._setup_sensors = Mock()
         manager._start_monitoring = Mock()
@@ -431,12 +435,13 @@ class TestValidateStartupToolState(unittest.TestCase):
 
         manager._handle_ready()
 
-        manager._validate_startup_tool_state.assert_called_once()
+        manager._validate_startup_tool_state.assert_not_called()
 
     def test_handle_ready_disabled_still_calls_validate(self):
-        """Even when ACE Pro is disabled, _validate_startup_tool_state is called.
+        """_validate_startup_tool_state is currently disabled in _handle_ready.
 
-        The method itself will bail out because no sensors are registered.
+        Confirmed also when ACE Pro is disabled — the call is commented out
+        pending a timing-free rewrite.
         """
         self.variables["ace_global_enabled"] = False
         manager = self._build_manager()
@@ -465,7 +470,7 @@ class TestValidateStartupToolState(unittest.TestCase):
 
         manager._handle_ready()
 
-        manager._validate_startup_tool_state.assert_called_once()
+        manager._validate_startup_tool_state.assert_not_called()
 
 
 if __name__ == "__main__":
