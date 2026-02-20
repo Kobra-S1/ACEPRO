@@ -15,6 +15,8 @@ from .config import (
     SENSOR_TOOLHEAD,
     SENSOR_RDM,
     FILAMENT_STATE_BOWDEN,
+    FILAMENT_STATE_SPLITTER,
+    FILAMENT_STATE_TOOLHEAD,
     FILAMENT_STATE_NOZZLE,
     RFID_STATE_NO_INFO,
     RFID_STATE_FAILED,
@@ -1132,6 +1134,92 @@ def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
     gcmd.respond_info(f"ACE[{ace.instance_num}]: Active toolhead state reset")
 
 
+def cmd_ACE_DEBUG_SET_CURRENT_INDEX(gcmd):
+    """Manually override ace_current_index.
+
+    TOOL=-1  (or omit TOOL) to set 'no tool loaded'.
+    TOOL=<n> to declare tool <n> as the currently loaded tool.
+
+    This only updates the saved-state variable — it does NOT physically
+    move or retract any filament.  Use it to correct a stale persisted
+    value after manual intervention.
+    """
+    manager = ace_get_manager()
+
+    # Default -1 = no tool loaded
+    tool = gcmd.get_int("TOOL", default=-1)
+
+    # Validate range
+    total_tools = len(ACE_INSTANCES) * 4
+    if tool != -1 and not (0 <= tool < total_tools):
+        raise gcmd.error(
+            f"TOOL={tool} is out of range. Valid range: -1 (none) to {total_tools - 1}"
+        )
+
+    prev = manager.state.get("ace_current_index", -1)
+    manager.state.set_and_save("ace_current_index", tool)
+
+    if tool == -1:
+        gcmd.respond_info(
+            f"ACE: ace_current_index reset to -1 (no tool loaded). "
+            f"Was: T{prev}"
+        )
+    else:
+        gcmd.respond_info(
+            f"ACE: ace_current_index set to T{tool}. Was: T{prev}"
+        )
+
+
+def cmd_ACE_DEBUG_SET_FILAMENT_STATE(gcmd):
+    """Manually override ace_filament_pos.
+
+    STATE=bowden|splitter|toolhead|nozzle
+
+    Valid states:
+      bowden   - filament retracted to park position (default 'unloaded')
+      splitter - filament tip is at the RDM / 4-in-1 splitter
+      toolhead - filament tip is at the toolhead sensor
+      nozzle   - filament loaded all the way into the nozzle
+
+    This only updates the saved-state variable — it does NOT physically
+    move any filament.  Use it to correct a stale persisted value after
+    manual intervention.
+    """
+    manager = ace_get_manager()
+
+    valid_states = {
+        "bowden":   FILAMENT_STATE_BOWDEN,
+        "splitter": FILAMENT_STATE_SPLITTER,
+        "toolhead": FILAMENT_STATE_TOOLHEAD,
+        "nozzle":   FILAMENT_STATE_NOZZLE,
+    }
+
+    raw = gcmd.get("STATE", default=None)
+    if raw is None:
+        # Show current value and valid options when called without STATE=
+        current = manager.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        gcmd.respond_info(
+            f"ACE: Current filament state: '{current}'\n"
+            f"Valid values: {', '.join(valid_states.keys())}"
+        )
+        return
+
+    state_key = raw.strip().lower()
+    if state_key not in valid_states:
+        raise gcmd.error(
+            f"Invalid STATE='{raw}'. "
+            f"Valid values: {', '.join(valid_states.keys())}"
+        )
+
+    new_state = valid_states[state_key]
+    prev = manager.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+    manager.state.set_and_save("ace_filament_pos", new_state)
+
+    gcmd.respond_info(
+        f"ACE: ace_filament_pos set to '{new_state}'. Was: '{prev}'"
+    )
+
+
 def cmd_ACE_GET_CURRENT_INDEX(gcmd):
     """Query currently loaded tool index from persistent storage (returns -1 if no tool loaded)."""
     manager = ace_get_manager(0)
@@ -2083,6 +2171,10 @@ ACE_COMMANDS = [
     ("ACE_DEBUG_STATE", cmd_ACE_DEBUG_STATE, "Print manager and instance state information"),
     ("ACE_RESET_PERSISTENT_INVENTORY", cmd_ACE_RESET_PERSISTENT_INVENTORY, "Reset inventory to empty. INSTANCE="),
     ("ACE_RESET_ACTIVE_TOOLHEAD", cmd_ACE_RESET_ACTIVE_TOOLHEAD, "Reset active toolhead state. INSTANCE="),
+    ("ACE_DEBUG_SET_CURRENT_INDEX", cmd_ACE_DEBUG_SET_CURRENT_INDEX,
+     "Override saved tool index. TOOL=<n> (0-based) or TOOL=-1 for no tool loaded"),
+    ("ACE_DEBUG_SET_FILAMENT_STATE", cmd_ACE_DEBUG_SET_FILAMENT_STATE,
+     "Override saved filament position. STATE=bowden|splitter|toolhead|nozzle (omit STATE= to query)"),
     ("ACE_RFID_SYNC_STATUS", cmd_ACE_RFID_SYNC_STATUS, "Query RFID sync status. [INSTANCE=]"),
     ("ACE_DEBUG_INJECT_SENSOR_STATE", cmd_ACE_DEBUG_INJECT_SENSOR_STATE,
      "Inject sensor state for testing. TOOLHEAD=0/1 RDM=0/1 or RESET=1"),
