@@ -1,11 +1,12 @@
 {
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
     "python.testing.pytestArgs": [
         "tests"
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
     "python-envs.pythonProjects": [],
-    "python-envs.defaultEnvManager": "ms-python.python:system",
     "chat.tools.terminal.autoApprove": {
         "/^which python3 && python3 -c \"import pytest; print\\(pytest\\.__file__\\)\" 2>&1; ls /home/pi/ACEPRO/tests/run_all_tests\\.sh$/": {
             "approve": true,

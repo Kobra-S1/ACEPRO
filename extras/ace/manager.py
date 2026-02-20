@@ -291,6 +291,10 @@ class AceManager:
         else:
             self.gcode.respond_info("ACE: ACE Pro disabled on startup - skipping connections")
 
+        # Validate persisted tool state against live sensor readings.
+        # Catches stale state from manual filament removal while powered off.
+        self._validate_startup_tool_state()
+
         # Publish initial lane_data snapshot for Orca pull-mode sync.
         self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
 
@@ -317,6 +321,78 @@ class AceManager:
                 adapter.shutdown()
             except Exception as e:
                 logging.warning("ACE: Moonraker lane sync shutdown failed: %s", e)
+
+    def _validate_startup_tool_state(self):
+        """Validate persisted tool state against live sensor readings at startup.
+
+        If ``ace_current_index`` indicates a tool is loaded and
+        ``ace_filament_pos`` is not ``"bowden"``, but **all** filament
+        sensors report clear and the printer is idle, the persisted state
+        is stale (e.g. user manually removed filament while powered off).
+
+        In that case, reset both variables so that the next toolchange
+        does not attempt a phantom retraction on a tool that is no longer
+        physically loaded.
+        """
+        current_index = self.state.get("ace_current_index", -1)
+        filament_pos = self.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+        # Nothing to validate when no tool is recorded as loaded.
+        if current_index < 0:
+            return
+
+        # Position already "bowden" means state considers filament retracted.
+        if filament_pos == FILAMENT_STATE_BOWDEN:
+            return
+
+        # Do not touch state during an active or paused print — the
+        # persisted values may be intentionally set by the print flow.
+        try:
+            print_stats = self.printer.lookup_object("print_stats", None)
+            if print_stats:
+                stats = print_stats.get_status(self.reactor.monotonic())
+                state = (stats.get("state") or "").lower()
+                if state in ("printing", "paused"):
+                    self.gcode.respond_info(
+                        f"ACE: Startup validation skipped — printer is {state}"
+                    )
+                    return
+        except Exception:
+            pass  # If print_stats unavailable, assume idle.
+
+        # Sensors may not be set up (ACE Pro disabled).  When no sensors
+        # are registered we cannot validate, so bail out.
+        if SENSOR_TOOLHEAD not in self.sensors:
+            return
+
+        toolhead_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
+        rdm_has_filament = (
+            self.get_switch_state(SENSOR_RDM)
+            if self.has_rdm_sensor()
+            else False
+        )
+
+        if toolhead_has_filament or rdm_has_filament:
+            # At least one sensor confirms filament — state looks plausible.
+            self.gcode.respond_info(
+                f"ACE: Startup validation — T{current_index} state "
+                f"(filament_pos='{filament_pos}') confirmed by sensors "
+                f"(toolhead={'present' if toolhead_has_filament else 'clear'}, "
+                f"rdm={'present' if rdm_has_filament else 'clear'})"
+            )
+            return
+
+        # All sensors are clear while state claims a tool is loaded.
+        self.gcode.respond_info(
+            f"ACE: \u26a0 STARTUP VALIDATION — Saved state indicated "
+            f"T{current_index} was loaded (filament_pos='{filament_pos}'), "
+            f"but ALL filament sensors report CLEAR and printer is idle. "
+            f"Resetting ace_current_index to -1 and ace_filament_pos to "
+            f"'bowden'. (Likely cause: filament was manually removed "
+            f"while printer was off)"
+        )
+        self.state.set_and_save("ace_current_index", -1)
+        self.state.set_and_save("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
     def _setup_sensors(self):
         """
