@@ -750,6 +750,10 @@ def cmd_ACE_SAVE_INVENTORY(gcmd):
 def cmd_ACE_START_DRYING(gcmd):
     """Start filament dryer. [INSTANCE=] TEMP= [DURATION=240] - omit INSTANCE to affect all."""
     try:
+        manager = ace_get_manager()
+        if not manager._ace_pro_enabled:
+            raise gcmd.error("ACE Pro is disabled — cannot start dryer")
+
         instance_num = gcmd.get_int("INSTANCE", None)
         temperature = gcmd.get_int("TEMP")
         duration = gcmd.get_int("DURATION", 240)

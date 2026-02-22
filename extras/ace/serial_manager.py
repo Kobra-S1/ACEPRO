@@ -871,6 +871,11 @@ class AceSerialManager:
             request: Dict with JSON-serializable request
             callback: Callable(response=dict) or Callable(response=None) on timeout
         """
+        if not self._ace_pro_enabled:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Dropping request — ACE Pro is disabled"
+            )
+            return
         try:
             self._queue.put([request, callback], timeout=1)
         except queue.Full:
@@ -884,6 +889,11 @@ class AceSerialManager:
             request: Dict with JSON-serializable request
             callback: Callable as in send_request
         """
+        if not self._ace_pro_enabled:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Dropping high-priority request — ACE Pro is disabled"
+            )
+            return
         try:
             self._hp_queue.put([request, callback], timeout=1)
         except queue.Full:
