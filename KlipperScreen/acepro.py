@@ -537,6 +537,10 @@ class Panel(ScreenPanel):
             min-width: 200px;
             min-height: 48px;
         }
+        .ace_slot_loaded {
+            box-shadow: inset 0 0 0 2px #4CAF50;
+            border-radius: 6px;
+        }
         """
 
         style_provider = Gtk.CssProvider()
@@ -1049,22 +1053,47 @@ class Panel(ScreenPanel):
                 logging.debug(f"ACE: Skipping instance {instance_id} - UI not created yet")
                 continue
 
+            gear_buttons = instance.get('slot_gear_buttons', [])
+            tool_labels = instance.get('slot_tool_labels', [])
+
             for local_slot in range(4):
                 global_tool = instance['tool_offset'] + local_slot
                 slot_btn = instance['slot_buttons'][local_slot]
+                is_loaded = (current_loaded == global_tool)
 
                 # Remove all state classes
                 slot_btn.get_style_context().remove_class("ace_slot_loaded")
                 slot_btn.get_style_context().remove_class("ace_slot_empty")
 
                 # Add appropriate class
-                if current_loaded == global_tool:
+                if is_loaded:
                     slot_btn.get_style_context().add_class("ace_slot_loaded")
                     logging.info(f"ACE: Marked T{global_tool} as LOADED")
                 else:
                     slot_data = instance['inventory'][local_slot]
                     if slot_data['status'] == 'empty':
                         slot_btn.get_style_context().add_class("ace_slot_empty")
+
+                # Highlight gear button: color1 when loaded, color2 otherwise
+                if local_slot < len(gear_buttons) and gear_buttons[local_slot]:
+                    gb = gear_buttons[local_slot]
+                    if is_loaded:
+                        gb.get_style_context().remove_class("color2")
+                        gb.get_style_context().add_class("color1")
+                    else:
+                        gb.get_style_context().remove_class("color1")
+                        gb.get_style_context().add_class("color2")
+
+                # Bold + green tool label when loaded, plain otherwise
+                if local_slot < len(tool_labels) and tool_labels[local_slot]:
+                    slot_data = instance['inventory'][local_slot]
+                    base_text = self._format_tool_label(global_tool, slot_data)
+                    if is_loaded:
+                        tool_labels[local_slot].set_markup(
+                            f'<b><span foreground="#4CAF50">{base_text}</span></b>'
+                        )
+                    else:
+                        tool_labels[local_slot].set_text(base_text)
 
         # Update status label (if it exists)
         if hasattr(self, 'status_label'):
