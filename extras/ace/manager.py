@@ -875,6 +875,15 @@ class AceManager:
                     tool_index, "parkposition_to_toolhead_length"
                 )
 
+                # Disable feed assist BEFORE any motion — feed assist pushes
+                # filament forward and would fight both the extruder retract
+                # and the ACE retract that follow.
+                if instance._feed_assist_index == local_slot:
+                    self.gcode.respond_info(
+                        f"ACE: Disabling feed assist on slot {local_slot} before coordinated retract"
+                    )
+                    instance._disable_feed_assist(local_slot)
+
                 self.gcode.respond_info(
                     f"ACE: Retracting T{tool_index} "
                     f"({retract_length:.3f}mm at {retract_speed:.3f}mm/s)"
