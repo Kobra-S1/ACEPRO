@@ -332,8 +332,8 @@ class Panel(ScreenPanel):
                         self.endless_spool_switch.set_active(endless_enabled)
                         self.endless_spool_switch.handler_unblock_by_func(self.on_endless_spool_toggled)
                         self.endless_spool_status.set_markup(
-                            '<span foreground="green"><b>Active</b></span>' if endless_enabled
-                            else '<span foreground="gray">Inactive</span>'
+                            '<span foreground="green"><b>On</b></span>' if endless_enabled
+                            else '<span foreground="gray">Off</span>'
                         )
                         self.endless_spool_enabled = endless_enabled
                         self._update_match_mode_sensitivity()
@@ -348,6 +348,17 @@ class Panel(ScreenPanel):
                 # ACE Pro enabled flag
                 ace_pro_enabled = ace_state.get("ace_pro_enabled")
                 if isinstance(ace_pro_enabled, bool):
+                    if hasattr(self, "ace_pro_switch"):
+                        try:
+                            self.ace_pro_switch.handler_block_by_func(self.on_ace_pro_toggled)
+                            self.ace_pro_switch.set_active(ace_pro_enabled)
+                            self.ace_pro_switch.handler_unblock_by_func(self.on_ace_pro_toggled)
+                            self.ace_pro_status.set_markup(
+                                '<span foreground="green"><b>On</b></span>' if ace_pro_enabled
+                                else '<span foreground="red">Off</span>'
+                            )
+                        except Exception:
+                            pass
                     self.ace_pro_enabled = ace_pro_enabled
 
                 # Sensor states: True/False = filament present/absent; None = sensor not available
@@ -501,11 +512,34 @@ class Panel(ScreenPanel):
 
         main_box.pack_start(top_row, False, False, 0)
 
-        # Endless Spool row with two controls
+        # Endless Spool row with three controls: ACE Pro | Endless Spool | Match Mode
         endless_spool_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
         endless_spool_row.set_margin_top(5)
 
-        # Left side: Endless Spool Enable/Disable
+        # Far left: ACE Pro Enable/Disable
+        ace_pro_control = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        ace_pro_label = Gtk.Label(label="ACE Pro:")
+        ace_pro_label.get_style_context().add_class("description")
+        ace_pro_label.set_halign(Gtk.Align.START)
+        ace_pro_control.pack_start(ace_pro_label, False, False, 0)
+
+        self.ace_pro_switch = Gtk.Switch()
+        self.ace_pro_switch.set_active(self.ace_pro_enabled)
+        self.ace_pro_switch.connect("notify::active", self.on_ace_pro_toggled)
+        ace_pro_control.pack_start(self.ace_pro_switch, False, False, 0)
+
+        self.ace_pro_status = Gtk.Label()
+        self.ace_pro_status.get_style_context().add_class("description")
+        if self.ace_pro_enabled:
+            self.ace_pro_status.set_markup('<span foreground="green"><b>On</b></span>')
+        else:
+            self.ace_pro_status.set_markup('<span foreground="red">Off</span>')
+        ace_pro_control.pack_start(self.ace_pro_status, False, False, 0)
+
+        endless_spool_row.pack_start(ace_pro_control, True, True, 0)
+
+        # Middle: Endless Spool Enable/Disable
         endless_spool_control = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
 
         endless_spool_label = Gtk.Label(label="Endless Spool:")
@@ -521,13 +555,13 @@ class Panel(ScreenPanel):
 
         # Status indicator
         self.endless_spool_status = Gtk.Label(
-            label="Inactive" if not self.endless_spool_enabled else "Active"
+            label="Off" if not self.endless_spool_enabled else "On"
         )
         self.endless_spool_status.get_style_context().add_class("description")
         if self.endless_spool_enabled:
-            self.endless_spool_status.set_markup('<span foreground="green"><b>Active</b></span>')
+            self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
         else:
-            self.endless_spool_status.set_markup('<span foreground="gray">Inactive</span>')
+            self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
         endless_spool_control.pack_start(self.endless_spool_status, False, False, 0)
 
         endless_spool_row.pack_start(endless_spool_control, True, True, 0)
@@ -675,13 +709,27 @@ class Panel(ScreenPanel):
             self._screen.show_popup_message("Match Mode: Next Ready Spool", 1)
             logging.info("ACE: Match mode set to NEXT READY (ignore material/color)")
 
+    def on_ace_pro_toggled(self, switch, gparam):
+        """Handle ACE Pro enable/disable toggle."""
+        self.ace_pro_enabled = switch.get_active()
+        if self.ace_pro_enabled:
+            self.ace_pro_status.set_markup('<span foreground="green"><b>On</b></span>')
+            self._send_gcode("SET_PIN PIN=ACE_Pro VALUE=1")
+            self._screen.show_popup_message("ACE Pro Enabled", 1)
+            logging.info("ACE: ACE Pro enabled via KlipperScreen")
+        else:
+            self.ace_pro_status.set_markup('<span foreground="red">Off</span>')
+            self._send_gcode("SET_PIN PIN=ACE_Pro VALUE=0")
+            self._screen.show_popup_message("ACE Pro Disabled", 1)
+            logging.info("ACE: ACE Pro disabled via KlipperScreen")
+
     def on_endless_spool_toggled(self, switch, gparam):
         """Handle Endless Spool toggle"""
         self.endless_spool_enabled = switch.get_active()
 
         # Update status label
         if self.endless_spool_enabled:
-            self.endless_spool_status.set_markup('<span foreground="green"><b>Active</b></span>')
+            self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
             # Send gcode to enable endless spool for all instances
             for instance_id in self.ace_instances:
                 instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
@@ -689,7 +737,7 @@ class Panel(ScreenPanel):
             self._screen.show_popup_message("Endless Spool Enabled", 1)
             logging.info("ACE: Endless Spool enabled for all instances")
         else:
-            self.endless_spool_status.set_markup('<span foreground="gray">Inactive</span>')
+            self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
             # Send gcode to disable endless spool for all instances
             for instance_id in self.ace_instances:
                 instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
