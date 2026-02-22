@@ -127,6 +127,9 @@ class Panel(ScreenPanel):
             GLib.timeout_add(100, self._poll_connection_status_once)
             self._conn_poll_timer = GLib.timeout_add_seconds(3, self._poll_connection_status)
 
+        # Lock/unlock ACE Pro toggle based on current printer state
+        self._update_ace_pro_switch_lock()
+
     def _do_activation_refresh(self):
         self._activation_timeout_id = None
         self.refresh_all_instances()
@@ -166,6 +169,7 @@ class Panel(ScreenPanel):
             direct_ws.send_method("printer.objects.query", {"objects": objects}, _cb)
         except Exception as e:
             logging.debug(f"ACE: connection poll error: {e}")
+        self._update_ace_pro_switch_lock()
         return True  # keep GLib timer running
 
     def _update_connection_status_label(self):
@@ -430,6 +434,7 @@ class Panel(ScreenPanel):
                             pass
                     self.ace_pro_enabled = ace_pro_enabled
                     self._update_ace_pro_sensitivity(ace_pro_enabled)
+                    self._update_ace_pro_switch_lock()
 
                 # Sensor states: True/False = filament present/absent; None = sensor not available
                 toolhead_sensor = ace_state.get("toolhead_sensor")
@@ -721,6 +726,18 @@ class Panel(ScreenPanel):
             widget = getattr(self, attr, None)
             if widget is not None:
                 widget.set_sensitive(bool(enabled))
+
+    def _update_ace_pro_switch_lock(self):
+        """Disable the ACE Pro toggle while a print is running or paused."""
+        try:
+            state = self._printer.state
+        except Exception:
+            state = "ready"
+        locked = state in ("printing", "paused")
+        widget = getattr(self, "ace_pro_control", None)
+        if widget is not None:
+            widget.set_sensitive(not locked)
+            widget.set_opacity(0.45 if locked else 1.0)
 
     def _build_match_mode_popover(self):
         """Create popover for match mode selection (touch-friendly)."""
