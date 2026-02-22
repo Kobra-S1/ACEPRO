@@ -1023,8 +1023,32 @@ class Panel(ScreenPanel):
 
         self._gtk.Dialog(f"Load Tool T{global_tool}", buttons, label, load_response)
 
+    def _sensors_indicate_no_filament(self):
+        """Return True if any configured sensor reports filament absent.
+
+        Checks toolhead_sensor and rdm_sensor (both updated from Klipper via RPC).
+        A value of None means the sensor is not configured — it is ignored.
+        Returns False when no sensors are configured (can't determine anything).
+        """
+        any_configured = False
+        for val in (self.toolhead_sensor, self.rdm_sensor):
+            if val is None:
+                continue          # sensor not fitted — skip
+            any_configured = True
+            if val is False:      # sensor present but reads clear
+                return True
+        return False              # all configured sensors say filament present (or none fitted)
+
     def show_unload_confirmation(self, instance_id, global_tool):
-        """Show confirmation dialog to unload a tool"""
+        """Show confirmation dialog to unload a tool.
+
+        If the sensor state contradicts the loaded-tool state (i.e. the system
+        thinks T{global_tool} is loaded but sensors report no filament) an
+        inconsistency warning is shown instead, giving the user three options:
+          • Cancel — do nothing
+          • Load   — treat ACE state as stale and load the tool fresh
+          • Unload — force a smart-unload to clean up ACE state
+        """
         local_slot = global_tool - self.instance_data[instance_id]['tool_offset']
 
         # Validate UI is initialized before accessing
@@ -1041,6 +1065,60 @@ class Panel(ScreenPanel):
             return
 
         slot_info = instance['slot_labels'][local_slot].get_text()
+
+        # Build a human-readable summary of the current sensor readings.
+        def _sensor_summary():
+            parts = []
+            if self.toolhead_sensor is not None:
+                parts.append(f"Toolhead: {'present' if self.toolhead_sensor else 'clear'}")
+            if self.rdm_sensor is not None:
+                parts.append(f"RDM: {'present' if self.rdm_sensor else 'clear'}")
+            return ", ".join(parts) if parts else "no sensors"
+
+        if self._sensors_indicate_no_filament():
+            # Inconsistency: ACE thinks tool is loaded but sensors say no filament
+            logging.warning(
+                f"ACE: Inconsistency detected — T{global_tool} marked loaded "
+                f"but sensors report clear ({_sensor_summary()})"
+            )
+            message = (
+                f"⚠ Inconsistent state for T{global_tool}\n\n"
+                f"{slot_info}\n\n"
+                f"ACE tool state is indicatingloaded, but the filament sensors "
+                f"report no filament ({_sensor_summary()}).\n\n"
+                f"Filament may have been removed manually.\n\n"
+                f"What would you like to do?"
+            )
+            label = Gtk.Label(label=message)
+            label.set_line_wrap(True)
+            label.set_justify(Gtk.Justification.CENTER)
+
+            # Three-way choice via distinct response codes
+            _RESP_LOAD   = Gtk.ResponseType.YES
+            _RESP_UNLOAD = Gtk.ResponseType.OK
+
+            buttons = [
+                {"name": "Cancel", "response": Gtk.ResponseType.CANCEL},
+                {"name": "Load",   "response": _RESP_LOAD},
+                {"name": "Unload", "response": _RESP_UNLOAD},
+            ]
+
+            def inconsistency_response(dialog, response_id):
+                self._gtk.remove_dialog(dialog)
+                if response_id == _RESP_LOAD:
+                    self._send_gcode(f"T{global_tool}")
+                    self._screen.show_popup_message(f"Loading T{global_tool}...", 1)
+                elif response_id == _RESP_UNLOAD:
+                    self._send_gcode("TR")
+                    self._screen.show_popup_message("Unloading...", 1)
+
+            self._gtk.Dialog(
+                f"Inconsistent State — T{global_tool}",
+                buttons, label, inconsistency_response
+            )
+            return
+
+        # Normal case: sensors confirm filament is present — straightforward unload
         message = f"Unload Tool T{global_tool}?\n\n{slot_info}"
 
         label = Gtk.Label(label=message)
