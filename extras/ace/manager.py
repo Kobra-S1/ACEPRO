@@ -834,18 +834,32 @@ class AceManager:
             if slot_status == "empty":
                 raise Exception(
                     f"Cannot unload T{tool_index} - ACE slot {local_slot} is EMPTY.\n"
-                    f"PROBLEM: Spool ran out but filament still in bowden tube.\n"
-                    f"SOLUTION: Manually pull filament from toolhead OR cut at toolhead,\n"
-                    f"          then reload spool on ACE {instance_num}, slot {local_slot}."
                 )
 
-            # Sensor already clear - simple retract
+            # Sensor already clear - choose retract distance based on path state
             if not self.get_instant_switch_state(SENSOR_TOOLHEAD):
-                self.gcode.respond_info(f"ACE: Sensor clear, standard retract of T{tool_index}")
-                parkposition_to_toolhead_length = self._get_config_for_tool(
-                    tool_index, "parkposition_to_toolhead_length"
-                )
-                instance._smart_unload_slot(local_slot, length=parkposition_to_toolhead_length)
+                if self.is_filament_path_free_instant():
+                    # All sensors clear: filament was likely manually removed.
+                    # A short safety retract is enough to pull back any tip sitting
+                    # just inside the ACE hub above the sensor boundary.
+                    param = "parkposition_to_rdm_length" if self.has_rdm_sensor() \
+                        else "parkposition_to_toolhead_length"
+                    retract_dist = self._get_config_for_tool(tool_index, param)
+                    self.gcode.respond_info(
+                        f"ACE: Filament path fully free for T{tool_index} "
+                        f"(filament may have been manually removed) - "
+                        f"short safety retract of {retract_dist}mm"
+                    )
+                else:
+                    # Toolhead clear but RDM still triggered: full retract needed.
+                    retract_dist = self._get_config_for_tool(
+                        tool_index, "parkposition_to_toolhead_length"
+                    )
+                    self.gcode.respond_info(
+                        f"ACE: Toolhead clear, RDM triggered - full retract of T{tool_index} ({retract_dist}mm)"
+                    )
+
+                instance._smart_unload_slot(local_slot, length=retract_dist)
 
                 if self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -2042,6 +2056,17 @@ class AceManager:
 
     def get_status(self, eventtime=None):
         try:
+            # Sensor states: True/False when sensor is registered, None when unavailable.
+            toolhead_sensor = (
+                self.get_switch_state(SENSOR_TOOLHEAD)
+                if SENSOR_TOOLHEAD in self.sensors
+                else None
+            )
+            rdm_sensor = (
+                self.get_switch_state(SENSOR_RDM)
+                if SENSOR_RDM in self.sensors
+                else None
+            )
             return {
                 "ace_instances": len(self.instances),
                 "current_index": self.state.get("ace_current_index", -1),
@@ -2051,6 +2076,9 @@ class AceManager:
                 "endless_spool_match_mode": self.state.get(
                     "ace_endless_spool_match_mode", "exact"
                 ),
+                "ace_pro_enabled": bool(self._ace_pro_enabled),
+                "toolhead_sensor": toolhead_sensor,
+                "rdm_sensor": rdm_sensor,
             }
         except Exception:
             return {
@@ -2058,6 +2086,9 @@ class AceManager:
                 "current_index": -1,
                 "endless_spool_enabled": False,
                 "endless_spool_match_mode": "exact",
+                "ace_pro_enabled": False,
+                "toolhead_sensor": None,
+                "rdm_sensor": None,
             }
 
     def _resolve_instance_config(self, instance_num):

@@ -2451,6 +2451,7 @@ class TestSmartUnload(unittest.TestCase):
             return AceManager(self.mock_config, dummy_ace_count=1)
 
     def test_known_tool_sensor_clear_success(self):
+        """Sensor clear, no RDM: full parkposition_to_toolhead_length safety retract."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
         manager.state.set = Mock()
@@ -2458,6 +2459,8 @@ class TestSmartUnload(unittest.TestCase):
         for slot in manager.instances[0].inventory:
             slot["status"] = "ready"
         manager.prepare_toolhead_for_filament_retraction = Mock()
+        # Sensors not registered → get_instant_switch_state returns False (clear),
+        # is_filament_path_free_instant returns True (path free), has_rdm_sensor False
         manager.get_switch_state = Mock(return_value=False)
         manager.is_filament_path_free = Mock(return_value=True)
 
@@ -2465,6 +2468,70 @@ class TestSmartUnload(unittest.TestCase):
 
         self.assertTrue(result)
         instance._smart_unload_slot.assert_called_once()
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+    def test_known_tool_manually_removed_path_free_with_rdm(self):
+        """Toolhead clear + path fully free WITH RDM: only parkposition_to_rdm_length retract.
+
+        Covers the case where filament was manually pulled out of the printer
+        while the tool was still marked as loaded.  With RDM present and both
+        sensors reading clear the code must use the shorter safety-retract
+        distance (parkposition_to_rdm_length) instead of the full bowden length.
+        """
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        # Toolhead clear (not triggered)
+        manager.get_instant_switch_state = Mock(return_value=False)
+        # Entire path is free
+        manager.is_filament_path_free_instant = Mock(return_value=True)
+        # RDM sensor is present
+        manager.has_rdm_sensor = Mock(return_value=True)
+
+        result = manager.smart_unload(tool_index=1, prepare_toolhead=False)
+
+        self.assertTrue(result)
+        # Must use the short RDM-distance retract, NOT the full toolhead length
+        expected_length = instance.parkposition_to_rdm_length  # 350 in test setup
+        instance._smart_unload_slot.assert_called_once_with(
+            local_slot=1, length=expected_length
+        ) if False else instance._smart_unload_slot.assert_called_once()
+        args, kwargs = instance._smart_unload_slot.call_args
+        actual_length = kwargs.get("length", args[1] if len(args) > 1 else None)
+        self.assertEqual(actual_length, expected_length,
+                         "Safety retract length should be parkposition_to_rdm_length when RDM is present")
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+    def test_known_tool_toolhead_clear_rdm_triggered_full_retract(self):
+        """Toolhead clear but RDM still triggered: fall through to full parkposition_to_toolhead_length retract.
+
+        Covers the case where the toolhead sensor clears (e.g. filament tip
+        passed back past the toolhead sensor) but the RDM sensor still detects
+        filament in the bowden tube.  Full retract length required.
+        """
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        # Toolhead clear
+        manager.get_instant_switch_state = Mock(return_value=False)
+        # First call: RDM still triggered → path NOT fully free → do full retract
+        # Second call: post-retract validation → path is now free
+        manager.is_filament_path_free_instant = Mock(side_effect=[False, True])
+        manager.has_rdm_sensor = Mock(return_value=True)
+
+        result = manager.smart_unload(tool_index=1, prepare_toolhead=False)
+
+        self.assertTrue(result)
+        # Must use the full toolhead distance, NOT the short RDM-only safety length
+        args, kwargs = instance._smart_unload_slot.call_args
+        actual_length = kwargs.get("length", args[1] if len(args) > 1 else None)
+        expected_length = instance.parkposition_to_toolhead_length  # 500 in test setup
+        self.assertEqual(actual_length, expected_length,
+                         "Full retract length required when RDM sensor is still triggered")
         manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
     def test_known_tool_empty_slot_raises(self):

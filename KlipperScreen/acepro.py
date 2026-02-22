@@ -61,6 +61,9 @@ class Panel(ScreenPanel):
         self.current_loaded_slot = -1
         self.endless_spool_enabled = False
         self.dryer_enabled = False
+        self.ace_pro_enabled = True   # assume enabled until first RPC update
+        self.toolhead_sensor = None   # True/False when known, None = sensor not configured
+        self.rdm_sensor = None        # True/False when known, None = sensor not configured
         self.numpad_visible = False
         self.current_instance = 0  # Currently displayed instance
         self.selected_dryer_instance = "ALL"  # Selected dryer instance: 0, 1, or "ALL"
@@ -217,7 +220,7 @@ class Panel(ScreenPanel):
                         "feed_assist_count",
                         "cont_assist_time",
                     ]
-                    objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode"]}
+                    objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"]}
                     for instance_id in self.ace_instances:
                         key = f"ace_instance_{instance_id}"
                         objects[key] = ace_fields
@@ -285,7 +288,7 @@ class Panel(ScreenPanel):
                 "feed_assist_count",
                 "cont_assist_time",
             ]
-            objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode"]}
+            objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"]}
             for instance_id in self.ace_instances:
                 key = f"ace_instance_{instance_id}"
                 objects[key] = ace_fields
@@ -341,6 +344,25 @@ class Panel(ScreenPanel):
                 match_mode = ace_state.get("endless_spool_match_mode")
                 if isinstance(match_mode, str):
                     self._set_match_mode_ui(match_mode)
+
+                # ACE Pro enabled flag
+                ace_pro_enabled = ace_state.get("ace_pro_enabled")
+                if isinstance(ace_pro_enabled, bool):
+                    self.ace_pro_enabled = ace_pro_enabled
+
+                # Sensor states: True/False = filament present/absent; None = sensor not available
+                toolhead_sensor = ace_state.get("toolhead_sensor")
+                if toolhead_sensor is not None or "toolhead_sensor" in ace_state:
+                    self.toolhead_sensor = toolhead_sensor
+
+                rdm_sensor = ace_state.get("rdm_sensor")
+                if rdm_sensor is not None or "rdm_sensor" in ace_state:
+                    self.rdm_sensor = rdm_sensor
+
+                logging.debug(
+                    f"ACE: state update — ace_pro_enabled={self.ace_pro_enabled} "
+                    f"toolhead_sensor={self.toolhead_sensor} rdm_sensor={self.rdm_sensor}"
+                )
 
             # Per-instance slots
             for instance_id in self.ace_instances:
