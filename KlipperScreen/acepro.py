@@ -43,6 +43,7 @@ class Panel(ScreenPanel):
         self.instance_data = {}
         for instance_id in self.ace_instances:
             self.instance_data[instance_id] = {
+                'connection_state': None,
                 'inventory': [{
                     "material": "Empty",
                     "color": [0, 0, 0],
@@ -71,6 +72,7 @@ class Panel(ScreenPanel):
 
         # Initialize attributes used in various methods
         self._activation_timeout_id = None
+        self._conn_poll_timer = None
         self.current_config_instance = None
         self.current_config_slot = None
         self.config_material = None
@@ -119,10 +121,77 @@ class Panel(ScreenPanel):
             200, self._do_activation_refresh
         )
 
+        # Start connection status poll if not already running
+        if self._conn_poll_timer is None:
+            # One-shot immediate query, then repeating every 3s
+            GLib.timeout_add(100, self._poll_connection_status_once)
+            self._conn_poll_timer = GLib.timeout_add_seconds(3, self._poll_connection_status)
+
     def _do_activation_refresh(self):
         self._activation_timeout_id = None
         self.refresh_all_instances()
         return False
+
+    def _poll_connection_status_once(self):
+        """One-shot initial connection state query (called via timeout_add)."""
+        self._poll_connection_status()
+        return False  # do not repeat
+
+    def _poll_connection_status(self):
+        """Query connection_state for each ACE instance directly from Klipper."""
+        try:
+            direct_ws = getattr(
+                getattr(getattr(self, "_screen", None), "_ws", None),
+                "klippy", None
+            )
+            direct_ws = getattr(direct_ws, "_ws", None)
+            if not callable(getattr(direct_ws, "send_method", None)):
+                return True
+
+            objects = {f"ace_instance_{i}": ["connection_state"] for i in self.ace_instances}
+
+            def _cb(response, *_):
+                try:
+                    result = (response or {}).get("result", {})
+                    status = (result or {}).get("status", {})
+                    for instance_id in self.ace_instances:
+                        key = f"ace_instance_{instance_id}"
+                        val = (status.get(key) or {}).get("connection_state")
+                        if val is not None:
+                            self.instance_data[instance_id]["connection_state"] = str(val)
+                    self._update_connection_status_label()
+                except Exception as e:
+                    logging.debug(f"ACE: connection poll callback error: {e}")
+
+            direct_ws.send_method("printer.objects.query", {"objects": objects}, _cb)
+        except Exception as e:
+            logging.debug(f"ACE: connection poll error: {e}")
+        return True  # keep GLib timer running
+
+    def _update_connection_status_label(self):
+        """Update top-bar label from per-instance connection_state strings."""
+        if not hasattr(self, "conn_status_label") or self.conn_status_label is None:
+            return
+        first_issue = None
+        any_unknown = False
+        for instance_id in self.ace_instances:
+            state = self.instance_data.get(instance_id, {}).get("connection_state", None)
+            if state is None:
+                any_unknown = True
+            elif state != "connected":
+                first_issue = first_issue or f"ACE[{instance_id}]: {state}"
+        if first_issue is not None:
+            self.conn_status_label.set_markup(
+                f'<span foreground="orange"><b>{first_issue}</b></span>'
+            )
+        elif any_unknown:
+            self.conn_status_label.set_markup(
+                '<span foreground="gray">Checking...</span>'
+            )
+        else:
+            self.conn_status_label.set_markup(
+                '<span foreground="green"><b>Connection: OK</b></span>'
+            )
 
     def _detect_ace_instances(self):
         """Detect available ACE instances from Klipper config, using ace_count if present"""
@@ -331,6 +400,10 @@ class Panel(ScreenPanel):
                         self.endless_spool_switch.handler_block_by_func(self.on_endless_spool_toggled)
                         self.endless_spool_switch.set_active(endless_enabled)
                         self.endless_spool_switch.handler_unblock_by_func(self.on_endless_spool_toggled)
+                        self.endless_spool_status.set_markup(
+                            '<span foreground="green"><b>On</b></span>' if endless_enabled
+                            else '<span foreground="gray">Off</span>'
+                        )
                         self.endless_spool_enabled = endless_enabled
                         self._update_match_mode_sensitivity()
                     except Exception:
@@ -349,6 +422,10 @@ class Panel(ScreenPanel):
                             self.ace_pro_switch.handler_block_by_func(self.on_ace_pro_toggled)
                             self.ace_pro_switch.set_active(ace_pro_enabled)
                             self.ace_pro_switch.handler_unblock_by_func(self.on_ace_pro_toggled)
+                            self.ace_pro_status.set_markup(
+                                '<span foreground="green"><b>On</b></span>' if ace_pro_enabled
+                                else '<span foreground="red">Off</span>'
+                            )
                         except Exception:
                             pass
                     self.ace_pro_enabled = ace_pro_enabled
@@ -494,7 +571,15 @@ class Panel(ScreenPanel):
         self.status_label = Gtk.Label(label="ACE System: Ready")
         self.status_label.get_style_context().add_class("temperature_entry")
         self.status_label.set_halign(Gtk.Align.START)
-        top_row.pack_start(self.status_label, True, True, 0)
+        top_row.pack_start(self.status_label, False, False, 0)
+
+        # Connection state indicator — centered, updated by poll timer
+        self.conn_status_label = Gtk.Label()
+        self.conn_status_label.get_style_context().add_class("description")
+        self.conn_status_label.set_halign(Gtk.Align.CENTER)
+        self.conn_status_label.set_hexpand(True)
+        self.conn_status_label.set_markup('<span foreground="gray">Checking...</span>')
+        top_row.pack_start(self.conn_status_label, True, True, 0)
 
         # Utilities entry point (compact)
         spool_btn = Gtk.Button(label="Utilities")
@@ -507,7 +592,7 @@ class Panel(ScreenPanel):
         main_box.pack_start(top_row, False, False, 0)
 
         # Endless Spool row with three controls: ACE Pro | Endless Spool | Match Mode
-        endless_spool_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        endless_spool_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
         endless_spool_row.set_margin_top(5)
 
         # Far left: ACE Pro Enable/Disable
@@ -523,7 +608,15 @@ class Panel(ScreenPanel):
         self.ace_pro_switch.connect("notify::active", self.on_ace_pro_toggled)
         ace_pro_control.pack_start(self.ace_pro_switch, False, False, 0)
 
-        endless_spool_row.pack_start(ace_pro_control, False, False, 0)
+        self.ace_pro_status = Gtk.Label()
+        self.ace_pro_status.get_style_context().add_class("description")
+        if self.ace_pro_enabled:
+            self.ace_pro_status.set_markup('<span foreground="green"><b>On</b></span>')
+        else:
+            self.ace_pro_status.set_markup('<span foreground="red">Off</span>')
+        ace_pro_control.pack_start(self.ace_pro_status, False, False, 0)
+
+        endless_spool_row.pack_start(ace_pro_control, True, True, 0)
 
         # Middle: Endless Spool Enable/Disable
         endless_spool_control = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -538,6 +631,17 @@ class Panel(ScreenPanel):
         self.endless_spool_switch.set_active(self.endless_spool_enabled)
         self.endless_spool_switch.connect("notify::active", self.on_endless_spool_toggled)
         endless_spool_control.pack_start(self.endless_spool_switch, False, False, 0)
+
+        # Status indicator
+        self.endless_spool_status = Gtk.Label(
+            label="Off" if not self.endless_spool_enabled else "On"
+        )
+        self.endless_spool_status.get_style_context().add_class("description")
+        if self.endless_spool_enabled:
+            self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
+        else:
+            self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
+        endless_spool_control.pack_start(self.endless_spool_status, False, False, 0)
 
         endless_spool_row.pack_start(endless_spool_control, True, True, 0)
         self.endless_spool_control = endless_spool_control
@@ -555,7 +659,7 @@ class Panel(ScreenPanel):
         self.match_mode_button = Gtk.MenuButton()
         self.match_mode_button.set_relief(Gtk.ReliefStyle.NORMAL)
         self.match_mode_button.get_style_context().add_class("color3")
-        self.match_mode_button.set_size_request(150, 36)
+        self.match_mode_button.set_size_request(170, 36)
         self._build_match_mode_popover()
         match_mode_control.pack_start(self.match_mode_button, False, False, 0)
 
@@ -596,6 +700,7 @@ class Panel(ScreenPanel):
         self.dryer_btn = self._gtk.Button("heat-up", "Dryer Control", "color2")
         self.dryer_btn.set_size_request(-1, 50)
         self.dryer_btn.connect("clicked", self.show_dryer_panel)
+        
         bottom_box.pack_start(self.dryer_btn, True, True, 0)
 
         main_box.pack_start(bottom_box, False, False, 0)
@@ -662,7 +767,7 @@ class Panel(ScreenPanel):
 
         if update_widget and hasattr(self, 'match_mode_button'):
             self.match_mode_button.set_label(label_map.get(mode, "Exact"))
-            self.match_mode_button.set_size_request(150, 36)
+            self.match_mode_button.set_size_request(170, 36)
             # Only rebuild popover if it doesn't exist yet
             if not hasattr(self, 'match_mode_popover') or self.match_mode_popover is None:
                 self._build_match_mode_popover()
@@ -704,10 +809,12 @@ class Panel(ScreenPanel):
         """Handle ACE Pro enable/disable toggle."""
         self.ace_pro_enabled = switch.get_active()
         if self.ace_pro_enabled:
+            self.ace_pro_status.set_markup('<span foreground="green"><b>On</b></span>')
             self._send_gcode("SET_PIN PIN=ACE_Pro VALUE=1")
             self._screen.show_popup_message("ACE Pro Enabled", 1)
             logging.info("ACE: ACE Pro enabled via KlipperScreen")
         else:
+            self.ace_pro_status.set_markup('<span foreground="red">Off</span>')
             self._send_gcode("SET_PIN PIN=ACE_Pro VALUE=0")
             self._screen.show_popup_message("ACE Pro Disabled", 1)
             logging.info("ACE: ACE Pro disabled via KlipperScreen")
@@ -717,7 +824,9 @@ class Panel(ScreenPanel):
         """Handle Endless Spool toggle"""
         self.endless_spool_enabled = switch.get_active()
 
+        # Update status label
         if self.endless_spool_enabled:
+            self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
             # Send gcode to enable endless spool for all instances
             for instance_id in self.ace_instances:
                 instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
@@ -725,6 +834,7 @@ class Panel(ScreenPanel):
             self._screen.show_popup_message("Endless Spool Enabled", 1)
             logging.info("ACE: Endless Spool enabled for all instances")
         else:
+            self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
             # Send gcode to disable endless spool for all instances
             for instance_id in self.ace_instances:
                 instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
@@ -1212,6 +1322,10 @@ class Panel(ScreenPanel):
                                         self.ace_pro_switch.handler_block_by_func(self.on_ace_pro_toggled)
                                         self.ace_pro_switch.set_active(enabled)
                                         self.ace_pro_switch.handler_unblock_by_func(self.on_ace_pro_toggled)
+                                        self.ace_pro_status.set_markup(
+                                            '<span foreground="green"><b>On</b></span>' if enabled
+                                            else '<span foreground="red">Off</span>'
+                                        )
                                     except Exception:
                                         pass
                                 self._update_ace_pro_sensitivity(enabled)

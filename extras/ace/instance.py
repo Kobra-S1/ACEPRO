@@ -1670,6 +1670,9 @@ class AceInstance:
 
         status["slots"] = slots_out
 
+        # Expose communication state machine for KlipperScreen connection indicator
+        status["connection_state"] = getattr(self.serial_mgr, "connection_state", "unknown")
+
         return status
 
     def dwell(self, delay=1.0, verbose=False):

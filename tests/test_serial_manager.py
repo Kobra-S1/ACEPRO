@@ -1474,8 +1474,7 @@ class TestQueueManagement:
                 instance_num=0,
                 ace_enabled=False
             )
-            # Queue mechanics tests require ACE Pro enabled so send_request
-            # actually enqueues (it drops silently when disabled).
+            # Enable so queue tests can actually enqueue requests
             self.manager._ace_pro_enabled = True
 
     def test_high_priority_dequeued_first(self):
