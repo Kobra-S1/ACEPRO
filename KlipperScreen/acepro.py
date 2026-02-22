@@ -592,7 +592,7 @@ class Panel(ScreenPanel):
         main_box.pack_start(top_row, False, False, 0)
 
         # Endless Spool row with three controls: ACE Pro | Endless Spool | Match Mode
-        endless_spool_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+        endless_spool_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         endless_spool_row.set_margin_top(5)
 
         # Far left: ACE Pro Enable/Disable
@@ -614,8 +614,6 @@ class Panel(ScreenPanel):
             self.ace_pro_status.set_markup('<span foreground="green"><b>On</b></span>')
         else:
             self.ace_pro_status.set_markup('<span foreground="red">Off</span>')
-        ace_pro_control.pack_start(self.ace_pro_status, False, False, 0)
-
         endless_spool_row.pack_start(ace_pro_control, True, True, 0)
 
         # Middle: Endless Spool Enable/Disable
@@ -641,8 +639,6 @@ class Panel(ScreenPanel):
             self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
         else:
             self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
-        endless_spool_control.pack_start(self.endless_spool_status, False, False, 0)
-
         endless_spool_row.pack_start(endless_spool_control, True, True, 0)
         self.endless_spool_control = endless_spool_control
 
@@ -659,7 +655,7 @@ class Panel(ScreenPanel):
         self.match_mode_button = Gtk.MenuButton()
         self.match_mode_button.set_relief(Gtk.ReliefStyle.NORMAL)
         self.match_mode_button.get_style_context().add_class("color3")
-        self.match_mode_button.set_size_request(170, 36)
+        self.match_mode_button.set_size_request(150, 36)
         self._build_match_mode_popover()
         match_mode_control.pack_start(self.match_mode_button, False, False, 0)
 
