@@ -5,9 +5,12 @@ These are pure functions with no hardware dependencies - easy to test!
 """
 import pytest
 from ace.config import (
+    AceSlotStateMachineState,
+    ACE_SLOT_STATE_MACHINE_STATE_BY_CODE,
     get_tool_offset,
     get_instance_from_tool,
     get_local_slot,
+    normalize_ace_slot_state,
     parse_instance_number,
     parse_instance_config,
     create_empty_inventory_slot,
@@ -235,13 +238,69 @@ class TestInventoryHelpers:
             assert slot['sku'] == ''
             assert slot['type'] == ''
             assert slot['color'] == [0, 0, 0]
-    
+
     def test_create_status_dict_custom_count(self):
         """Create status dict with custom slot count."""
         from ace.config import create_status_dict
         
         status = create_status_dict(8)
         assert len(status['slots']) == 8
+
+
+class TestAceSlotStateMachineState:
+    """Test ACE hardware slot state-machine enum and normalization."""
+
+    def test_enum_values_match_expected_ace_strings(self):
+        """Enum values should match ACE slot.status strings exactly."""
+        assert AceSlotStateMachineState.EMPTY.value == "empty"
+        assert AceSlotStateMachineState.READY.value == "ready"
+        assert AceSlotStateMachineState.FEEDING.value == "feeding"
+        assert AceSlotStateMachineState.UNWINDING.value == "unwinding"
+        assert AceSlotStateMachineState.SHIFTING.value == "shifting"
+        assert AceSlotStateMachineState.GEAR_ERR.value == "gear_err"
+        assert AceSlotStateMachineState.PRELOAD.value == "preload"
+        assert AceSlotStateMachineState.IDENTIFYING.value == "identifying"
+        assert AceSlotStateMachineState.TMC_ERR.value == "tmc_err"
+
+    def test_code_mapping_covers_known_state_machine_codes(self):
+        """ACE codes 0..8 should map to the documented state names."""
+        expected = {
+            0: "empty",
+            1: "ready",
+            2: "feeding",
+            3: "unwinding",
+            4: "shifting",
+            5: "gear_err",
+            6: "preload",
+            7: "identifying",
+            8: "tmc_err",
+        }
+        actual = {code: state.value for code, state in ACE_SLOT_STATE_MACHINE_STATE_BY_CODE.items()}
+        assert actual == expected
+
+    @pytest.mark.parametrize(
+        "raw_state, expected",
+        [
+            ("empty", "empty"),
+            ("READY", "ready"),
+            ("  feeding  ", "feeding"),
+            (AceSlotStateMachineState.UNWINDING, "unwinding"),
+            (0, "empty"),
+            (1, "ready"),
+            (7, "identifying"),
+            (8, "tmc_err"),
+        ],
+    )
+    def test_normalize_ace_slot_state_known_values(self, raw_state, expected):
+        """Known string/enum/int inputs normalize to ACE state names."""
+        assert normalize_ace_slot_state(raw_state) == expected
+
+    def test_normalize_ace_slot_state_unknown_values(self):
+        """Unknown values should be preserved in a stable best-effort form."""
+        assert normalize_ace_slot_state("Custom_State") == "custom_state"
+        assert normalize_ace_slot_state(99) == "99"
+        assert normalize_ace_slot_state(None) == "empty"
+        assert normalize_ace_slot_state(None, default="ready") == "ready"
 
 
 class TestParseInstanceConfig:

@@ -9,6 +9,7 @@ import copy
 from .config import (
     INSTANCE_MANAGERS,
     SLOTS_PER_ACE,
+    AceSlotStateMachineState,
     SENSOR_RDM,
     SENSOR_TOOLHEAD,
     FILAMENT_STATE_SPLITTER,
@@ -20,6 +21,7 @@ from .config import (
     get_tool_offset,
     create_inventory,
     create_status_dict,
+    normalize_ace_slot_state,
 )
 from .serial_manager import AceSerialManager
 
@@ -212,7 +214,8 @@ class AceInstance:
         """Return True if ACE reports the given slot as empty."""
         for slot in self._info.get("slots", []):
             if slot.get("index") == slot_index:
-                return slot.get("status") == "empty"
+                slot_status = normalize_ace_slot_state(slot.get("status"))
+                return slot_status == AceSlotStateMachineState.EMPTY.value
         return False
 
     def _is_printing_or_paused(self):
@@ -1333,14 +1336,20 @@ class AceInstance:
 
                     # Get current states
                     old_status = self.inventory[idx].get("status")
-                    new_status = slot.get("status", "empty")
+                    new_status = normalize_ace_slot_state(
+                        slot.get("status"),
+                        default=AceSlotStateMachineState.EMPTY.value,
+                    )
 
                     # Detect state changes
                     if old_status != new_status:
                         inventory_changed = True
 
                         # Log the state transition
-                        if old_status == "empty" and new_status == "ready":
+                        if (
+                            old_status == AceSlotStateMachineState.EMPTY.value
+                            and new_status == AceSlotStateMachineState.READY.value
+                        ):
                             # Check if the new spool is non-RFID (RFID_STATE_NO_INFO = 0)
                             rfid_state = slot.get("rfid")
                             if rfid_state == RFID_STATE_NO_INFO and saved_rfid:
@@ -1373,14 +1382,17 @@ class AceInstance:
                                 )
                             filament_loaded = True
 
-                        elif old_status == "ready" and new_status == "empty":
+                        elif (
+                            old_status == AceSlotStateMachineState.READY.value
+                            and new_status == AceSlotStateMachineState.EMPTY.value
+                        ):
                             self.gcode.respond_info(
                                 f"ACE[{self.instance_num}]: Slot {idx} marked empty "
                                 f"(was: material={saved_material})"
                             )
 
                     # If slot is empty, clear RFID marker and metadata
-                    if new_status == "empty":
+                    if new_status == AceSlotStateMachineState.EMPTY.value:
                         updated_rfid = False
                         # Clear all optional RFID fields
                         for key in [
@@ -1404,7 +1416,7 @@ class AceInstance:
                             inventory_changed = True  # Force persistence update
 
                     # Handle RFID tag detection - only query get_filament_info, don't use status metadata
-                    elif new_status == "ready":
+                    elif new_status == AceSlotStateMachineState.READY.value:
                         rfid_state = slot.get("rfid")
 
                         # When RFID sync enabled: only use data from get_filament_info callback

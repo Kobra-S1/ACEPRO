@@ -6,6 +6,7 @@ that don't depend on specific instances.
 """
 
 import re
+from enum import Enum
 
 
 # ========== ACE Instance Constants ==========
@@ -41,6 +42,51 @@ RFID_STATE_IDENTIFYING = 3     # Currently identifying tag
 # When enabled, ACE hardware status updates (from RFID or manual changes)
 # automatically sync material/color data to Klipper inventory
 RFID_INVENTORY_SYNC_ENABLED = True  # Default: enabled
+
+
+class AceSlotStateMachineState(str, Enum):
+    """ACE hardware per-slot state machine states (from get_status slot.status)."""
+
+    EMPTY = "empty"
+    READY = "ready"
+    FEEDING = "feeding"
+    UNWINDING = "unwinding"
+    SHIFTING = "shifting"
+    GEAR_ERR = "gear_err"
+    PRELOAD = "preload"
+    IDENTIFYING = "identifying"
+    TMC_ERR = "tmc_err"
+
+
+ACE_SLOT_STATE_MACHINE_STATE_BY_CODE = {
+    0: AceSlotStateMachineState.EMPTY,
+    1: AceSlotStateMachineState.READY,
+    2: AceSlotStateMachineState.FEEDING,
+    3: AceSlotStateMachineState.UNWINDING,
+    4: AceSlotStateMachineState.SHIFTING,
+    5: AceSlotStateMachineState.GEAR_ERR,
+    6: AceSlotStateMachineState.PRELOAD,
+    7: AceSlotStateMachineState.IDENTIFYING,
+    8: AceSlotStateMachineState.TMC_ERR,
+}
+
+
+def normalize_ace_slot_state(raw_state, default=AceSlotStateMachineState.EMPTY.value):
+    """
+    Normalize ACE slot state-machine state from numeric code or string to a lowercase string.
+
+    Returns:
+        str: normalized state name (e.g. "ready"), or a best-effort lowercase string.
+    """
+    if raw_state is None:
+        return default
+    if isinstance(raw_state, AceSlotStateMachineState):
+        return raw_state.value
+    if isinstance(raw_state, int):
+        state = ACE_SLOT_STATE_MACHINE_STATE_BY_CODE.get(raw_state)
+        return state.value if state else str(raw_state)
+    return str(raw_state).strip().lower()
+
 
 # Global registry for instances (populated at load time)
 ACE_INSTANCES = {}
