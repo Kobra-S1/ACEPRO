@@ -360,6 +360,7 @@ class Panel(ScreenPanel):
                         except Exception:
                             pass
                     self.ace_pro_enabled = ace_pro_enabled
+                    self._update_ace_pro_sensitivity(ace_pro_enabled)
 
                 # Sensor states: True/False = filament present/absent; None = sensor not available
                 toolhead_sensor = ace_state.get("toolhead_sensor")
@@ -509,6 +510,7 @@ class Panel(ScreenPanel):
         spool_btn.set_relief(Gtk.ReliefStyle.NORMAL)
         spool_btn.connect("clicked", lambda w: self.show_spool_panel(w, reset_selection=True))
         top_row.pack_end(spool_btn, False, False, 0)
+        self.utilities_btn = spool_btn
 
         main_box.pack_start(top_row, False, False, 0)
 
@@ -565,6 +567,7 @@ class Panel(ScreenPanel):
         endless_spool_control.pack_start(self.endless_spool_status, False, False, 0)
 
         endless_spool_row.pack_start(endless_spool_control, True, True, 0)
+        self.endless_spool_control = endless_spool_control
 
         # Right side: Match Mode selector
         match_mode_control = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -590,6 +593,7 @@ class Panel(ScreenPanel):
         self._update_match_mode_sensitivity()
 
         endless_spool_row.pack_start(match_mode_control, True, True, 0)
+        self.match_mode_control = match_mode_control
 
         main_box.pack_start(endless_spool_row, False, False, 0)
 
@@ -604,6 +608,7 @@ class Panel(ScreenPanel):
         refresh_btn.set_size_request(-1, 50)
         refresh_btn.connect("clicked", self.refresh_status)
         bottom_box.pack_start(refresh_btn, True, True, 0)
+        self.refresh_btn = refresh_btn
 
         if len(self.ace_instances) > 1:
             # Use shuffle icon to indicate cycling through instances
@@ -625,6 +630,19 @@ class Panel(ScreenPanel):
         self.content.add(main_box)
         self.display_current_instance()
         self.content.show_all()
+        self._update_ace_pro_sensitivity(self.ace_pro_enabled)
+
+    def _update_ace_pro_sensitivity(self, enabled):
+        """Gray out / restore all controls except the ACE Pro switch itself."""
+        if not enabled and getattr(self, "current_view", "main") != "main":
+            self.return_to_main_screen()
+
+        for attr in ("endless_spool_control", "match_mode_control",
+                     "content_area", "dryer_btn", "utilities_btn",
+                     "refresh_btn", "instance_toggle_btn"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.set_sensitive(bool(enabled))
 
     def _build_match_mode_popover(self):
         """Create popover for match mode selection (touch-friendly)."""
@@ -722,6 +740,7 @@ class Panel(ScreenPanel):
             self._send_gcode("SET_PIN PIN=ACE_Pro VALUE=0")
             self._screen.show_popup_message("ACE Pro Disabled", 1)
             logging.info("ACE: ACE Pro disabled via KlipperScreen")
+        self._update_ace_pro_sensitivity(self.ace_pro_enabled)
 
     def on_endless_spool_toggled(self, switch, gparam):
         """Handle Endless Spool toggle"""
@@ -1210,6 +1229,30 @@ class Panel(ScreenPanel):
                 if isinstance(data, dict):
                     payload = data.get("status") or data
                     if isinstance(payload, dict):
+                        # output_pin ACE_Pro is in the global KlipperScreen
+                        # subscription (all output_pins are subscribed by
+                        # screen.py). ace_state is a custom object that is
+                        # NOT in the global subscription, so we catch the pin
+                        # change here directly and sync the switch immediately.
+                        pin_data = payload.get("output_pin ace_pro") or payload.get("output_pin ACE_Pro")
+                        if isinstance(pin_data, dict) and "value" in pin_data:
+                            enabled = bool(pin_data["value"])
+                            if enabled != self.ace_pro_enabled:
+                                self.ace_pro_enabled = enabled
+                                if hasattr(self, "ace_pro_switch"):
+                                    try:
+                                        self.ace_pro_switch.handler_block_by_func(self.on_ace_pro_toggled)
+                                        self.ace_pro_switch.set_active(enabled)
+                                        self.ace_pro_switch.handler_unblock_by_func(self.on_ace_pro_toggled)
+                                        self.ace_pro_status.set_markup(
+                                            '<span foreground="green"><b>On</b></span>' if enabled
+                                            else '<span foreground="red">Off</span>'
+                                        )
+                                    except Exception:
+                                        pass
+                                self._update_ace_pro_sensitivity(enabled)
+                                logging.info(f"ACE: ace_pro_enabled updated from pin subscription: {enabled}")
+
                         self._process_rpc_status(payload)
                         return
 
