@@ -595,8 +595,14 @@ class TestReader:
 
         ret = self.manager._reader(eventtime=3.0)
 
+        # Binary junk is silently routed through _handle_debug_text and discarded
+        # (non-printable bytes don't reach gcode or callback).
+        # The following valid frame must still be parsed and the timer rescheduled.
         assert ret == 3.0 + 0.05
-        assert any("Resync: skipping" in args[0] or "Resync: dropped junk" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
+        assert not any(
+            "Resync: skipping" in args[0] or "Resync: dropped junk" in args[0]
+            for args, _ in self.mock_gcode.respond_info.call_args_list
+        )
 
     def test_invalid_tail_resyncs(self):
         payload = b'{"ok":1}'
@@ -654,6 +660,185 @@ class TestReader:
         assert ret == 3.0 + 0.05
         assert any("Invalid CRC" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
         self.manager.dispatch_response.assert_not_called()
+
+
+class TestDebugMessageDetection:
+    """
+    Tests for firmware debug text detection and callback dispatch.
+
+    The ACE firmware emits printf-style plain text on the USB CDC port
+    between JSON frames.  _handle_debug_text() decodes these bytes and
+    fires debug_message_callback once per non-empty printable line.
+    """
+
+    def setup_method(self):
+        with patch('ace.serial_manager.serial'):
+            from ace.serial_manager import AceSerialManager
+
+            self.mock_gcode = Mock()
+            self.mock_reactor = Mock()
+            self.mock_reactor.NOW = 10.0
+            self.mock_reactor.NEVER = 999.0
+            self.mock_reactor.register_timer = Mock()
+            self.mock_reactor.monotonic = Mock(return_value=0.0)
+
+            self.manager = AceSerialManager(
+                gcode=self.mock_gcode,
+                reactor=self.mock_reactor,
+                instance_num=1,
+                ace_enabled=True,
+            )
+        self.manager._serial = Mock()
+        self.manager.reconnect = Mock()
+        self.manager.dispatch_response = Mock(return_value=(None, False))
+        self.manager._status_update_callback = Mock()
+        self.manager.read_buffer = bytearray()
+
+    def _make_frame(self, payload_dict):
+        payload = json.dumps(payload_dict).encode('utf-8')
+        crc = struct.pack('<H', self.manager._calc_crc(payload))
+        return b'\xFF\xAA' + struct.pack('<H', len(payload)) + payload + crc + b'\xFE'
+
+    # ---- set_debug_message_callback ----
+
+    def test_set_debug_message_callback_stores_callable(self):
+        """set_debug_message_callback stores the callable on the manager."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+        assert self.manager.debug_message_callback is cb
+
+    def test_debug_message_callback_initially_none(self):
+        """debug_message_callback is None by default."""
+        assert self.manager.debug_message_callback is None
+
+    # ---- _handle_debug_text ----
+
+    def test_single_line_fires_callback(self):
+        """A single printable text line fires the callback exactly once."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        self.manager._handle_debug_text(b" Start to Probe NFC\n")
+
+        cb.assert_called_once_with("Start to Probe NFC")
+
+    def test_multiline_text_fires_callback_per_line(self):
+        """Multiple text lines each trigger a separate callback invocation."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+        raw = b"\n Probe NFC: 0\n SUCCESS! read NFC: 0\n"
+
+        self.manager._handle_debug_text(raw)
+
+        assert cb.call_count == 2
+        cb.assert_any_call("Probe NFC: 0")
+        cb.assert_any_call("SUCCESS! read NFC: 0")
+
+    def test_null_bytes_stripped_before_callback(self):
+        """NUL bytes (USB CDC packet padding) are stripped before line splitting."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        self.manager._handle_debug_text(b"nfc_status 0x01\x00\x00\x00")
+
+        cb.assert_called_once_with("nfc_status 0x01")
+
+    def test_empty_lines_not_forwarded(self):
+        """Blank lines and lines consisting only of whitespace are discarded."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        self.manager._handle_debug_text(b"\n\n   \n")
+
+        cb.assert_not_called()
+
+    def test_empty_bytes_no_callback(self):
+        """Empty input does not invoke the callback."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        self.manager._handle_debug_text(b"")
+
+        cb.assert_not_called()
+
+    def test_binary_non_printable_junk_not_forwarded(self):
+        """Pure binary / non-printable bytes are silently discarded."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        # \x01\x02 are non-printable after null stripping
+        self.manager._handle_debug_text(b"\x01\x02\x03")
+
+        cb.assert_not_called()
+
+    def test_no_callback_registered_no_crash(self):
+        """If no callback is registered, debug text is silently dropped without raising."""
+        assert self.manager.debug_message_callback is None
+
+        # Must not raise
+        self.manager._handle_debug_text(b" ERROR! read NFC: -1\n")
+
+    def test_callback_exception_does_not_propagate(self):
+        """An exception thrown by the callback is caught; processing continues."""
+        cb = Mock(side_effect=RuntimeError("boom"))
+        self.manager.set_debug_message_callback(cb)
+
+        # Must not raise
+        self.manager._handle_debug_text(b"line1\nline2\n")
+
+        # Both lines were attempted despite the exception on the first
+        assert cb.call_count == 2
+
+    # ---- _reader integration ----
+
+    def test_text_before_frame_fires_callback_and_frame_is_processed(self):
+        """Firmware debug text before a valid frame reaches the callback;
+        the frame is still parsed and dispatched normally."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        debug_bytes = b" Probe NFC: 0\n"
+        frame = self._make_frame({"id": 1, "result": "ok"})
+        self.manager._serial.read.return_value = debug_bytes + frame
+
+        cb_response = Mock()
+        self.manager.dispatch_response.return_value = (cb_response, True)
+
+        self.manager._reader(eventtime=0.0)
+
+        cb.assert_called_once_with("Probe NFC: 0")
+        cb_response.assert_called_once()
+
+    def test_text_only_buffer_fires_callback_and_clears_buffer(self):
+        """A buffer containing only debug text (no frame) fires the callback
+        and leaves the read_buffer empty."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        self.manager._serial.read.return_value = b" ERROR! read NFC: -1\n"
+
+        self.manager._reader(eventtime=0.0)
+
+        cb.assert_called_once_with("ERROR! read NFC: -1")
+        assert len(self.manager.read_buffer) == 0
+
+    def test_binary_junk_before_frame_no_callback_frame_processed(self):
+        """Binary junk (non-printable) before a valid frame is silently dropped;
+        no gcode.respond_info 'Resync:' noise, frame still processed."""
+        cb = Mock()
+        self.manager.set_debug_message_callback(cb)
+
+        frame = self._make_frame({"id": 2})
+        raw = b"\x01\x02\x03" + frame
+        self.manager._serial.read.return_value = raw
+
+        self.manager._reader(eventtime=0.0)
+
+        cb.assert_not_called()
+        assert not any(
+            "Resync:" in str(args)
+            for args, _ in self.mock_gcode.respond_info.call_args_list
+        )
 
 
 class TestWriter:

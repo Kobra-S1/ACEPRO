@@ -289,6 +289,9 @@ class AceManager:
 
         if self._ace_pro_enabled:
             for instance in self.instances:
+                instance.set_debug_message_callback(
+                    lambda line, num=instance.instance_num: self._on_ace_debug_message(num, line)
+                )
                 instance.serial_mgr.connect_to_ace(self.ace_config["baud"], 2)
             self._setup_sensors()
         else:
@@ -302,6 +305,22 @@ class AceManager:
         self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
 
         self._start_monitoring()
+
+    def _on_ace_debug_message(self, instance_num: int, line: str) -> None:
+        """
+        Handle a single line of firmware debug output from an ACE unit.
+
+        The ACE firmware routes NFC probe results, sensor diagnostics, and
+        other printf output to the USB CDC port (between JSON frames).  This
+        method is registered as the debug_message_callback on each instance's
+        serial manager at startup.
+
+        Args:
+            instance_num: ACE instance that sent the message.
+            line:         Single stripped text line received from the device.
+        """
+        logging.info("ACE[%d]: DBG: %s", instance_num, line)
+        self.gcode.respond_info(f"ACE[{instance_num}]: DBG: {line}")
 
     def _handle_shutdown(self):
         """Called on Klipper emergency stop or fatal shutdown.

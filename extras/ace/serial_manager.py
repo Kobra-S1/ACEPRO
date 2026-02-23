@@ -79,6 +79,7 @@ class AceSerialManager:
         self.heartbeat_interval = 1.0
         self.heartbeat_callback = None
         self.on_connect_callback = None
+        self.debug_message_callback = None
 
         self.timeout_s = self.DEFAULT_TIMEOUT_S
         self.timeout_multiplier = 2
@@ -1048,6 +1049,64 @@ class AceSerialManager:
         """
         self.on_connect_callback = callback
 
+    def set_debug_message_callback(self, callback: callable) -> None:
+        """
+        Set the callback for firmware debug messages received outside JSON frames.
+
+        The ACE firmware emits printf-style debug text on the USB CDC port,
+        interleaved with framed JSON responses.  Each complete, printable text
+        line is forwarded to this callback.
+
+        Args:
+            callback: Function(line: str) called once per decoded debug line.
+        """
+        self.debug_message_callback = callback
+
+    def _handle_debug_text(self, raw: bytes) -> None:
+        """
+        Decode raw bytes that arrived outside a JSON frame and dispatch them
+        to the debug_message_callback as individual text lines.
+
+        The ACE firmware printf chain (0x0801e4dc) routes NFC probe results,
+        sensor diagnostics, and other developer output to a SRAM ring-buffer
+        (0x20000078) that is flushed to the USB CDC TX path (0x0801f858).
+        These bytes arrive on the same /dev/ttyACMx port as JSON frames,
+        but outside any 0xFF 0xAA...0xFE envelope.
+
+        Non-printable or purely binary data is silently discarded.
+
+        Args:
+            raw: Raw bytes that arrived before or between JSON frames.
+        """
+        if not raw:
+            return
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            return
+
+        # Strip NUL bytes used as USB CDC packet padding
+        text = text.replace("\x00", "")
+
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Only forward lines with at least some printable content
+            if not any(c.isprintable() for c in line):
+                continue
+            if self.debug_message_callback:
+                try:
+                    self.debug_message_callback(line)
+                except Exception as e:
+                    logging.warning(
+                        f"ACE[{self.instance_num}]: debug_message_callback error: {e}"
+                    )
+            else:
+                logging.debug(
+                    f"ACE[{self.instance_num}]: DBG (no handler): {line}"
+                )
+
     def start_heartbeat(self):
         """
         Start the heartbeat timer to send periodic status requests.
@@ -1206,13 +1265,13 @@ class AceSerialManager:
             if not (buf[0] == 0xFF and buf[1] == 0xAA):
                 hdr = buf.find(bytes([0xFF, 0xAA]))
                 if hdr == -1:
-                    self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: Resync: dropped junk ({len(buf)} bytes)"
-                    )
+                    # No frame header anywhere: may be firmware debug text
+                    self._handle_debug_text(bytes(buf))
                     self.read_buffer = bytearray()
                     break
                 else:
-                    self.gcode.respond_info(f"ACE[{self.instance_num}]: Resync: skipping {hdr} bytes")
+                    # Firmware debug text before the next frame
+                    self._handle_debug_text(bytes(buf[:hdr]))
                     self.read_buffer = buf[hdr:]
                     buf = self.read_buffer
                     if len(buf) < 7:

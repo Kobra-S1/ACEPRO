@@ -169,6 +169,19 @@ class AceInstance:
         """Queue high-priority request."""
         self.serial_mgr.send_high_prio_request(request, callback)
 
+    def set_debug_message_callback(self, callback: callable) -> None:
+        """
+        Register a callback for firmware debug messages received outside JSON frames.
+
+        The ACE firmware emits printf-style debug text on USB CDC between
+        framed JSON responses.  Each decoded text line is forwarded to the
+        registered callback.
+
+        Args:
+            callback: Function(line: str) called once per decoded debug line.
+        """
+        self.serial_mgr.set_debug_message_callback(callback)
+
     def wait_ready(self, on_wait_cycle=None, timeout_s=60.0):
         """Wait for ACE unit to be ready with a hard timeout."""
         waited = 0.0
