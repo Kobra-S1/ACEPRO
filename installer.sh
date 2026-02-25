@@ -102,6 +102,103 @@ is_symlink() {
     [ -L "$1" ]
 }
 
+# Ensure the ACE Pro menu entry exists in the user-editable section of KlipperScreen.conf
+ensure_klipperscreen_acepro_menu() {
+    local conf="$1"
+    local entry_header='[menu __main acepro]'
+    local entry_block='[menu __main acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
+
+    # Extract user-editable section (lines before the #~# auto-generated marker)
+    local user_section
+    user_section=$(sed '/^#~# --- Do not edit/,$d' "$conf" 2>/dev/null || cat "$conf" 2>/dev/null || true)
+
+    if echo "$user_section" | grep -qF '[menu __main acepro]'; then
+        print_success "KlipperScreen.conf: ACE Pro menu entry already present"
+        return 0
+    fi
+
+    print_info "Adding ACE Pro menu entry to $conf"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    if grep -q '^#~# --- Do not edit' "$conf" 2>/dev/null; then
+        # Insert the block just before the auto-generated marker
+        awk -v block="$entry_block" '
+            /^#~# --- Do not edit/ && !done {
+                print block; print ""; done=1
+            }
+            { print }
+        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+    else
+        # No marker — just append at end of file
+        printf '\n%s\nname: ACE Pro\nicon: settings\npanel: acepro\n' '[menu __main acepro]' >> "$conf"
+    fi
+    print_success "KlipperScreen.conf: added ACE Pro menu entry"
+}
+
+# Ensure font_size = small is set in the user-editable section of KlipperScreen.conf
+# Handles missing file, missing [main] section, wrong value, and #~# auto-generated block.
+ensure_klipperscreen_font_size() {
+    local conf="$1"
+
+    if [ ! -f "$conf" ]; then
+        printf '[main]\nfont_size = small\n' > "$conf"
+        print_success "Created $conf with font_size = small"
+        return 0
+    fi
+
+    # Extract user-editable section (lines before the #~# auto-generated marker)
+    local user_section
+    user_section=$(sed '/^#~# --- Do not edit/,$d' "$conf")
+
+    # Already correct?
+    if echo "$user_section" | grep -qiE '^[[:space:]]*font_size[[:space:]]*=[[:space:]]*small[[:space:]]*$'; then
+        print_success "KlipperScreen.conf: font_size = small is already configured"
+        return 0
+    fi
+
+    print_info "Configuring font_size = small in $conf"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    if echo "$user_section" | grep -qiE '^[[:space:]]*font_size[[:space:]]*='; then
+        # font_size exists with a different value — update first occurrence before #~# block
+        awk '
+            /^#~# --- Do not edit/ { in_auto=1 }
+            !in_auto && /^[[:space:]]*font_size[[:space:]]*=/ && !replaced {
+                print "font_size = small"; replaced=1; next
+            }
+            { print }
+        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+        print_success "KlipperScreen.conf: updated font_size to small"
+
+    elif echo "$user_section" | grep -q '^\[main\]'; then
+        # [main] exists in user section but no font_size — insert after first [main]
+        awk '
+            /^#~# --- Do not edit/ { in_auto=1 }
+            !in_auto && /^\[main\]$/ && !done {
+                print; print "font_size = small"; done=1; next
+            }
+            { print }
+        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+        print_success "KlipperScreen.conf: added font_size = small under [main]"
+
+    else
+        # No [main] in user section — insert block before #~# marker or prepend
+        if grep -q '^#~# --- Do not edit' "$conf"; then
+            awk '
+                /^#~# --- Do not edit/ && !done {
+                    print "[main]"; print "font_size = small"; print ""; done=1
+                }
+                { print }
+            ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+        else
+            { printf '[main]\nfont_size = small\n\n'; cat "$conf"; } > "$tmpfile" && mv "$tmpfile" "$conf"
+        fi
+        print_success "KlipperScreen.conf: added [main] section with font_size = small"
+    fi
+}
+
 # Create or replace symlink
 create_or_replace_symlink() {
     local source="$1"
@@ -490,6 +587,16 @@ EOF
         fi
     elif [ ! -f "$KLIPPERSCREEN_PATCH" ]; then
         print_warning "KlipperScreen patch file not found: $KLIPPERSCREEN_PATCH"
+    fi
+
+    # Ensure KlipperScreen.conf has font_size = small and ACE Pro menu entry
+    if [ -d "$KLIPPERSCREEN_ROOT_DIR" ]; then
+        KLIPPERSCREEN_CONF="$CONFIG_DIR/KlipperScreen.conf"
+        echo ""
+        print_info "Checking KlipperScreen.conf for font_size setting..."
+        ensure_klipperscreen_font_size "$KLIPPERSCREEN_CONF"
+        print_info "Checking KlipperScreen.conf for ACE Pro menu entry..."
+        ensure_klipperscreen_acepro_menu "$KLIPPERSCREEN_CONF"
     fi
     
     # ========================================================================

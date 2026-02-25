@@ -310,7 +310,7 @@ class TestRfidCallbackFieldStorage:
         callback(response)
         
         # Verify sync was called
-        mock_ace_instance.manager._sync_inventory_to_persistent.assert_called_once_with(0)
+        mock_ace_instance.manager._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
 
     def test_emits_inventory_update(self, mock_ace_instance):
         """Test that JSON update is emitted for UI."""

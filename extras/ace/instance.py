@@ -9,6 +9,7 @@ import copy
 from .config import (
     INSTANCE_MANAGERS,
     SLOTS_PER_ACE,
+    AceSlotStateMachineState,
     SENSOR_RDM,
     SENSOR_TOOLHEAD,
     FILAMENT_STATE_SPLITTER,
@@ -18,9 +19,9 @@ from .config import (
     RFID_STATE_IDENTIFIED,
     MAX_RETRIES,
     get_tool_offset,
-    set_and_save_variable,
     create_inventory,
     create_status_dict,
+    normalize_ace_slot_state,
 )
 from .serial_manager import AceSerialManager
 
@@ -128,6 +129,11 @@ class AceInstance:
         """Get the AceManager instance for this ACE unit."""
         return INSTANCE_MANAGERS.get(self.instance_num)
 
+    @property
+    def state(self):
+        """Shortcut to the centralised :class:`PersistentState`."""
+        return self.manager.state
+
     def _register_tool_macros(self):
         """Register T0-T3 (or T4-T7, etc.) macros for this instance."""
         try:
@@ -208,7 +214,8 @@ class AceInstance:
         """Return True if ACE reports the given slot as empty."""
         for slot in self._info.get("slots", []):
             if slot.get("index") == slot_index:
-                return slot.get("status") == "empty"
+                slot_status = normalize_ace_slot_state(slot.get("status"))
+                return slot_status == AceSlotStateMachineState.EMPTY.value
         return False
 
     def _is_printing_or_paused(self):
@@ -238,9 +245,7 @@ class AceInstance:
                 self.gcode.respond_info(
                     f"ACE[{self.instance_num}]: Feed assist enabled on slot {slot_index}"
                 )
-                set_and_save_variable(
-                    self.printer,
-                    self.gcode,
+                self.state.set(
                     f"ace_feed_assist_index_{self.instance_num}",
                     slot_index
                 )
@@ -271,9 +276,7 @@ class AceInstance:
                 logging.info(
                     f"ACE[{self.instance_num}]: Feed assist disabled for slot {slot_index}"
                 )
-                set_and_save_variable(
-                    self.printer,
-                    self.gcode,
+                self.state.set(
                     f"ace_feed_assist_index_{self.instance_num}",
                     -1
                 )
@@ -703,9 +706,7 @@ class AceInstance:
 
             raise  # Re-raise the original exception
 
-        set_and_save_variable(
-            self.printer,
-            self.gcode,
+        self.state.set(
             "ace_filament_pos",
             FILAMENT_STATE_TOOLHEAD
         )
@@ -727,8 +728,8 @@ class AceInstance:
             f"ACE[{self.instance_num}]: Feeding from sensor to nozzle "
             f"({self.toolhead_full_purge_length}mm) finished"
         )
-        set_and_save_variable(
-            self.printer, self.gcode, "ace_filament_pos", FILAMENT_STATE_NOZZLE
+        self.state.set(
+            "ace_filament_pos", FILAMENT_STATE_NOZZLE
         )
 
         return self.toolhead_full_purge_length
@@ -1240,9 +1241,9 @@ class AceInstance:
                         f"color={color_str}, hotbed={hotbed_temp}, brand={brand}"
                     )
 
-                    # Sync to persistent storage
+                    # Sync to persistent storage (deferred; flushed at print end)
                     if self.manager:
-                        self.manager._sync_inventory_to_persistent(self.instance_num)
+                        self.manager._sync_inventory_to_persistent(self.instance_num, flush=False)
 
                     # Emit JSON update for UI
                     # self._emit_inventory_update()
@@ -1335,14 +1336,20 @@ class AceInstance:
 
                     # Get current states
                     old_status = self.inventory[idx].get("status")
-                    new_status = slot.get("status", "empty")
+                    new_status = normalize_ace_slot_state(
+                        slot.get("status"),
+                        default=AceSlotStateMachineState.EMPTY.value,
+                    )
 
                     # Detect state changes
                     if old_status != new_status:
                         inventory_changed = True
 
                         # Log the state transition
-                        if old_status == "empty" and new_status == "ready":
+                        if (
+                            old_status == AceSlotStateMachineState.EMPTY.value
+                            and new_status == AceSlotStateMachineState.READY.value
+                        ):
                             # Check if the new spool is non-RFID (RFID_STATE_NO_INFO = 0)
                             rfid_state = slot.get("rfid")
                             if rfid_state == RFID_STATE_NO_INFO and saved_rfid:
@@ -1375,14 +1382,17 @@ class AceInstance:
                                 )
                             filament_loaded = True
 
-                        elif old_status == "ready" and new_status == "empty":
+                        elif (
+                            old_status == AceSlotStateMachineState.READY.value
+                            and new_status == AceSlotStateMachineState.EMPTY.value
+                        ):
                             self.gcode.respond_info(
                                 f"ACE[{self.instance_num}]: Slot {idx} marked empty "
                                 f"(was: material={saved_material})"
                             )
 
                     # If slot is empty, clear RFID marker and metadata
-                    if new_status == "empty":
+                    if new_status == AceSlotStateMachineState.EMPTY.value:
                         updated_rfid = False
                         # Clear all optional RFID fields
                         for key in [
@@ -1406,7 +1416,7 @@ class AceInstance:
                             inventory_changed = True  # Force persistence update
 
                     # Handle RFID tag detection - only query get_filament_info, don't use status metadata
-                    elif new_status == "ready":
+                    elif new_status == AceSlotStateMachineState.READY.value:
                         rfid_state = slot.get("rfid")
 
                         # When RFID sync enabled: only use data from get_filament_info callback
@@ -1498,10 +1508,10 @@ class AceInstance:
                         inv["temp"] = updated_temp
                         inv["rfid"] = updated_rfid
 
-        # Persist changes if any status changed
+        # Persist changes if any status changed (deferred; flushed at print end)
         if inventory_changed:
             if self.manager:
-                self.manager._sync_inventory_to_persistent(self.instance_num)
+                self.manager._sync_inventory_to_persistent(self.instance_num, flush=False)
 
             # Emit inventory update for KlipperScreen
             # self._emit_inventory_update()
@@ -1672,6 +1682,9 @@ class AceInstance:
 
         status["slots"] = slots_out
 
+        # Expose communication state machine for KlipperScreen connection indicator
+        status["connection_state"] = getattr(self.serial_mgr, "connection_state", "unknown")
+
         return status
 
     def dwell(self, delay=1.0, verbose=False):
@@ -1716,9 +1729,7 @@ class AceInstance:
         """Reset feed assist state."""
         if self._feed_assist_index != -1:
             self._feed_assist_index = -1
-            set_and_save_variable(
-                self.printer,
-                self.gcode,
+            self.state.set(
                 f"ace_feed_assist_index_{self.instance_num}",
                 -1
             )
@@ -1805,9 +1816,7 @@ class AceInstance:
 
         # Set final filament position state
         if target_sensor == SENSOR_RDM:
-            set_and_save_variable(
-                self.printer,
-                self.gcode,
+            self.state.set(
                 "ace_filament_pos",
                 FILAMENT_STATE_SPLITTER
             )
@@ -1815,9 +1824,7 @@ class AceInstance:
                 f"ACE[{self.instance_num}]: Filament position set to splitter (at RDM)"
             )
         else:
-            set_and_save_variable(
-                self.printer,
-                self.gcode,
+            self.state.set(
                 "ace_filament_pos",
                 FILAMENT_STATE_TOOLHEAD
             )

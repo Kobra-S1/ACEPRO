@@ -69,7 +69,7 @@ def perform_tool_change(self, current_tool, target_tool, is_endless_spool=False)
     # Protected method - runout detection blocked during execution
     ...
 ```
-The decorator sets `toolchange_in_progress=True` during execution and ensures it's cleared even on exceptions.
+The decorator uses a **depth counter** (`_toolchange_depth`) to support nested toolchange calls. `toolchange_in_progress` remains `True` until the outermost call returns. The counter ensures the flag is safely cleared via `finally` even if an exception is raised at any nesting level.
 
 **Key Methods:**
 ```python
@@ -79,9 +79,17 @@ smart_load()                                # Load all non-empty slots to RDM se
 perform_tool_change(current, target)        # Complete tool change sequence
 execute_coordinated_retraction(...)         # Synchronized ACE + extruder retraction
 
+# Startup Validation
+_validate_startup_tool_state()              # Clear stale persisted tool state if all sensors
+                                            # report clear and printer is idle at boot.
+                                            # Prevents phantom retraction when filament was
+                                            # manually removed while powered off.
+
 # Sensor Management
-get_switch_state(sensor_name)               # Query sensor state
-is_filament_path_free()                     # Check if bowden path is clear (toolhead + RDM)
+get_switch_state(sensor_name)               # Query sensor state (debounced)
+get_instant_switch_state(sensor_name)       # Query sensor state without debounce (instant read)
+is_filament_path_free()                     # Check if bowden path is clear (toolhead + RDM, debounced)
+is_filament_path_free_instant()             # Check if bowden path is clear (instant, no debounce)
 has_rdm_sensor()                            # Check if RDM sensor is configured
 
 # Toolhead Preparation
@@ -491,7 +499,63 @@ disable_ace_pro()                        # Disable reconnection attempts
 is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 ```
 
-### 6. Configuration (`config.py`)
+### 6. PersistentState (`persistent_state.py`)
+
+**Primary Responsibilities:**
+- **Single access point** for all `saved_variables.cfg` reads and writes
+- **Deferred-flush strategy**: `set()` updates RAM and marks dirty; disk write is deferred until `flush()`
+- **Immediate write**: `set_and_save()` writes to disk right away (for user-facing commands)
+- **Type-safe serialisation**: handles `bool`, `str`, `dict`/`list`, `int`/`float` with correct Klipper `SAVE_VARIABLE` formatting
+
+**Design Rationale:**
+Using `set()` in time-critical paths (toolchanges, mid-print callbacks) avoids blocking
+Klipper's single-threaded reactor with synchronous `configparser.write()`.
+`flush()` is called at safe moments (print end, disconnect) to persist all dirty variables.
+
+**Key Methods:**
+```python
+# Read
+get(varname, default=None)      # Read a variable (always fresh from Klipper)
+get_all()                       # Return full variables dict (live reference)
+
+# Write — in-memory only (deferred persist)
+set(varname, value)             # Update in RAM, mark dirty; disk write deferred to flush()
+
+# Write — in-memory + immediate disk
+set_and_save(varname, value)    # Update RAM and write to saved_variables.cfg immediately
+                                # Use in user-facing gcode commands outside active prints
+
+# Persist dirty variables
+flush()                         # Write all dirty variables to disk; clears dirty set
+                                # Safe to call when nothing is dirty (no-op)
+
+# Property
+has_pending                     # True if any dirty variables await flushing
+```
+
+**Usage Pattern:**
+```python
+state = PersistentState(printer, gcode)
+
+# Read (always fresh)
+tool = state.get("ace_current_index", -1)
+
+# In-memory + deferred (time-critical paths: toolchanges, mid-print)
+state.set("ace_filament_pos", "bowden")
+
+# In-memory + immediate disk (user gcode commands, idle time)
+state.set_and_save("ace_current_index", 2)
+
+# Persist all deferred writes (e.g. at print end or disconnect)
+state.flush()
+```
+
+**Where flushed:**
+- `_handle_disconnect()` in AceManager — on Klipper shutdown
+- `ACE_FLUSH` gcode command — on user request
+- `_flush_if_idle()` timer callback — background idle-time flush
+
+### 7. Configuration (`config.py`)
 
 **Global State & Constants:**
 ```python
@@ -505,9 +569,40 @@ FILAMENT_STATE_NOZZLE = "nozzle"        # In hotend/nozzle
 SENSOR_TOOLHEAD = 'toolhead_sensor'
 SENSOR_RDM = 'return_module'
 
+# Slots per ACE unit (fixed)
+SLOTS_PER_ACE = 4
+
+# Retry configuration for unload/load operations
+UNLOAD_RETRY_ATTEMPTS = 3               # Number of retry attempts for unload
+UNLOAD_RETRY_DELAY = 0.5                # Seconds between retry attempts
+UNLOAD_INITIAL_LENGTH = 50              # mm for first retract attempt
+UNLOAD_SPEED_MULTIPLIERS = [1.0, 0.7, 0.4]  # Speed scale factor per retry attempt
+
+# Max retries for ACE feed/retract operations
+MAX_RETRIES = 6
+
+# RFID hardware state codes (from ACE status responses)
+RFID_STATE_NO_INFO = 0                  # No RFID tag / information absent
+RFID_STATE_FAILED = 1                   # Tag detection failed
+RFID_STATE_IDENTIFIED = 2              # Tag identified successfully
+RFID_STATE_IDENTIFYING = 3             # Identification currently in progress
+
+RFID_INVENTORY_SYNC_ENABLED = True     # Default: auto-sync RFID data to slot inventory
+
 # Registry (populated at runtime)
 ACE_INSTANCES = {}                      # instance_num → AceInstance
 INSTANCE_MANAGERS = {}                  # instance_num → AceManager
+
+# Runtime globals for purge override (None = use per-instance config)
+GLOBAL_PURGE_LENGTH = None              # Override purge length globally (mm)
+GLOBAL_PURGE_SPEED = None               # Override purge speed globally (mm/min)
+
+# Per-instance overridable config parameter names (support "value,inst:override" syntax)
+OVERRIDABLE_PARAMS = [
+    "feed_speed", "retract_speed", "total_max_feeding_length",
+    "toolchange_load_length", "incremental_feeding_length",
+    "incremental_feeding_speed", "heartbeat_interval", "max_dryer_temperature",
+]
 ```
 
 **Helper Functions:**
@@ -521,17 +616,35 @@ get_ace_instance_and_slot_for_tool(tool)             # T7 → (instance_obj, slo
 # Configuration Parsing
 parse_instance_number(name)                          # "ace 2" → 2
 parse_instance_config(config_value, instance, param) # "60,1:80" → 80 for instance 1
+                                                     # Supports per-instance overrides
 
 # Inventory Management
 create_empty_inventory_slot()                        # Create empty slot dict
 create_inventory(slot_count)                         # Create full inventory array
 create_status_dict(slot_count)                       # Create ACE status dict
-
-# Variable Persistence
-set_and_save_variable(printer, gcode, var, value)    # Set and persist to saved_variables.cfg
 ```
 
-### 7. Commands (`commands.py`)
+**Key Config Options (read by `read_ace_config()`):**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ace_count` | 1 | Number of ACE Pro units |
+| `baud` | 115200 | Serial baud rate |
+| `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
+| `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
+| `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
+| `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
+| `tangle_detection` | False | Enable encoder-based tangle detection |
+| `tangle_detection_length` | 15.0 | Minimum expected encoder movement (mm) per feed segment |
+| `ace_connection_supervision` | True | Monitor connections; pause and alert on instability |
+| `moonraker_lane_sync_enabled` | True | Sync slot metadata to Moonraker `lane_data` namespace |
+| `status_debug_logging` | False | Verbose logging of ACE status update callbacks |
+| `purge_multiplier` | 1.0 | Scale factor for all purge operations |
+| `toolchange_load_length` | 3000 | Feed length for tool change load (mm) |
+| `feed_speed` | 60 | Default feed speed (mm/s); per-instance overridable |
+| `retract_speed` | 50 | Default retract speed (mm/s); per-instance overridable |
+
+### 8. Commands (`commands.py`)
 
 **GCode Command Handlers:**
 
@@ -684,6 +797,9 @@ _ACE_HANDLE_PRINT_END                      # Called at print end (cleanup sequen
 ```
 ACE_GET_CURRENT_INDEX                      # Query currently loaded tool index
 
+ACE_GET_CONNECTION_STATUS                  # Show connection status for all instances
+                                           # Reports: connected, stable, recent reconnects
+
 ACE_DEBUG_SENSORS                          # Print all sensor states
                                            # (toolhead, RDM, path-free status)
 
@@ -698,6 +814,19 @@ ACE_DEBUG_CHECK_SPOOL_READY TOOL=<n>       # Test spool ready check
 
 ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0|1 RDM=0|1 or RESET=1
                                            # Inject sensor state (testing)
+
+ACE_DEBUG_SET_CURRENT_INDEX [TOOL=<n>]     # Override saved tool index
+                                           # TOOL=-1: no tool loaded (default)
+                                           # Useful for correcting stale state after
+                                           # manual filament removal while powered off
+
+ACE_DEBUG_SET_FILAMENT_STATE [STATE=bowden|splitter|toolhead|nozzle]
+                                           # Override saved filament position
+                                           # Omit STATE= to query current value
+                                           # Case-insensitive
+
+ACE_FLUSH                                  # Persist any pending dirty variables to disk
+                                           # (normally deferred to print end / disconnect)
 
 ACE_SHOW_INSTANCE_CONFIG [INSTANCE=<n>]    # Display resolved config for instance(s)
                                            # Without INSTANCE: compare all instances
@@ -727,7 +856,7 @@ def ace_get_instance_and_slot(gcmd):
     # 2. INSTANCE=<n> INDEX=<n> parameters → explicit slot
 ```
 
-### 8. Macros (`ace.cfg`)
+### 9. Macros (`ace.cfg`)
 
 **Key Macros:**
 

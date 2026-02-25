@@ -177,9 +177,7 @@ class RunoutMonitor:
                 is_printing = False
                 raw_print_state = ""
 
-        save_vars = self.printer.lookup_object("save_variables")
-        variables = save_vars.allVariables
-        current_tool = variables.get("ace_current_index", -1)
+        current_tool = self.manager.state.get("ace_current_index", -1)
         current_sensor_state = self.manager.get_switch_state(SENSOR_TOOLHEAD)
 
         # Track state changes for logging
@@ -312,7 +310,7 @@ class RunoutMonitor:
             if self.prev_toolhead_sensor_state is None:
                 self.prev_toolhead_sensor_state = current_sensor_state
                 self._runout_false_count = 0
-                filament_pos = variables.get("ace_filament_pos", "bowden")
+                filament_pos = self.manager.state.get("ace_filament_pos", "bowden")
 
                 self.gcode.respond_info(
                     f"ACE: Monitoring baseline established. "
@@ -647,10 +645,7 @@ class RunoutMonitor:
             self._show_runout_prompt(tool_index, instance_num, local_slot, material, color)
 
             # Step 4: Check if endless spool is enabled
-            save_vars = self.printer.lookup_object("save_variables", None)
-            endless_spool_enabled = False
-            if save_vars:
-                endless_spool_enabled = save_vars.allVariables.get("ace_endless_spool_enabled", False)
+            endless_spool_enabled = self.manager.state.get("ace_endless_spool_enabled", False)
 
             if not endless_spool_enabled:
                 self.gcode.respond_info(

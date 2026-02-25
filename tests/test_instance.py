@@ -517,9 +517,8 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
         }
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_successful_feed_sets_positions_and_moves_extruder(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_successful_feed_sets_positions_and_moves_extruder(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
         manager.has_rdm_sensor.return_value = False
@@ -541,17 +540,14 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         # Toolhead wait_moves called once
         toolhead = self.mock_printer.lookup_object('toolhead')
         toolhead.wait_moves.assert_called_once()
-        # Two position updates: toolhead then nozzle
-        mock_set_and_save.assert_has_calls([
-            call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_TOOLHEAD),
-            call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_NOZZLE),
-        ])
+        # Two position updates: toolhead (set) then nozzle (set)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_NOZZLE)
         # G92 command sent
         self.mock_gcode.run_script_from_command.assert_called_once_with("G92 E0")
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_precondition_blocks_on_rdm_sensor(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_precondition_blocks_on_rdm_sensor(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
         manager.has_rdm_sensor.return_value = True
@@ -562,11 +558,10 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             instance._feed_filament_into_toolhead(0, check_pre_condition=True)
 
         self.assertIn("stuck in RMS", str(ctx.exception))
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_feed_exception_triggers_retract_and_reraises(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_feed_exception_triggers_retract_and_reraises(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
         manager.has_rdm_sensor.return_value = False
@@ -582,11 +577,10 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             instance._feed_filament_into_toolhead(0)
 
         instance._retract.assert_called_once_with(0, 150, instance.retract_speed)
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_precondition_skipped_when_flag_false(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_precondition_skipped_when_flag_false(self, mock_serial_mgr_class):
         """Sensors ignored when check_pre_condition is False."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
@@ -602,14 +596,11 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
 
         self.assertEqual(result, instance.toolhead_full_purge_length)
         manager.get_switch_state.assert_not_called()
-        mock_set_and_save.assert_has_calls([
-            call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_TOOLHEAD),
-            call(self.mock_printer, self.mock_gcode, "ace_filament_pos", FILAMENT_STATE_NOZZLE),
-        ])
+        manager.state.set.assert_called_once_with("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
+        manager.state.set_and_save.assert_called_once_with("ace_filament_pos", FILAMENT_STATE_NOZZLE)
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_precondition_blocks_toolhead_when_rdm_available(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_precondition_blocks_toolhead_when_rdm_available(self, mock_serial_mgr_class):
         """Toolhead sensor triggers error even when RDM available and clear."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
@@ -621,12 +612,11 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             instance._feed_filament_into_toolhead(0, check_pre_condition=True)
 
         self.assertIn("filament in nozzle", str(ctx.exception).lower())
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
         self.assertEqual(manager.get_switch_state.call_args_list, [call(SENSOR_RDM), call(SENSOR_TOOLHEAD)])
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_success_with_rdm_available_checks_both_sensors(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_success_with_rdm_available_checks_both_sensors(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
         manager.has_rdm_sensor.return_value = True
@@ -642,9 +632,8 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         # Both sensors should be checked in order when RDM available
         self.assertEqual(manager.get_switch_state.call_args_list, [call(SENSOR_RDM), call(SENSOR_TOOLHEAD)])
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_rdm_available_does_not_record_splitter_state(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_rdm_available_does_not_record_splitter_state(self, mock_serial_mgr_class):
         """Feeding to toolhead must not write splitter state even when RDM exists."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
@@ -659,7 +648,10 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         instance._feed_filament_into_toolhead(1, check_pre_condition=True)
 
         # Only toolhead and nozzle states should be recorded
-        recorded_states = [c.args[3] for c in mock_set_and_save.call_args_list]
+        recorded_states = (
+            [c.args[1] for c in manager.state.set.call_args_list]
+            + [c.args[1] for c in manager.state.set_and_save.call_args_list]
+        )
         assert FILAMENT_STATE_TOOLHEAD in recorded_states
         assert FILAMENT_STATE_NOZZLE in recorded_states
         assert FILAMENT_STATE_SPLITTER not in recorded_states
@@ -1026,11 +1018,11 @@ class TestFeedAssist(unittest.TestCase):
         # Verify no requests were sent
         self.assertEqual(len(sent_requests), 0)
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_enable_feed_assist_success(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_enable_feed_assist_success(self, mock_serial_mgr_class):
         """Enable feed assist stores index and persists variable on success."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
         instance._info['status'] = 'ready'
         instance.serial_mgr.get_usb_topology_position = Mock(return_value=7)
         instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 0}))
@@ -1044,19 +1036,17 @@ class TestFeedAssist(unittest.TestCase):
             {"method": "start_feed_assist", "params": {"index": 2}},
             ANY
         )
-        mock_set_and_save.assert_called_once_with(
-            self.mock_printer,
-            self.mock_gcode,
+        INSTANCE_MANAGERS[0].state.set.assert_called_once_with(
             "ace_feed_assist_index_0",
             2
         )
         self.assertEqual(instance.wait_ready.call_count, 2)
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_enable_feed_assist_logs_failure_without_persist(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_enable_feed_assist_logs_failure_without_persist(self, mock_serial_mgr_class):
         """Failure path should not persist feed assist variable."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
         instance._info['status'] = 'ready'
         instance.serial_mgr.get_usb_topology_position = Mock(return_value=3)
         instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 1, 'msg': 'oops'}))
@@ -1066,14 +1056,14 @@ class TestFeedAssist(unittest.TestCase):
 
         self.assertEqual(instance._feed_assist_index, 1)
         instance.serial_mgr.get_usb_topology_position.assert_called_once()
-        mock_set_and_save.assert_not_called()
+        INSTANCE_MANAGERS[0].state.set.assert_not_called()
         self.assertEqual(instance.wait_ready.call_count, 2)
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_disable_feed_assist_happy_path(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_disable_feed_assist_happy_path(self, mock_serial_mgr_class):
         """Disable feed assist when active calls stop and persists -1."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
         instance._feed_assist_index = 1
         instance.serial_mgr.get_usb_topology_position = Mock(return_value=5)
         instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 0}))
@@ -1089,18 +1079,16 @@ class TestFeedAssist(unittest.TestCase):
             {"method": "stop_feed_assist", "params": {"index": 1}},
             ANY
         )
-        mock_set_and_save.assert_called_once_with(
-            self.mock_printer,
-            self.mock_gcode,
+        INSTANCE_MANAGERS[0].state.set.assert_called_once_with(
             "ace_feed_assist_index_0",
             -1
         )
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_disable_feed_assist_mismatched_slot_noop(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_disable_feed_assist_mismatched_slot_noop(self, mock_serial_mgr_class):
         """Disable on wrong slot logs warning and returns without sending."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
         instance._feed_assist_index = 2
         instance.send_request = Mock()
         instance.wait_ready = Mock()
@@ -1108,7 +1096,7 @@ class TestFeedAssist(unittest.TestCase):
         instance._disable_feed_assist(-1)
 
         instance.send_request.assert_not_called()
-        mock_set_and_save.assert_not_called()
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_not_called()
 
 
 class TestInventoryManagement(unittest.TestCase):
@@ -1268,7 +1256,7 @@ class TestStatusCallbacks(unittest.TestCase):
         self.assertEqual(slot['material'], 'Unknown')
         self.assertEqual(slot['color'], [0, 0, 0])  # Default color
         self.assertTrue(slot['rfid'])
-        INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_once_with(0)
+        INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
 
         status = instance.get_status()
         slot0 = status['slots'][0]
@@ -1307,7 +1295,7 @@ class TestStatusCallbacks(unittest.TestCase):
         self.assertEqual(slot['material'], '')
         self.assertEqual(slot['color'], [0, 0, 0])
         self.assertFalse(slot['rfid'])
-        INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_once_with(0)
+        INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
 
         status = instance.get_status()
         slot0 = status['slots'][0]
@@ -1346,7 +1334,7 @@ class TestStatusCallbacks(unittest.TestCase):
         slot = instance.inventory[0]
         self.assertEqual(slot['status'], 'empty')
         self.assertFalse(slot['rfid'])
-        INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_once_with(0)
+        INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
 
         status = instance.get_status()
         slot0 = status['slots'][0]
@@ -2165,10 +2153,9 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         
         self.assertIn("filament in nozzle", str(context.exception))
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
     @patch('ace.instance.INSTANCE_MANAGERS')
-    def test_feed_filament_into_toolhead_success_flow(self, mock_managers, mock_serial_mgr_class, mock_save_var):
+    def test_feed_filament_into_toolhead_success_flow(self, mock_managers, mock_serial_mgr_class):
         """Test successful feed flow from slot to nozzle."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         
@@ -2198,8 +2185,9 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             instance.extruder_feeding_speed
         )
         
-        # Verify variable persistence (2 calls: TOOLHEAD then NOZZLE)
-        assert mock_save_var.call_count == 2
+        # Verify variable persistence: TOOLHEAD via set(), NOZZLE via set()
+        mock_manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
+        mock_manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_NOZZLE)
         
         # Verify G92 E0 was called
         self.mock_gcode.run_script_from_command.assert_called_with("G92 E0")
@@ -2243,10 +2231,9 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         # Verify original exception was re-raised
         assert str(context.exception) == "Feed timeout test"
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
     @patch('ace.instance.INSTANCE_MANAGERS')
-    def test_feed_filament_into_toolhead_skips_precondition_check(self, mock_managers, mock_serial_mgr_class, mock_save_var):
+    def test_feed_filament_into_toolhead_skips_precondition_check(self, mock_managers, mock_serial_mgr_class):
         """Test check_pre_condition=False skips sensor validation."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         
@@ -2405,9 +2392,8 @@ class TestStatusUpdateCallback(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
         }
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_status_update_inventory_sync_enabled(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_status_update_inventory_sync_enabled(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
         INSTANCE_MANAGERS[0] = manager
@@ -2433,13 +2419,12 @@ class TestStatusUpdateCallback(unittest.TestCase):
         # SKU/brand not updated from get_status (only from get_filament_info callback)
         self.assertNotIn("sku", inv0)
         self.assertNotIn("brand", inv0)
-        manager._sync_inventory_to_persistent.assert_called_once_with(0)
+        manager._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
         # Feed assist restore not triggered without filament_loaded flag
         self.assertFalse(instance._feed_assist_index >= 0 and instance._pending_feed_assist_restore != -1)
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_status_update_rfid_sync_disabled_defaults_and_clears(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_status_update_rfid_sync_disabled_defaults_and_clears(self, mock_serial_mgr_class):
         ace_config = dict(self.ace_config)
         ace_config['rfid_inventory_sync_enabled'] = False
         instance = AceInstance(0, ace_config, self.mock_printer)
@@ -2475,7 +2460,7 @@ class TestStatusUpdateCallback(unittest.TestCase):
         self.assertEqual(inv1["status"], "empty")
         self.assertFalse(inv1.get("rfid"))
         self.assertNotIn("sku", inv1)
-        manager._sync_inventory_to_persistent.assert_called_once_with(0)
+        manager._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
 
     @patch('ace.instance.AceSerialManager')
     def test_status_update_default_fill_when_missing_metadata(self, mock_serial_mgr_class):
@@ -3125,9 +3110,8 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
 
         return _time
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_feed_reaches_rdm_and_sets_splitter_state(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_feed_reaches_rdm_and_sets_splitter_state(self, mock_serial_mgr_class):
         """Feed stops once RDM sensor trips and saves splitter position."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         instance._feed = Mock()
@@ -3143,16 +3127,13 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
 
         instance._feed.assert_called_once_with(1, 50, instance.feed_speed)
         instance._stop_feed.assert_called_once_with(1)
-        mock_set_and_save.assert_called_once_with(
-            self.mock_printer,
-            self.mock_gcode,
+        manager.state.set.assert_called_once_with(
             "ace_filament_pos",
             FILAMENT_STATE_SPLITTER
         )
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_incremental_feed_reaches_toolhead(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_incremental_feed_reaches_toolhead(self, mock_serial_mgr_class):
         """Incremental feeding continues until toolhead sensor is reached."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         instance._feed = Mock()
@@ -3176,16 +3157,13 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
             ],
         )
         instance._stop_feed.assert_called_once_with(2)
-        mock_set_and_save.assert_called_once_with(
-            self.mock_printer,
-            self.mock_gcode,
+        manager.state.set.assert_called_once_with(
             "ace_filament_pos",
             FILAMENT_STATE_TOOLHEAD
         )
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_feed_raises_if_sensor_already_triggered(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_feed_raises_if_sensor_already_triggered(self, mock_serial_mgr_class):
         """Feeding aborts immediately when target sensor is already active."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         instance._feed = Mock()
@@ -3200,11 +3178,10 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
         self.assertIn("filament already at rdm", str(ctx.exception).lower())
         instance._feed.assert_not_called()
         instance._stop_feed.assert_not_called()
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
-    @patch('ace.instance.set_and_save_variable')
     @patch('ace.instance.AceSerialManager')
-    def test_feed_raises_when_sensor_never_triggers(self, mock_serial_mgr_class, mock_set_and_save):
+    def test_feed_raises_when_sensor_never_triggers(self, mock_serial_mgr_class):
         """Error raised after exceeding maximum feed without sensor trigger."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         instance._feed = Mock()
@@ -3229,7 +3206,7 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
             ],
         )
         instance._stop_feed.assert_called_once_with(3)
-        mock_set_and_save.assert_not_called()
+        manager.state.set_and_save.assert_not_called()
 
 
 class TestExtruderMove(unittest.TestCase):
