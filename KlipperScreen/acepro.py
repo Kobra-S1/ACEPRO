@@ -1226,6 +1226,48 @@ class Panel(ScreenPanel):
                 return True
         return False              # all configured sensors say filament present (or none fitted)
 
+    def _refresh_sensor_state_then(self, callback):
+        """Query live ace_state sensor values from Klipper, update the cache,
+        then invoke *callback* on the GTK main thread.
+
+        Falls back to calling *callback* immediately when the websocket query
+        path is unavailable, so that existing cached values (possibly stale)
+        are still used rather than silently dropping the action.
+        """
+        try:
+            klippy = getattr(getattr(self._screen, "_ws", None), "klippy", None)
+            direct_ws = getattr(klippy, "_ws", None) if klippy else None
+            if callable(getattr(direct_ws, "send_method", None)):
+                def _cb(response, *_):
+                    try:
+                        result = (response or {}).get("result") if isinstance(response, dict) else None
+                        if isinstance(result, dict):
+                            ace_state = result.get("status", {}).get("ace_state", {})
+                            if "toolhead_sensor" in ace_state:
+                                self.toolhead_sensor = ace_state["toolhead_sensor"]
+                            if "rdm_sensor" in ace_state:
+                                self.rdm_sensor = ace_state["rdm_sensor"]
+                            logging.debug(
+                                f"ACE: live sensor refresh — "
+                                f"toolhead={self.toolhead_sensor} rdm={self.rdm_sensor}"
+                            )
+                    except Exception as e:
+                        logging.warning(f"ACE: live sensor query callback error: {e}")
+                    finally:
+                        GLib.idle_add(callback)
+
+                if direct_ws.send_method(
+                    "printer.objects.query",
+                    {"objects": {"ace_state": ["toolhead_sensor", "rdm_sensor"]}},
+                    _cb
+                ):
+                    return  # callback will fire asynchronously
+        except Exception as e:
+            logging.warning(f"ACE: live sensor query failed: {e}")
+
+        # Fallback: use whatever is cached
+        callback()
+
     def show_unload_confirmation(self, instance_id, global_tool):
         """Show confirmation dialog to unload a tool.
 
@@ -1235,6 +1277,10 @@ class Panel(ScreenPanel):
           • Cancel — do nothing
           • Load   — treat ACE state as stale and load the tool fresh
           • Unload — force a smart-unload to clean up ACE state
+
+        Sensor state is always refreshed live from Klipper before the check to
+        avoid false positives from the stale cached values left over after a
+        completed load sequence.
         """
         local_slot = global_tool - self.instance_data[instance_id]['tool_offset']
 
@@ -1253,6 +1299,14 @@ class Panel(ScreenPanel):
 
         slot_info = instance['slot_labels'][local_slot].get_text()
 
+        # Refresh live sensor state from Klipper, then continue with dialog logic.
+        def _continue_after_refresh():
+            self._show_unload_dialog(instance_id, global_tool, slot_info)
+
+        self._refresh_sensor_state_then(_continue_after_refresh)
+
+    def _show_unload_dialog(self, instance_id, global_tool, slot_info):
+        """Internal: show the actual unload / inconsistency dialog using current sensor state."""
         # Build a human-readable summary of the current sensor readings.
         def _sensor_summary():
             parts = []
