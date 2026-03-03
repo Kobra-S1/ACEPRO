@@ -1521,10 +1521,14 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
     def test_unload_current_tool_at_nozzle(self, mock_endless_spool, mock_ace_instance):
-        """Test unloading current tool when at nozzle position."""
+        """Test unloading current tool when at nozzle position.
+
+        Sensors agree with state (filament present at toolhead), so unload proceeds.
+        """
         manager = AceManager(self.mock_config)
         self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
-        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        # Sensor confirms filament is present - state and sensor agree, unload must run.
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
         manager.smart_unload = Mock(return_value=True)
         
         # Mock instance for load
@@ -1611,7 +1615,8 @@ class TestPerformToolChange(unittest.TestCase):
         manager = AceManager(self.mock_config)
         self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
         self.variables['ace_current_index'] = 1
-        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        # Sensor confirms filament is present - state and sensor agree, unload must run.
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
         manager.smart_unload = Mock(return_value=True)
         
         result = manager.perform_tool_change(current_tool=1, target_tool=-1)
@@ -1858,7 +1863,8 @@ class TestPerformToolChange(unittest.TestCase):
         """Test exception raised when unload fails."""
         manager = AceManager(self.mock_config)
         self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
-        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        # Sensor confirms filament is present so the unload path is taken.
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
         manager.smart_unload = Mock(return_value=False)  # Unload fails!
         
         # Mock instance to verify feed assist is NOT called on error

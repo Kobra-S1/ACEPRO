@@ -1918,17 +1918,30 @@ class AceManager:
             filament_pos = self.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
             self.gcode.respond_info(f"ACE: Current filament_pos before unload: {filament_pos}")
             if (filament_pos in [FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER]):
-                if (filament_pos == FILAMENT_STATE_NOZZLE) and not self.get_switch_state(SENSOR_TOOLHEAD):
+                # Trust sensors over persisted state.
+                if self.is_filament_path_free():
+                    # All sensors report clear - state is stale/wrong, correct it.
                     self.gcode.respond_info(
-                        "ACE: WARNING: State says loaded but toolhead sensor is CLEAR, "
-                        "try to unload spool anyway"
+                        f"ACE: WARNING: State says '{filament_pos}' but sensors report path CLEAR - "
+                        f"trusting sensors, correcting state to bowden, skipping unload."
                     )
+                    self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+                else:
+                    # Sensors confirm filament is in the path - proceed with unload.
+                    # Also fix state if toolhead sensor shows filament has advanced further.
+                    if filament_pos == FILAMENT_STATE_SPLITTER and self.get_switch_state(SENSOR_TOOLHEAD):
+                        self.gcode.respond_info(
+                            f"ACE: State was '{FILAMENT_STATE_SPLITTER}' but toolhead sensor is "
+                            f"TRIGGERED - correcting to '{FILAMENT_STATE_NOZZLE}' before unload."
+                        )
+                        filament_pos = FILAMENT_STATE_NOZZLE
+                        self.state.set("ace_filament_pos", FILAMENT_STATE_NOZZLE)
 
-                self.gcode.respond_info(f"ACE: Tool {current_tool} marked as loaded, performing unload")
-                success = self.smart_unload(tool_index=current_tool)
-                if not success:
-                    raise Exception(f"Failed to unload tool {current_tool}")
-                self.gcode.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
+                    self.gcode.respond_info(f"ACE: Tool {current_tool} marked as loaded, performing unload")
+                    success = self.smart_unload(tool_index=current_tool)
+                    if not success:
+                        raise Exception(f"Failed to unload tool {current_tool}")
+                    self.gcode.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
 
             elif filament_pos == FILAMENT_STATE_BOWDEN:
                 self.gcode.respond_info(

@@ -251,11 +251,17 @@ class TestToolChangeIntegration(unittest.TestCase):
                 # _smart_unload_slot must return True for successful unload
                 instance._smart_unload_slot.return_value = True
             
-            # Mock smart_unload to properly update filament_pos
+            # Mock smart_unload to properly update filament_pos and clear sensors
             def mock_smart_unload(tool_index=-1, prepare_toolhead=True):
                 # Update filament_pos to splitter
                 from ace.config import FILAMENT_STATE_SPLITTER
                 manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_SPLITTER)
+                # Simulate filament cleared from path after unload
+                self.sensor_states[SENSOR_TOOLHEAD] = False
+                self.sensor_states[SENSOR_RDM] = False
+                # Clear any injected _sensor_override so subsequent reads see clear path
+                if hasattr(manager, '_sensor_override'):
+                    manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
                 return True
             manager.smart_unload = Mock(side_effect=mock_smart_unload)
             
@@ -337,6 +343,10 @@ class TestToolChangeIntegration(unittest.TestCase):
         # Setup: T1 is currently loaded
         self.variables['ace_current_index'] = 1
         self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        # Sensors confirm filament is present so the unload path is exercised.
+        # (_handle_ready is never called in unit tests, so sensors dict is empty;
+        # use _sensor_override to inject the state.)
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: True}
         
         # Execute tool change: T1 → T5
         status = manager.perform_tool_change(current_tool=1, target_tool=5)
@@ -368,6 +378,10 @@ class TestToolChangeIntegration(unittest.TestCase):
         # Setup: T6 is currently loaded
         self.variables['ace_current_index'] = 6
         self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        # Sensors confirm filament is present so the unload path is exercised.
+        # (_handle_ready is never called in unit tests, so sensors dict is empty;
+        # use _sensor_override to inject the state.)
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: True}
         
         # Execute tool change: T6 → T2
         status = manager.perform_tool_change(current_tool=6, target_tool=2)
