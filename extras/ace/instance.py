@@ -1166,13 +1166,19 @@ class AceInstance:
                 brand = result.get("brand", "")
                 material = result.get("type", "")
                 icon_type = result.get("icon_type")
-                colors_array = result.get("colors")  # [[R, G, B, A]]
+                colors_array = result.get("colors")  # [[R, G, B, A]] — newer firmware
                 rfid_color = None
                 if colors_array and len(colors_array) > 0:
                     # Extract RGB from first color entry (ignore alpha)
                     first_color = colors_array[0] if isinstance(colors_array[0], (list, tuple)) else colors_array
                     if len(first_color) >= 3:
                         rfid_color = [first_color[0], first_color[1], first_color[2]]
+                else:
+                    # Older firmware / some SKUs: fall back to plain color field [R, G, B]
+                    direct_color = result.get("color")
+                    if (direct_color and len(direct_color) >= 3
+                            and any(c > 0 for c in direct_color[:3])):
+                        rfid_color = [direct_color[0], direct_color[1], direct_color[2]]
                 extruder_temp = result.get("extruder_temp", {})
                 hotbed_temp = result.get("hotbed_temp", {})
                 diameter = result.get("diameter")
@@ -1235,7 +1241,7 @@ class AceInstance:
 
                     # Log the full RFID data
                     color_str = f"RGB({rfid_color[0]},{rfid_color[1]},{rfid_color[2]})" if rfid_color else "none"
-                    logging.info(
+                    self.gcode.respond_info(
                         f"ACE[{self.instance_num}]: Slot {slot_idx} RFID full data -> "
                         f"sku={sku}, temp={rfid_temp}°C (min={temp_min}, max={temp_max}), "
                         f"color={color_str}, hotbed={hotbed_temp}, brand={brand}"
@@ -1459,7 +1465,11 @@ class AceInstance:
                             not self.rfid_inventory_sync_enabled and rfid_state not in (
                                 None, RFID_STATE_NO_INFO))
 
-                        if allow_default_fill and (missing_material or missing_temp):
+                        # Never overwrite with defaults while an RFID query is in-flight;
+                        # the callback will populate the real data when it arrives.
+                        rfid_query_in_flight = idx in self._pending_rfid_queries
+
+                        if allow_default_fill and not rfid_query_in_flight and (missing_material or missing_temp):
                             # Check if we're actually changing anything before setting inventory_changed
                             needs_update = False
                             if missing_material and updated_material != self.DEFAULT_MATERIAL:

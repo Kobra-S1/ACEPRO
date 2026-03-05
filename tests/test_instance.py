@@ -1252,17 +1252,17 @@ class TestStatusCallbacks(unittest.TestCase):
 
         slot = instance.inventory[0]
         self.assertEqual(slot['status'], 'ready')
-        # Material stays Unknown until get_filament_info callback fires (new architecture)
-        self.assertEqual(slot['material'], 'Unknown')
-        self.assertEqual(slot['color'], [0, 0, 0])  # Default color
+        # Material stays '' while RFID query is in-flight (no default fill during pending query)
+        self.assertEqual(slot['material'], '')
+        self.assertEqual(slot['color'], [0, 0, 0])  # Color stays default until callback
         self.assertTrue(slot['rfid'])
         INSTANCE_MANAGERS[0]._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
 
         status = instance.get_status()
         slot0 = status['slots'][0]
         self.assertTrue(slot0['rfid'])
-        # Material from inventory (defaults until callback)
-        self.assertEqual(slot0['material'], 'Unknown')
+        # Material stays empty until get_filament_info callback populates it
+        self.assertEqual(slot0['material'], '')
         self.assertEqual(slot0['color'], [0, 0, 0])  # Default color
 
     @patch('ace.instance.AceSerialManager')
@@ -1871,12 +1871,12 @@ class TestStatusCallbacks(unittest.TestCase):
         }
         instance._status_update_callback(response)
 
-        # Verify fields: RFID detected but material stays Unknown until get_filament_info callback
+        # Verify fields: RFID query in-flight, no default fill applied
         slot = instance.inventory[0]
         self.assertEqual(slot['status'], 'ready')  # status updated
-        self.assertEqual(slot['color'], [0, 0, 0])  # Default color until callback
-        self.assertEqual(slot['material'], 'Unknown')  # Default material until callback
-        self.assertEqual(slot['temp'], 0)  # Default temp
+        self.assertEqual(slot['color'], [0, 0, 0])  # Color stays default until callback
+        self.assertEqual(slot['material'], '')  # Stays empty until get_filament_info callback fires
+        self.assertEqual(slot['temp'], 0)  # Stays 0 until callback
         self.assertEqual(slot['rfid'], True)  # rfid flag updated
 
     @patch('ace.instance.AceSerialManager')
@@ -2412,9 +2412,9 @@ class TestStatusUpdateCallback(unittest.TestCase):
 
         inv0 = instance.inventory[0]
         self.assertEqual(inv0["status"], "ready")
-        # Material/color/SKU/brand stay in inventory (not updated from get_status)
-        self.assertEqual(inv0["material"], "Unknown")
-        self.assertEqual(inv0["color"], [0, 0, 0])  # Default color
+        # Material/color stay empty while RFID query is in-flight (no default fill during pending query)
+        self.assertEqual(inv0["material"], "")
+        self.assertEqual(inv0["color"], [0, 0, 0])  # Color stays default until callback
         self.assertTrue(inv0["rfid"])
         # SKU/brand not updated from get_status (only from get_filament_info callback)
         self.assertNotIn("sku", inv0)
