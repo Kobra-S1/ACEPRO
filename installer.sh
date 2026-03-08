@@ -282,7 +282,8 @@ main() {
     echo "Which printer model?"
     echo "  1) Kobra 3"
     echo "  2) Kobra KS1"
-    read -p "$(echo -e ${BLUE}Select [1 or 2]${NC}: )" printer_choice
+    echo "  3) Kobra K3M (BETA testing)"
+    read -p "$(echo -e ${BLUE}Select [1, 2 or 3]${NC}: )" printer_choice
     
     case "$printer_choice" in
         1)
@@ -292,6 +293,10 @@ main() {
         2)
             PRINTER_MODEL="KS1"
             PRINTER_NAME="Kobra S1"
+            ;;
+        3)
+            PRINTER_MODEL="K3M"
+            PRINTER_NAME="Kobra K3M (BETA testing)"
             ;;
         *)
             print_error "Invalid choice"
