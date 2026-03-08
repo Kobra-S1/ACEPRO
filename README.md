@@ -48,11 +48,14 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Multi-ACE Pro Support**: Multiple ACE units support (tested with 3 ACEPRO units for 12-color printing, but more should be possible)
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
-- ✅ **Runout Detection**: Real-time state-change detection
+- ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
+- ✅ **Tangle Detection (optional)**: Extruder vs encoder monitoring to catch stuck spools mid-print
+- ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
+- 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can by synced automatically the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
 
 ## 📖 Documentation
 
@@ -382,6 +385,8 @@ retract_speed: 50
 
 ### Sensor Configuration
 
+ACE supports both `filament_switch_sensor <name>` and `filament_tracker <name>` sections; the manager wraps trackers so they behave like standard runout helpers.
+
 **Filament Runout Sensors:**
 `filament_runout_sensor_name_nozzle` is required.
 `filament_runout_sensor_name_rdm` is optional and helps verify the filament has fully retracted to the hub.
@@ -427,6 +432,45 @@ The filament runout sensors in Mainsail/Fluidd show different states depending o
 ```gcode
 ACE_DEBUG_SENSORS  # Shows current state of all sensors
 ```
+
+### Other `[ace]` options worth knowing
+
+- `tangle_detection` / `tangle_detection_length`: Enable encoder-vs-extruder tangle checks (default off; length default 15mm).
+- `persistence_mode`: `deferred` (default) makes `set_and_save` defer disk writes until a safe `flush`; `immediate` writes to disk right away.
+- `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings).
+
+### OrcaSlicer Filament Sync (Moonraker Lane Data)
+
+> **Requires the latest OrcaSlicer Beta build** with Moonraker `lane_data` support.
+
+This driver continuously publishes per-slot inventory (filament type and color) to Moonraker’s `lane_data` namespace. OrcaSlicer reads this data and **automatically pre-fills filament type and color** for each tool — you no longer need to manually select spools in the slicer before slicing.
+
+**What syncs:**
+- ✅ Filament material/type (e.g. PLA, PETG, ABS)
+- ✅ Filament color (RGB)
+- ❌ Manufacturer name — not yet supported by OrcaSlicer
+
+The sync is enabled by default and requires no extra configuration. To control how slots with unknown/unset materials appear in Orca, use the following options in your `[ace]` config section:
+
+```ini
+[ace]
+# How to publish slots whose material is unknown/unset:
+#   passthrough  → publish the raw value as-is (default)
+#   empty        → publish as empty slot (Orca treats it as unassigned)
+#   map          → replace with a configured fallback material name
+moonraker_lane_sync_unknown_material_mode: empty
+
+# Comma-separated list of values considered "unknown" (case-insensitive)
+moonraker_lane_sync_unknown_material_markers: ???,unknown,n/a,none
+
+# Only used when mode=map: the material name to substitute
+moonraker_lane_sync_unknown_material_map_to: PLA
+```
+
+**Typical setup (recommended):**
+1. Enable RFID or manually label your spools with `ACE_SET_SLOT T=0 MATERIAL="PLA" COLOR=RED`
+2. Open OrcaSlicer (latest Beta), connect to your printer via Moonraker
+3. Filament type and color will auto-populate in the tool list
 
 ### Per-Instance Configuration Overrides
 
@@ -1264,9 +1308,6 @@ Special thanks to the Klipper community and all contributors!
 This project is licensed under the same terms as the original projects it's based on.
 
 ---
-
-
-
 
 
 

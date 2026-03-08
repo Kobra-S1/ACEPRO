@@ -54,10 +54,11 @@ The ACE Pro is a multi-material filament management system for Klipper-based 3D 
   - Instance N: ...
 - **Global State Management**:
   - `ace_filament_pos`: Tracks filament position ("bowden", "splitter", "toolhead", "nozzle")
-  - `ace_current_index`: Currently active tool (-1 = none)
-  - `ace_endless_spool_enabled`: Endless spool active/inactive
-  - `ace_global_enabled`: ACE system master enable
-- **Sensor Management**: Manages shared sensors (toolhead, RDM)
+- `ace_current_index`: Currently active tool (-1 = none)
+- `ace_endless_spool_enabled`: Endless spool active/inactive
+- `ace_global_enabled`: ACE system master enable
+- **Sensor Management**: Manages shared sensors (toolhead, optional RDM), supporting both
+  `filament_switch_sensor` and `filament_tracker` via `FilamentTrackerAdapter`
 - **Smart Operations**: `smart_unload()`, `smart_load()` with sensor-aware fallback
 - **Tool Change Orchestration**: `perform_tool_change()` coordinates unload/load across instances
 - **Runout Detection**: Creates `RunoutMonitor` to poll sensors (50ms interval) and raise events
@@ -80,10 +81,8 @@ perform_tool_change(current, target)        # Complete tool change sequence
 execute_coordinated_retraction(...)         # Synchronized ACE + extruder retraction
 
 # Startup Validation
-_validate_startup_tool_state()              # Clear stale persisted tool state if all sensors
-                                            # report clear and printer is idle at boot.
-                                            # Prevents phantom retraction when filament was
-                                            # manually removed while powered off.
+_validate_startup_tool_state()              # Clear stale persisted tool state if sensors show clear;
+                                            # currently disabled on startup (timing-sensitive, pending rewrite)
 
 # Sensor Management
 get_switch_state(sensor_name)               # Query sensor state (debounced)
@@ -97,7 +96,7 @@ prepare_toolhead_for_filament_retraction(tool_index)  # Heat and prepare for unl
 check_and_wait_for_spool_ready(tool)        # Wait for spool motor stability (with timeout)
 
 # State Management
-set_and_save_variable(varname, value)       # Set and persist variable to saved_variables.cfg
+set_and_save_variable(varname, value)       # Set and persist variable (obeys persistence_mode)
 update_ace_support_active_state()           # Sync ACE enable/disable state from output pin
 
 # Runout Handling (via RunoutMonitor)
@@ -296,6 +295,7 @@ Mode     | Material | Color/RGB | Example
 - **Print State Tracking**: Know when printing is active (vs idle/paused)
 - **Runout Coordination**: Trigger endless spool or show prompts
 - **Print Start Baseline**: Re-initialize sensor baseline when print starts
+- **Optional Tangle Detection**: Compare extruder motion vs RDM encoder to detect stuck spools
 
 **Architecture:**
 RunoutMonitor is purely an observer - it does NOT change state directly. Instead:
@@ -382,15 +382,20 @@ Sensor State Check
 
 **Debounce:**
 The sensor reads raw (undebounced) `filament_present` from Klipper. To filter
-transient glitches, `runout_debounce_count` (default 3) consecutive absent
-readings are required before confirming a runout. At the 50ms poll interval,
-3 readings ≈ 150ms debounce window. The counter resets to 0 whenever the sensor
+transient glitches, `runout_debounce_count` consecutive absent readings are
+required before confirming a runout (default 1 = no debounce; e.g. 3 would give
+~150ms at the 50ms poll interval). The counter resets to 0 whenever the sensor
 reads present again, or on any baseline reset (pause, stop, no active tool).
 
 **Print Start Detection:**
 - Detects: `is_printing=True` and `was_printing_active=False`
 - Action: Re-initialize sensor baseline to current state
 - Purpose: Prevent false runout detection if print starts with wrong baseline
+
+**Tangle Detection (optional):**
+- Enabled via `[ace] tangle_detection` with threshold `tangle_detection_length` (default 15mm)
+- Every 0.25s compares extruder motion vs RDM encoder pulses while sensors still show filament
+- If extruder moves beyond the threshold with no encoder movement, declares a spool tangle for intervention
 
 ### 5. AceSerialManager (`serial_manager.py`)
 
@@ -504,13 +509,17 @@ is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 **Primary Responsibilities:**
 - **Single access point** for all `saved_variables.cfg` reads and writes
 - **Deferred-flush strategy**: `set()` updates RAM and marks dirty; disk write is deferred until `flush()`
-- **Immediate write**: `set_and_save()` writes to disk right away (for user-facing commands)
+- **Configurable persistence**: `set_and_save()` obeys `persistence_mode`
+  - `deferred` (default): behaves like `set()` (dirty-only until `flush()`)
+  - `immediate`: writes to disk right away (legacy behaviour)
 - **Type-safe serialisation**: handles `bool`, `str`, `dict`/`list`, `int`/`float` with correct Klipper `SAVE_VARIABLE` formatting
 
 **Design Rationale:**
 Using `set()` in time-critical paths (toolchanges, mid-print callbacks) avoids blocking
 Klipper's single-threaded reactor with synchronous `configparser.write()`.
-`flush()` is called at safe moments (print end, disconnect) to persist all dirty variables.
+`set_and_save()` defaults to the same deferred behaviour (safer mid-print) unless
+`persistence_mode=immediate` is set in config. `flush()` is called at safe moments
+(print end, disconnect) to persist all dirty variables.
 
 **Key Methods:**
 ```python
@@ -521,9 +530,9 @@ get_all()                       # Return full variables dict (live reference)
 # Write — in-memory only (deferred persist)
 set(varname, value)             # Update in RAM, mark dirty; disk write deferred to flush()
 
-# Write — in-memory + immediate disk
-set_and_save(varname, value)    # Update RAM and write to saved_variables.cfg immediately
-                                # Use in user-facing gcode commands outside active prints
+# Write — in-memory + mode-controlled disk write
+set_and_save(varname, value)    # Update RAM and either defer or write immediately based on
+                                # persistence_mode (default deferred, immediate if configured)
 
 # Persist dirty variables
 flush()                         # Write all dirty variables to disk; clears dirty set
@@ -543,7 +552,7 @@ tool = state.get("ace_current_index", -1)
 # In-memory + deferred (time-critical paths: toolchanges, mid-print)
 state.set("ace_filament_pos", "bowden")
 
-# In-memory + immediate disk (user gcode commands, idle time)
+# In-memory + optional immediate disk (depends on persistence_mode)
 state.set_and_save("ace_current_index", 2)
 
 # Persist all deferred writes (e.g. at print end or disconnect)
@@ -630,19 +639,40 @@ create_status_dict(slot_count)                       # Create ACE status dict
 |-----|---------|-------------|
 | `ace_count` | 1 | Number of ACE Pro units |
 | `baud` | 115200 | Serial baud rate |
+| `parkposition_to_toolhead_length` | 1000 | Distance park → nozzle (mm) |
+| `parkposition_to_rdm_length` | 150 | Distance park → RDM (mm) |
+| `toolhead_retraction_speed` | 10 | Retraction speed at toolhead (mm/s) |
+| `toolhead_retraction_length` | 40 | Retraction length at toolhead (mm) |
+| `toolhead_full_purge_length` | 22 | Purge length for full load (mm) |
+| `toolhead_slow_loading_speed` | 5 | Slow feed speed near sensor (mm/s) |
+| `extruder_feeding_length` | 1 | Extruder shove length (mm) |
+| `extruder_feeding_speed` | 5 | Extruder shove speed (mm/s) |
+| `default_color_change_purge_length` | 50 | Default purge length for color change (mm) |
+| `default_color_change_purge_speed` | 400 | Default purge speed (mm/min) |
+| `purge_max_chunk_length` | 300 | Max chunk size per purge command (mm) |
+| `pre_cut_retract_length` | 2 | Safety retract before cutter (mm) |
+| `timeout_multiplier` | 2 | Multiplier applied to ACE request timeouts |
 | `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
 | `tangle_detection` | False | Enable encoder-based tangle detection |
-| `tangle_detection_length` | 15.0 | Minimum expected encoder movement (mm) per feed segment |
+| `tangle_detection_length` | 15.0 | Extruder distance (mm) without encoder motion → tangle |
 | `ace_connection_supervision` | True | Monitor connections; pause and alert on instability |
 | `moonraker_lane_sync_enabled` | True | Sync slot metadata to Moonraker `lane_data` namespace |
+| `moonraker_lane_sync_unknown_material_mode` | `empty` | How to publish placeholder materials: `passthrough`/`empty`/`map` |
+| `moonraker_lane_sync_unknown_material_markers` | `???,unknown,n/a,none` | Values treated as “unknown” for mapping/empty |
+| `moonraker_lane_sync_unknown_material_map_to` | "" | Target material when mode=`map` |
 | `status_debug_logging` | False | Verbose logging of ACE status update callbacks |
+| `persistence_mode` | `deferred` | `deferred` makes `set_and_save` deferred; `immediate` writes instantly |
 | `purge_multiplier` | 1.0 | Scale factor for all purge operations |
 | `toolchange_load_length` | 3000 | Feed length for tool change load (mm) |
 | `feed_speed` | 60 | Default feed speed (mm/s); per-instance overridable |
 | `retract_speed` | 50 | Default retract speed (mm/s); per-instance overridable |
+| `incremental_feeding_length` | 50 | Feed segment length (mm); per-instance overridable |
+| `incremental_feeding_speed` | 30 | Feed segment speed (mm/s); per-instance overridable |
+| `heartbeat_interval` | 1.0 | Heartbeat polling interval (s); per-instance overridable |
+| `max_dryer_temperature` | 60 | Dryer temperature cap (°C); per-instance overridable |
 
 ### 8. Commands (`commands.py`)
 
@@ -1181,6 +1211,9 @@ initial `lane_data` snapshot.
   `material`/`color`.
 - `spool_id` is derived from `sku` when it is a numeric value; non-numeric SKUs are still published for
   slicer-side matching but won't become a `spool_id`.
+- Unknown/placeholder materials can be filtered or remapped via
+  `moonraker_lane_sync_unknown_material_mode` (`passthrough`/`empty`/`map`)
+  and its marker/map settings.
 
 ### Config (`[ace]`)
 
