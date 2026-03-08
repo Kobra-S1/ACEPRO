@@ -10,6 +10,7 @@
 
 Based on the great work of utkabobr ([DuckACE](https://github.com/utkabobr/DuckACE)) and szkrisz ([ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)).
 This is a fork of szkrisz' ACEPRO Klipper driver.
+ACE temperature sensor integration adapted from [agrloki/ValgACE](https://github.com/agrloki/ValgACE).
 
 This Anycubic-centric fork has structurally diverged from the original and focuses on:
 - Supporting multiple ACE units, assigns ACE instance IDs based on USB topology
@@ -51,6 +52,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
 - ✅ **Tangle Detection (optional)**: Extruder vs encoder monitoring to catch stuck spools mid-print
 - ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
+- ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
@@ -88,6 +90,10 @@ config/
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
 └── ace_macros_generic.cfg # Shared ACE helper macros
 
+extras/
+├── ace/                  # ACE core module (multi-instance manager)
+├── temperature_ace.py    # Optional ACE temperature sensor for Klipper
+└── virtual_pins.py       # Helper for ACE macros
 
 ├── ARCHITECTURE.md       
 ├── example_cmds.txt
@@ -170,6 +176,9 @@ ln -sf ~/ACEPRO/extras/ace ~/klipper/klippy/extras/ace
 
 # Link the virtual_pins helper used by ACE
 ln -sf ~/ACEPRO/extras/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
+
+# (Optional) Link ACE temperature sensor
+ln -sf ~/ACEPRO/extras/temperature_ace.py ~/klipper/klippy/extras/temperature_ace.py
 ```
 
 #### Step 2: Backup and Install Printer Configuration
@@ -258,15 +267,20 @@ sudo systemctl restart KlipperScreen
 ```
 
 
-#### Add KlipperScreen Panel to main screen to make it visible (required)
-Add the panel to your KlipperScreen configuration, e.g. add:
+#### Add KlipperScreen Panel to menus (required)
+Add the panel to your KlipperScreen configuration so it shows both while idle and while printing:
 ```
 [menu __main acepro]
 name: ACE Pro
 icon: settings
 panel: acepro
+
+[menu __print acepro]
+name: ACE Pro
+icon: settings
+panel: acepro
 ```
-to your config/main_menu.conf
+Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry makes the panel visible during an active print.
 ## ⚙️ Configuration
 
 ### Configuration File Structure
@@ -432,6 +446,28 @@ The filament runout sensors in Mainsail/Fluidd show different states depending o
 ```gcode
 ACE_DEBUG_SENSORS  # Shows current state of all sensors
 ```
+
+#### ACE Temperature Sensor (optional)
+
+You can expose the ACE device temperature as a standard `temperature_sensor`:
+
+```ini
+[temperature_sensor ace_temp]
+sensor_type: temperature_ace
+ace_instance: 0   # Which ACE instance to read (default 0)
+min_temp: 0
+max_temp: 70
+# Place these after your [ace] section so the ACE module registers the sensor factory first.
+
+# Optional block to paste into your ACE configs (ace_K3.cfg / ace_KS1.cfg):
+# [temperature_sensor ace_temp]
+# sensor_type: temperature_ace
+# ace_instance: 0
+# min_temp: 0
+# max_temp: 70
+```
+
+Link `extras/temperature_ace.py` into Klipper extras (see installation) and restart. Each sensor reads one ACE instance’s reported `temp` field.
 
 ### Other `[ace]` options worth knowing
 
@@ -1232,7 +1268,21 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
    ln -sf ~/ACEPRO/KlipperScreen/acepro.py ~/KlipperScreen/panels/acepro.py
    ```
 
-3. **Restart KlipperScreen service:**
+3. **Add the panel to KlipperScreen menus (idle + printing):**
+   ```ini
+   [menu __main acepro]
+   name: ACE Pro
+   icon: settings
+   panel: acepro
+
+   [menu __print acepro]
+   name: ACE Pro
+   icon: settings
+   panel: acepro
+   ```
+   Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry keeps the panel visible during a job.
+
+4. **Restart KlipperScreen service:**
    ```bash
    # Restart the KlipperScreen service
    sudo systemctl restart KlipperScreen
@@ -1241,7 +1291,7 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
    sudo supervisorctl restart klipperscreen
    ```
 
-4. **Verify installation:**
+5. **Verify installation:**
    - Open KlipperScreen
    - Look for "ACE Pro" panel in the menu
    - Panel should appear with inventory slots and controls
@@ -1308,7 +1358,3 @@ Special thanks to the Klipper community and all contributors!
 This project is licensed under the same terms as the original projects it's based on.
 
 ---
-
-
-
-

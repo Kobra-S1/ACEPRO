@@ -102,38 +102,49 @@ is_symlink() {
     [ -L "$1" ]
 }
 
-# Ensure the ACE Pro menu entry exists in the user-editable section of KlipperScreen.conf
-ensure_klipperscreen_acepro_menu() {
+# Add a KlipperScreen menu entry (handles user-editable section vs auto-generated marker)
+ensure_menu_entry() {
     local conf="$1"
-    local entry_header='[menu __main acepro]'
-    local entry_block='[menu __main acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
+    local header="$2"
+    local block="$3"
+    local label="$4"
 
     # Extract user-editable section (lines before the #~# auto-generated marker)
     local user_section
     user_section=$(sed '/^#~# --- Do not edit/,$d' "$conf" 2>/dev/null || cat "$conf" 2>/dev/null || true)
 
-    if echo "$user_section" | grep -qF '[menu __main acepro]'; then
-        print_success "KlipperScreen.conf: ACE Pro menu entry already present"
+    if echo "$user_section" | grep -qF "$header"; then
+        print_success "KlipperScreen.conf: $label entry already present"
         return 0
     fi
 
-    print_info "Adding ACE Pro menu entry to $conf"
+    print_info "Adding $label entry to $conf"
     local tmpfile
     tmpfile=$(mktemp)
 
     if grep -q '^#~# --- Do not edit' "$conf" 2>/dev/null; then
         # Insert the block just before the auto-generated marker
-        awk -v block="$entry_block" '
+        awk -v block="$block" '
             /^#~# --- Do not edit/ && !done {
                 print block; print ""; done=1
             }
             { print }
         ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
     else
-        # No marker — just append at end of file
-        printf '\n%s\nname: ACE Pro\nicon: settings\npanel: acepro\n' '[menu __main acepro]' >> "$conf"
+        # No marker — append at end of file
+        printf '\n%s\n' "$block" >> "$conf"
     fi
-    print_success "KlipperScreen.conf: added ACE Pro menu entry"
+    print_success "KlipperScreen.conf: added $label entry"
+}
+
+# Ensure the ACE Pro menu entry exists in main and print menus
+ensure_klipperscreen_acepro_menu() {
+    local conf="$1"
+    local entry_block_main='[menu __main acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
+    local entry_block_print='[menu __print acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
+
+    ensure_menu_entry "$conf" "[menu __main acepro]" "$entry_block_main" "ACE Pro (main menu)"
+    ensure_menu_entry "$conf" "[menu __print acepro]" "$entry_block_print" "ACE Pro (print menu)"
 }
 
 # Ensure font_size = small is set in the user-editable section of KlipperScreen.conf
@@ -318,8 +329,9 @@ Installation steps:
 3. Copy printer_generic_macros.cfg (backup if exists)
 4. Copy ACE configuration file
 5. Copy ACE macro file
-6. Link KlipperScreen panel (if available)
-7. Optionally restart services
+6. Link optional ACE temperature sensor
+7. Link KlipperScreen panel (if available)
+8. Optionally restart services
 EOF
     
     if ! prompt_yes_no "Continue with installation?"; then
@@ -352,6 +364,17 @@ EOF
     fi
     
     create_or_replace_symlink "$VP_SOURCE" "$VP_TARGET" "virtual_pins module"
+
+    # Optional ACE temperature sensor (safe to link even if unused)
+    TEMP_SOURCE="$SCRIPT_DIR/extras/temperature_ace.py"
+    TEMP_TARGET="$KLIPPER_DIR/klippy/extras/temperature_ace.py"
+
+    if [ -f "$TEMP_SOURCE" ]; then
+        print_info "Linking optional ACE temperature sensor (temperature_ace.py)..."
+        create_or_replace_symlink "$TEMP_SOURCE" "$TEMP_TARGET" "temperature_ace sensor"
+    else
+        print_warning "temperature_ace.py not found; skipping sensor symlink"
+    fi
     
     # ========================================================================
     # Step 2: Backup and copy printer configuration
@@ -595,7 +618,7 @@ EOF
         echo ""
         print_info "Checking KlipperScreen.conf for font_size setting..."
         ensure_klipperscreen_font_size "$KLIPPERSCREEN_CONF"
-        print_info "Checking KlipperScreen.conf for ACE Pro menu entry..."
+        print_info "Checking KlipperScreen.conf for ACE Pro menu entries (main + print menus)..."
         ensure_klipperscreen_acepro_menu "$KLIPPERSCREEN_CONF"
     fi
     
