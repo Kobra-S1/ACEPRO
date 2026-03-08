@@ -429,6 +429,24 @@ body {
     box-shadow: 0 10px 20px rgba(59, 130, 246, 0.25);
 }
 
+.current-tool-indicator {
+    margin: 6px 0 10px 0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid #67e8f9;
+    color: #cffafe;
+    background: rgba(34, 211, 238, 0.12);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.25px;
+}
+
+.current-tool-indicator.none {
+    border-color: #475569;
+    color: #9ca3af;
+    background: rgba(71, 85, 105, 0.14);
+}
+
 .instance-header {
     font-weight: 700;
     color: #e6e9ed;
@@ -465,14 +483,40 @@ body {
 }
 
 .slot-card.active {
-    border-color: #667eea;
+    border-color: #22d3ee !important;
     border-width: 3px;
-    box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+    box-shadow:
+        0 0 0 4px rgba(34, 211, 238, 0.28),
+        0 0 22px rgba(34, 211, 238, 0.35),
+        0 10px 18px rgba(0, 0, 0, 0.35);
+    animation: activeSlotPulse 1.7s ease-in-out infinite;
 }
 
-.slot-card.selected {
-    outline: 2px solid #3b82f6;
-    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
+.slot-card.ready.active,
+.slot-card.empty.active,
+.slot-card.busy.active {
+    border-color: #22d3ee !important;
+}
+
+@keyframes activeSlotPulse {
+    0% {
+        box-shadow:
+            0 0 0 4px rgba(34, 211, 238, 0.18),
+            0 0 14px rgba(34, 211, 238, 0.22),
+            0 10px 18px rgba(0, 0, 0, 0.35);
+    }
+    50% {
+        box-shadow:
+            0 0 0 4px rgba(34, 211, 238, 0.36),
+            0 0 28px rgba(34, 211, 238, 0.44),
+            0 10px 18px rgba(0, 0, 0, 0.35);
+    }
+    100% {
+        box-shadow:
+            0 0 0 4px rgba(34, 211, 238, 0.18),
+            0 0 14px rgba(34, 211, 238, 0.22),
+            0 10px 18px rgba(0, 0, 0, 0.35);
+    }
 }
 
 .slot-card .locked {
@@ -518,6 +562,22 @@ body {
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
+}
+
+.current-tool-badge {
+    display: inline-block;
+    margin-left: auto;
+    margin-right: 8px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid #67e8f9;
+    background: rgba(34, 211, 238, 0.2);
+    color: #cffafe;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    box-shadow: 0 0 10px rgba(34, 211, 238, 0.35);
 }
 
 .slot-status-badge.ready {

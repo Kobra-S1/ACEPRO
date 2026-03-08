@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ACE Control Panel</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="ace-dashboard.css">
+    <link rel="stylesheet" href="ace-dashboard.css?v=20260308a">
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="ace-dashboard-config.js"></script>
+    <script src="ace-dashboard-config.js?v=20260308a"></script>
 </head>
 <body>
     <div id="app">
@@ -111,6 +111,9 @@
             <!-- Slots Grid -->
             <div class="card slots-card">
                 <h2>{{ t('cards.slots') }}</h2>
+                <div class="current-tool-indicator" :class="{ none: currentTool < 0 }">
+                    Current Loaded: {{ currentTool >= 0 ? `T${currentTool}` : 'None' }}
+                </div>
                 <div class="instances-wrapper">
                     <div 
                         v-for="inst in instancesPanels"
@@ -130,13 +133,13 @@
                                     ready: slot.status === 'ready',
                                     empty: slot.status === 'empty',
                                     busy: slot.status === 'busy',
-                                    active: currentTool === (slot.tool !== null && slot.tool !== undefined ? slot.tool : slot.index),
-                                    selected: slot.index === selectedInstance || slot.tool === selectedInstance
+                                    active: isCurrentToolSlot(slot, inst.index)
                                 }"
                             >
                                 <div class="slot-header">
                                     <h3 class="tool-title" v-if="slot.tool !== null && slot.tool !== undefined">T{{ slot.tool }} <span class="slot-sub" v-if="slot.index !== undefined">({{ t('slots.slot') }} {{ slot.index }})</span></h3>
                                     <h3 v-else>{{ t('slots.slot') }} {{ slot.index }}</h3>
+                                    <span v-if="isCurrentToolSlot(slot, inst.index)" class="current-tool-badge">LOADED</span>
                                     <span v-if="isRfidIdentified(slot.rfid)" class="rfid-badge">{{ t('slots.rfid') }}</span>
                                     <span class="slot-status-badge" :class="slot.status">
                                         {{ getSlotStatusText(slot.status) }}
@@ -197,7 +200,7 @@
                                 <div class="slot-actions">
                                     <button 
                                         @click="changeToolForInstance(slot.tool !== null && slot.tool !== undefined ? slot.tool : slot.index, inst.index)" 
-                                        :disabled="slot.status !== 'ready' || currentTool === (slot.tool !== null && slot.tool !== undefined ? slot.tool : slot.index)"
+                                        :disabled="slot.status !== 'ready' || isCurrentToolSlot(slot, inst.index)"
                                         class="btn btn-sm btn-primary"
                                     >
                                         {{ t('buttons.load') }}
@@ -290,6 +293,6 @@
         </div>
     </div>
 
-    <script src="ace-dashboard.js"></script>
+    <script src="ace-dashboard.js?v=20260308a"></script>
 </body>
 </html>

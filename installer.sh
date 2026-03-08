@@ -23,6 +23,13 @@ NC='\033[0m' # No Color
 # Script directory (where this script is located)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# Resolve installation user/home for defaults (works when run via sudo).
+INSTALL_USER="${SUDO_USER:-$(id -un)}"
+INSTALL_HOME="$(getent passwd "$INSTALL_USER" 2>/dev/null | cut -d: -f6 || true)"
+if [ -z "$INSTALL_HOME" ]; then
+    INSTALL_HOME="$HOME"
+fi
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -286,9 +293,11 @@ main() {
     # ========================================================================
     
     print_info "Gathering installation parameters...\n"
+    print_info "Installer source directory: $SCRIPT_DIR"
+    print_info "Default target user/home: $INSTALL_USER ($INSTALL_HOME)"
     
     # 1.1 - Klipper installation directory
-    DEFAULT_KLIPPER_DIR="$HOME/klipper"
+    DEFAULT_KLIPPER_DIR="$INSTALL_HOME/klipper"
     KLIPPER_DIR=$(prompt_input "Klipper installation directory (press ENTER to use default)" "$DEFAULT_KLIPPER_DIR")
     
     if [ ! -d "$KLIPPER_DIR" ]; then
@@ -326,7 +335,7 @@ main() {
     print_success "Selected printer: $PRINTER_NAME"
     
     # 1.3 - Config directory
-    DEFAULT_CONFIG_DIR="$HOME/printer_data/config"
+    DEFAULT_CONFIG_DIR="$INSTALL_HOME/printer_data/config"
     CONFIG_DIR=$(prompt_input "\nKlipper config directory" "$DEFAULT_CONFIG_DIR")
     
     if [ ! -d "$CONFIG_DIR" ]; then
@@ -411,10 +420,10 @@ EOF
         print_header "Step 1b: ACE Status Integration (Optional)"
 
         if prompt_yes_no "Install ACE status Moonraker component + dashboard symlinks?"; then
-            ACE_MOONRAKER_DEFAULT="$HOME/moonraker"
-            ACE_MAINSAIL_DEFAULT="$HOME/mainsail"
-            ACE_FLUIDD_DEFAULT="$HOME/fluidd"
-            ACE_MOONRAKER_CONF_DEFAULT="$HOME/printer_data/config/moonraker.conf"
+            ACE_MOONRAKER_DEFAULT="$INSTALL_HOME/moonraker"
+            ACE_MAINSAIL_DEFAULT="$INSTALL_HOME/mainsail"
+            ACE_FLUIDD_DEFAULT="$INSTALL_HOME/fluidd"
+            ACE_MOONRAKER_CONF_DEFAULT="$INSTALL_HOME/printer_data/config/moonraker.conf"
 
             # Moonraker component
             ACE_MOONRAKER_DIR=$(prompt_input "Moonraker directory (press ENTER to use default)" "$ACE_MOONRAKER_DEFAULT")
@@ -658,7 +667,7 @@ EOF
 
     print_header "Step 6: KlipperScreen Integration (Optional)"
     
-    KLIPPERSCREEN_ROOT_DIR="$HOME/KlipperScreen"
+    KLIPPERSCREEN_ROOT_DIR="$INSTALL_HOME/KlipperScreen"
     KLIPPERSCREEN_PANELS_DIR="$KLIPPERSCREEN_ROOT_DIR/panels"
     KLIPPERSCREEN_PANEL_SOURCE="$SCRIPT_DIR/KlipperScreen/acepro.py"
     KLIPPERSCREEN_PANEL_TARGET="$KLIPPERSCREEN_PANELS_DIR/acepro.py"

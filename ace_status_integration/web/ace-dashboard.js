@@ -417,6 +417,20 @@ createApp({
                 console.warn('Invalid status data:', data);
                 return;
             }
+
+            // Sync active global tool from manager status when provided.
+            // Accept both top-level current_index and nested ace_manager.current_index.
+            let incomingCurrentTool = null;
+            const topLevelCurrent = Number(data.current_index);
+            const managerCurrent = Number(data?.ace_manager?.current_index);
+            if (Number.isInteger(topLevelCurrent)) {
+                incomingCurrentTool = topLevelCurrent;
+            } else if (Number.isInteger(managerCurrent)) {
+                incomingCurrentTool = managerCurrent;
+            }
+            if (incomingCurrentTool !== null) {
+                this.currentTool = incomingCurrentTool;
+            }
             
             if (typeof data.rfid_sync_enabled === 'boolean') {
                 this.rfidSyncEnabled = data.rfid_sync_enabled;
@@ -1005,6 +1019,44 @@ createApp({
                     return slot;
                 });
             }
+        },
+
+        getSlotToolNumber(slot, instanceIndex) {
+            if (slot && slot.tool !== null && slot.tool !== undefined) {
+                const toolNum = Number(slot.tool);
+                return Number.isInteger(toolNum) ? toolNum : null;
+            }
+
+            const slotIndex = Number(slot?.index);
+            if (!Number.isInteger(slotIndex)) {
+                return null;
+            }
+
+            // If slot.tool is missing, derive instance tool offset from known slots.
+            const panel = this.instancesPanels.find(p => p.index === instanceIndex);
+            if (panel && Array.isArray(panel.slots)) {
+                const sample = panel.slots.find(s => Number.isInteger(Number(s?.tool)) && Number.isInteger(Number(s?.index)));
+                if (sample) {
+                    const sampleTool = Number(sample.tool);
+                    const sampleIndex = Number(sample.index);
+                    const offset = sampleTool - sampleIndex;
+                    return offset + slotIndex;
+                }
+            }
+
+            // Legacy single-instance fallback.
+            if (this.instancesPanels.length <= 1) {
+                return slotIndex;
+            }
+            return null;
+        },
+
+        isCurrentToolSlot(slot, instanceIndex) {
+            if (!Number.isInteger(this.currentTool) || this.currentTool < 0) {
+                return false;
+            }
+            const slotTool = this.getSlotToolNumber(slot, instanceIndex);
+            return slotTool !== null && slotTool === this.currentTool;
         },
         
         openColorPicker(instanceIndex, slotIndex, currentColor, toolNumber, material, temp, slotObj) {
