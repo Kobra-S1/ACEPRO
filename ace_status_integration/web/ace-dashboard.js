@@ -284,6 +284,21 @@ createApp({
             delete next[key];
             this.editingHex = next;
         },
+        getInstanceFeedAssistSlot(instanceIndex) {
+            const panel = this.instancesPanels.find(p => p.index === instanceIndex);
+            return (panel && typeof panel.feedAssistSlot === 'number') ? panel.feedAssistSlot : -1;
+        },
+        setInstanceFeedAssistSlot(instanceIndex, slotIndex) {
+            this.instancesPanels = this.instancesPanels.map(panel => {
+                if (panel.index !== instanceIndex) {
+                    return panel;
+                }
+                return { ...panel, feedAssistSlot: slotIndex };
+            });
+            if (instanceIndex === this.selectedInstance) {
+                this.feedAssistSlot = slotIndex;
+            }
+        },
         isSlotLocked(inst, slot) {
             const instIndex = typeof inst === 'number' ? inst : inst?.index;
             const panel = this.instancesPanels.find(p => p.index === instIndex);
@@ -636,17 +651,28 @@ createApp({
 
         async stopAssist() {
             let anySuccess = false;
-            // Disable assist for all instances/slots
             const instances = this.instanceOptions.length > 0 ? this.instanceOptions : [{ index: this.selectedInstance || 0 }];
             for (const inst of instances) {
+                const activeSlot = this.getInstanceFeedAssistSlot(inst.index);
+                if (activeSlot !== -1) {
+                    const success = await this.disableFeedAssist(activeSlot, inst.index, true);
+                    if (success) {
+                        anySuccess = true;
+                    }
+                    continue;
+                }
+
+                // Fallback: try to disable all slots if we don't know which one is active
                 for (let index = 0; index < 4; index++) {
                     const success = await this.executeCommand('ACE_DISABLE_FEED_ASSIST', { INDEX: index, INSTANCE: inst.index });
                     if (success) {
                         anySuccess = true;
+                        this.setInstanceFeedAssistSlot(inst.index, -1);
                     }
                 }
             }
             if (anySuccess) {
+                this.instancesPanels = this.instancesPanels.map(panel => ({ ...panel, feedAssistSlot: -1 }));
                 this.feedAssistSlot = -1;
                 this.showNotification(this.t('notifications.feedAssistAllOff'), 'success');
             } else {
@@ -671,34 +697,43 @@ createApp({
         },
         
         // Feed Assist Actions
-        async toggleFeedAssist(index) {
-            if (this.feedAssistSlot === index) {
-                // Выключаем feed assist для текущего слота
-                await this.disableFeedAssist(index);
+        async toggleFeedAssist(index, instanceIndex) {
+            const targetInstance = Number.isInteger(instanceIndex) ? instanceIndex : (this.selectedInstance || 0);
+            const activeSlot = this.getInstanceFeedAssistSlot(targetInstance);
+            if (activeSlot === index) {
+                await this.disableFeedAssist(index, targetInstance);
             } else {
-                // Включаем feed assist для нового слота
-                // Сначала выключаем предыдущий, если был активен
-                if (this.feedAssistSlot !== -1) {
-                    await this.disableFeedAssist(this.feedAssistSlot);
+                if (activeSlot !== -1) {
+                    await this.disableFeedAssist(activeSlot, targetInstance, true);
                 }
-                await this.enableFeedAssist(index);
+                await this.enableFeedAssist(index, targetInstance);
             }
         },
         
-        async enableFeedAssist(index) {
-            const success = await this.executeCommand('ACE_ENABLE_FEED_ASSIST', { INDEX: index });
+        async enableFeedAssist(index, instanceIndex) {
+            const targetInstance = Number.isInteger(instanceIndex) ? instanceIndex : (this.selectedInstance || 0);
+            const activeSlot = this.getInstanceFeedAssistSlot(targetInstance);
+            if (activeSlot !== -1 && activeSlot !== index) {
+                await this.disableFeedAssist(activeSlot, targetInstance, true);
+            }
+            const success = await this.executeCommand('ACE_ENABLE_FEED_ASSIST', { INDEX: index, INSTANCE: targetInstance });
             if (success) {
-                this.feedAssistSlot = index;
+                this.setInstanceFeedAssistSlot(targetInstance, index);
                 this.showNotification(this.t('notifications.feedAssistOn', { index }), 'success');
             }
+            return success;
         },
         
-        async disableFeedAssist(index) {
-            const success = await this.executeCommand('ACE_DISABLE_FEED_ASSIST', { INDEX: index });
+        async disableFeedAssist(index, instanceIndex, silent = false) {
+            const targetInstance = Number.isInteger(instanceIndex) ? instanceIndex : (this.selectedInstance || 0);
+            const success = await this.executeCommand('ACE_DISABLE_FEED_ASSIST', { INDEX: index, INSTANCE: targetInstance });
             if (success) {
-                this.feedAssistSlot = -1;
-                this.showNotification(this.t('notifications.feedAssistOff', { index }), 'success');
+                this.setInstanceFeedAssistSlot(targetInstance, -1);
+                if (!silent) {
+                    this.showNotification(this.t('notifications.feedAssistOff', { index }), 'success');
+                }
             }
+            return success;
         },
         
         // Dryer Actions

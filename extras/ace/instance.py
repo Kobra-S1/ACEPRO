@@ -1664,6 +1664,7 @@ class AceInstance:
         status = copy.deepcopy(self._info)
         status["instance"] = self.instance_num
         status["rfid_sync_enabled"] = bool(self.rfid_inventory_sync_enabled)
+        status["feed_assist_slot"] = self._get_current_feed_assist_index()
 
         # Attach device info from last get_info response, if available
         device_info = getattr(self.serial_mgr, "device_info", {})
