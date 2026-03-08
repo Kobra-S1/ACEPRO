@@ -97,6 +97,8 @@ class AceSerialManager:
         self._supervision_enabled = bool(supervision_enabled)
         # Human-readable connection state for KlipperScreen UI
         self.connection_state = "disabled" if not ace_enabled else "initializing"
+        # Latest device info response (model/firmware/etc.)
+        self.device_info = {}
 
         # Connection stability tracking
         # Rate-based detection: unstable if too many reconnects in short window
@@ -567,6 +569,12 @@ class AceSerialManager:
         self.gcode.respond_info(
             f"ACE[{self.instance_num}]: {response} (port={port}, usb={topo})"
         )
+        try:
+            result = response.get("result", {})
+            if isinstance(result, dict):
+                self.device_info = result
+        except Exception:
+            self.device_info = {}
 
     def connect(self, port, baud):
         """

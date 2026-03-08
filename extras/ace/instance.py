@@ -1663,12 +1663,29 @@ class AceInstance:
 
         status = copy.deepcopy(self._info)
         status["instance"] = self.instance_num
+        status["rfid_sync_enabled"] = bool(self.rfid_inventory_sync_enabled)
+
+        # Attach device info from last get_info response, if available
+        device_info = getattr(self.serial_mgr, "device_info", {})
+        if isinstance(device_info, dict):
+            for key in ("model", "firmware", "boot_firmware", "structure_version"):
+                if key in device_info and device_info[key] is not None:
+                    status.setdefault(key, device_info[key])
+        # Attach connection info (port / usb path) for diagnostics
+        port = getattr(self.serial_mgr, "serial_name", None) or getattr(self.serial_mgr, "_port", None)
+        usb_path = getattr(self.serial_mgr, "_usb_location", None)
+        if port:
+            status.setdefault("usb_port", port)
+        if usb_path:
+            status.setdefault("usb_path", usb_path)
 
         # Expose UI-friendly slot inventory (material/color/temp/status/RFID metadata)
         slots_out = []
         for i in range(self.SLOT_COUNT):
             inv = self.inventory[i]
             slot_data = {
+                "index": i,
+                "tool": self.tool_offset + i,
                 "status": inv.get("status"),
                 "color": inv.get("color"),
                 "material": inv.get("material"),

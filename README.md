@@ -23,8 +23,11 @@ This Anycubic-centric fork has structurally diverged from the original and focus
 - Adding many console commands for experimentation ;)
 - Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5)
 - Expanding controls/panels in the ACE KlipperScreen panel
+- Standalone browser dashboard (ValgACE-inspired) served by Moonraker at `/ace.html`
 
 The provided configurations are tailored for use with Kobra-S1 and Kobra-3 printers (I have only those, so it's also only tested with those printers).
+
+For Kobra-3 MAX there is a BETA test configuration available, but its not fully tested yet.
 
 In general other (non-)Anycubic printers are possible to use, but adaptations of the feed/retract lengths and cut tip and wipe macros, etc. will be necessary.
 If your printer has only one filament-sensor at the toolhead, use Kobra-3 config files as reference/starting point.
@@ -57,7 +60,18 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
+- ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
 - 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can by synced automatically the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
+
+### Standalone Web Dashboard
+
+The browser-based dashboard (adapted from ValgACE) gives you a full ACE view without opening KlipperScreen:
+- Device status, firmware, USB path, RFID state, and temperature at a glance.
+- Dryer controls and per-slot actions (load/unload/assist), with RFID badges when tag data drives the slot metadata.
+- Multi-instance support on one page, mirroring the KlipperScreen panel layout.
+- Served by Moonraker at `http://<moonraker-host>:7125/ace.html` (or `https://...` if using TLS) after symlinking the assets in `ace_status_integration/web` as described in `ace_status_integration/README.md`.
+
+![ACE Dashboard](img/ace-dashboard.png)
 
 ## 📖 Documentation
 

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ACE Control Panel</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="ace-dashboard.css">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="ace-dashboard-config.js"></script>
+</head>
+<body>
+    <div id="app">
+        <input type="color" ref="globalColorPicker" class="hidden-color-picker" @input="handleColorPicked" style="display:none;">
+        <div class="container">
+            <!-- Header -->
+            <header class="header">
+                <h1>{{ t('header.title') }}</h1>
+                <div class="header-actions">
+                    <div class="instance-select" v-if="instanceOptions.length > 0">
+                        <span class="label">{{ t('header.instance') }}</span>
+                        <select v-model.number="selectedInstance" @change="onInstanceChange">
+                            <option v-for="opt in instanceOptions" :key="opt.index" :value="opt.index">
+                                {{ t('header.instanceLabel', { index: opt.index }) }}
+                            </option>
+                        </select>
+                    </div>
+                    <div class="connection-status" :class="connectionBadgeClass()">
+                        <span class="status-dot"></span>
+                        <span>{{ getConnectionStateText(connectionBadgeClass()) }}</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Device Status Card -->
+            <div class="card-row">
+                <div class="card device-status-card compact">
+                    <h2>{{ t('cards.deviceStatus') }}</h2>
+                    <div class="device-info two-col">
+                        <div class="info-col">
+                            <div class="info-row">
+                                <span class="label">{{ t('deviceInfo.model') }}:</span>
+                                <span class="value">{{ deviceStatus.model || t('common.unknown') }}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">{{ t('deviceInfo.firmware') }}:</span>
+                                <span class="value">{{ deviceStatus.firmware || t('common.unknown') }}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">{{ t('deviceInfo.bootFirmware') }}:</span>
+                                <span class="value">{{ deviceStatus.boot_firmware || t('common.unknown') }}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">{{ t('deviceInfo.usb') }}:</span>
+                                <span class="value">{{ formatUsbPath(deviceStatus.usb_port, deviceStatus.usb_path) }}</span>
+                            </div>
+                        </div>
+                        <div class="info-col">
+                            <div class="info-row">
+                                <span class="label">{{ t('deviceInfo.status') }}:</span>
+                                <span class="value status-badge" :class="deviceStatus.status">
+                                    {{ getStatusText(deviceStatus.status) }}
+                                </span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">{{ t('deviceInfo.temp') }}:</span>
+                                <span class="value">{{ deviceStatus.temp || 0 }}°C</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">{{ t('deviceInfo.rfid') }}:</span>
+                                <span class="value">{{ deviceStatus.enable_rfid ? t('deviceInfo.rfidOn') : t('deviceInfo.rfidOff') }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dryer Control Card -->
+                <div class="card dryer-card compact">
+                    <h2>{{ t('cards.dryer') }}</h2>
+                    <div class="dryer-status compact">
+                        <div class="dryer-row inputs">
+                            <div class="control-group inline">
+                                <label>{{ t('dryer.inputs.temp') }}</label>
+                                <input type="number" v-model.number="dryingTemp" min="20" max="55" :disabled="dryerStatus.status === 'drying'">
+                            </div>
+                            <div class="control-group inline">
+                                <label>{{ t('dryer.inputs.duration') }}</label>
+                                <input type="number" v-model.number="dryingDuration" min="1" max="1440" :disabled="dryerStatus.status === 'drying'">
+                            </div>
+                        </div>
+                        <div class="dryer-row actions">
+                            <div class="control-group inline">
+                                <span class="label">{{ t('dryer.status') }}:</span>
+                                <span class="value status-badge" :class="dryerStatus.status">
+                                    {{ getDryerStatusText(dryerStatus.status) }}
+                                </span>
+                            </div>
+                            <div class="button-group tight">
+                                <button @click="startDrying" :disabled="dryerStatus.status === 'drying'" class="btn btn-primary">
+                                    {{ t('dryer.buttons.start') }}
+                                </button>
+                                <button @click="stopDrying" :disabled="dryerStatus.status === 'stop'" class="btn btn-danger">
+                                    {{ t('dryer.buttons.stop') }}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Slots Grid -->
+            <div class="card slots-card">
+                <h2>{{ t('cards.slots') }}</h2>
+                <div class="instances-wrapper">
+                    <div 
+                        v-for="inst in instancesPanels"
+                        :key="inst.index"
+                        class="instance-panel"
+                        :class="{ active: inst.index === selectedInstance }"
+                    >
+                        <div class="instance-header">
+                            <span>{{ t('header.instanceLabel', { index: inst.index }) }}</span>
+                        </div>
+                        <div class="slots-grid">
+                            <div 
+                                v-for="slot in inst.slots" 
+                                :key="slot.index"
+                                class="slot-card"
+                                :class="{ 
+                                    ready: slot.status === 'ready',
+                                    empty: slot.status === 'empty',
+                                    busy: slot.status === 'busy',
+                                    active: currentTool === (slot.tool !== null && slot.tool !== undefined ? slot.tool : slot.index),
+                                    selected: slot.index === selectedInstance || slot.tool === selectedInstance
+                                }"
+                            >
+                                <div class="slot-header">
+                                    <h3 class="tool-title" v-if="slot.tool !== null && slot.tool !== undefined">T{{ slot.tool }} <span class="slot-sub" v-if="slot.index !== undefined">({{ t('slots.slot') }} {{ slot.index }})</span></h3>
+                                    <h3 v-else>{{ t('slots.slot') }} {{ slot.index }}</h3>
+                                    <span v-if="isRfidIdentified(slot.rfid)" class="rfid-badge">{{ t('slots.rfid') }}</span>
+                                    <span class="slot-status-badge" :class="slot.status">
+                                        {{ getSlotStatusText(slot.status) }}
+                                    </span>
+                                </div>
+                                
+                                <div class="spool" :class="{ locked: isSlotLocked(inst, slot) }" @click.stop="openColorPicker(inst.index, slot.index, slot.color, slot.tool, slot.material, slot.temp, slot)">
+                                    <svg viewBox="0 0 200 140" class="spool-svg" aria-hidden="true">
+                                        <!-- back flange -->
+                                        <ellipse cx="60" cy="70" rx="36" ry="64" class="spool-flange-back"/>
+                                        <!-- filament body (pill) -->
+                                        <rect x="58" y="18" width="90" height="104" rx="40" ry="40" :fill="getColorHex(slot.color)" class="spool-body"/>
+                                        <!-- front flange slightly overlapping -->
+                                        <ellipse cx="142" cy="70" rx="36" ry="64" class="spool-flange-front"/>
+                                        <!-- hole -->
+                                        <ellipse cx="142" cy="70" rx="10" ry="20" class="spool-hole"/>
+                                    </svg>
+                                    <input 
+                                        class="spool-hex-input" 
+                                        v-model="slot.hex"
+                                        :disabled="isSlotLocked(inst, slot)" 
+                                        @click.stop="startHexEdit(inst.index, slot.index)"
+                                        @blur="commitSlotHex(slot, inst.index)"
+                                        @keydown.enter.prevent="commitSlotHex(slot, inst.index)"
+                                    >
+                                </div>
+                                
+                                <div class="slot-info">
+                                    <div class="info-item">
+                                        <span class="label">{{ t('slots.type') }}:</span>
+                                        <select class="material-select" :value="slot.material || slot.type || ''" @change="setSlotMaterial(slot.index, inst.index, slot.tool, $event.target.value, slot.color, slot.temp)" :disabled="isSlotLocked(inst, slot)">
+                                            <option v-for="(temp, mat) in materialOptions" :key="mat" :value="mat">{{ mat }}</option>
+                                        </select>
+                                    </div>
+                                    <div class="info-item">
+                                        <span class="label">{{ t('slots.temp') }}:</span>
+                                        <input 
+                                            class="temp-input" 
+                                            type="number" 
+                                            min="1" 
+                                            max="300" 
+                                            :value="slot.temp || 0" 
+                                            @blur="commitSlotTemp(slot.index, inst.index, slot.tool, $event, slot.color, slot.material || slot.type || '')"
+                                            @keydown.enter.prevent="commitSlotTemp(slot.index, inst.index, slot.tool, $event, slot.color, slot.material || slot.type || '')"
+                                            :disabled="isSlotLocked(inst, slot)"
+                                        >
+                                    </div>
+                                    <div class="info-item">
+                                        <span class="label">{{ t('slots.sku') }}:</span>
+                                        <span class="value">{{ slot.sku || t('common.unknown') }}</span>
+                                    </div>
+                                    <div class="info-item">
+                                        <span class="label">{{ t('slots.rfid') }}:</span>
+                                        <span class="value">{{ getRfidStatusText(slot.rfid) }}</span>
+                                    </div>
+                                </div>
+                                
+                                <div class="slot-actions">
+                                    <button 
+                                        @click="changeToolForInstance(slot.tool !== null && slot.tool !== undefined ? slot.tool : slot.index, inst.index)" 
+                                        :disabled="slot.status !== 'ready' || currentTool === (slot.tool !== null && slot.tool !== undefined ? slot.tool : slot.index)"
+                                        class="btn btn-sm btn-primary"
+                                    >
+                                        {{ t('buttons.load') }}
+                                    </button>
+                                    <button 
+                                        @click="unloadFilament(inst.index)" 
+                                        class="btn btn-sm btn-secondary"
+                                    >
+                                        {{ t('buttons.unload') }}
+                                    </button>
+                                    <button 
+                                        @click="enableFeedAssist(slot.index, inst.index)" 
+                                        :disabled="slot.status !== 'ready' || inst.feedAssistSlot === slot.index"
+                                        class="btn btn-sm btn-success"
+                                    >
+                                        {{ t('buttons.assistOn') }}
+                                    </button>
+                                    <button 
+                                        @click="disableFeedAssist(slot.index, inst.index)" 
+                                        :disabled="inst.feedAssistSlot !== slot.index"
+                                        class="btn btn-sm btn-warning"
+                                    >
+                                        {{ t('buttons.assistOff') }}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Actions -->
+            <div class="card quick-actions-card">
+                <h2>{{ t('cards.quickActions') }}</h2>
+                <div class="quick-actions">
+                    <button @click="saveInventoryAll" class="btn btn-danger">
+                        {{ t('quickActions.unload') }}
+                    </button>
+                    <button @click="stopAssist" class="btn btn-warning">
+                        {{ t('quickActions.stopAssist') }}
+                    </button>
+                    <button @click="refreshStatus" class="btn btn-secondary">
+                        {{ t('quickActions.refresh') }}
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Feed Dialog -->
+        <div v-if="showFeedModal" class="modal-overlay" @click="closeFeedDialog">
+            <div class="modal" @click.stop>
+                <h3>{{ t('dialogs.feedTitle', { slot: feedSlot }) }}</h3>
+                <div class="form-group">
+                    <label>{{ t('dialogs.length') }}</label>
+                    <input type="number" v-model.number="feedLength" min="1" max="2000">
+                </div>
+                <div class="form-group">
+                    <label>{{ t('dialogs.speed') }}</label>
+                    <input type="number" v-model.number="feedSpeed" min="1" max="100">
+                </div>
+                <div class="modal-actions">
+                    <button @click="executeFeed" class="btn btn-primary">{{ t('dialogs.execute') }}</button>
+                    <button @click="closeFeedDialog" class="btn btn-secondary">{{ t('dialogs.cancel') }}</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Retract Dialog -->
+        <div v-if="showRetractModal" class="modal-overlay" @click="closeRetractDialog">
+            <div class="modal" @click.stop>
+                <h3>{{ t('dialogs.retractTitle', { slot: retractSlot }) }}</h3>
+                <div class="form-group">
+                    <label>{{ t('dialogs.length') }}</label>
+                    <input type="number" v-model.number="retractLength" min="1" max="2000">
+                </div>
+                <div class="form-group">
+                    <label>{{ t('dialogs.speed') }}</label>
+                    <input type="number" v-model.number="retractSpeed" min="1" max="100">
+                </div>
+                <div class="modal-actions">
+                    <button @click="executeRetract" class="btn btn-primary">{{ t('dialogs.execute') }}</button>
+                    <button @click="closeRetractDialog" class="btn btn-secondary">{{ t('dialogs.cancel') }}</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Notification Toast -->
+        <div v-if="notification.show" class="toast" :class="notification.type">
+            {{ notification.message }}
+        </div>
+    </div>
+
+    <script src="ace-dashboard.js"></script>
+</body>
+</html>

@@ -147,6 +147,25 @@ ensure_klipperscreen_acepro_menu() {
     ensure_menu_entry "$conf" "[menu __print acepro]" "$entry_block_print" "ACE Pro (print menu)"
 }
 
+# Ensure [ace_status] section exists in moonraker.conf (create file if missing)
+ensure_moonraker_ace_status() {
+    local conf="$1"
+
+    if [ -f "$conf" ] && grep -qi '^[[:space:]]*\[ace_status\]' "$conf"; then
+        print_success "moonraker.conf: [ace_status] already present"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$conf")"
+    if [ ! -f "$conf" ]; then
+        printf '# Moonraker configuration\n\n' > "$conf"
+        print_warning "Created new moonraker.conf at $conf"
+    fi
+
+    printf '\n# ACE status extension\n[ace_status]\n' >> "$conf"
+    print_success "Added [ace_status] to $conf"
+}
+
 # Ensure font_size = small is set in the user-editable section of KlipperScreen.conf
 # Handles missing file, missing [main] section, wrong value, and #~# auto-generated block.
 ensure_klipperscreen_font_size() {
@@ -260,6 +279,7 @@ main() {
     PRINTER_GENERIC_MACROS_BACKUP=""
     ACE_CONFIG_BACKUP=""
     ACE_MACROS_BACKUP=""
+    MOONRAKER_RESTART_NEEDED=0
     
     # ========================================================================
     # Step 1: Gather user input
@@ -330,6 +350,7 @@ Config directory:        $CONFIG_DIR
 
 Installation steps:
 1. Link ace module to Klipper extras
+1b. (Optional) Install ACE status Moonraker component + dashboard symlinks
 2. Backup and install printer.cfg for $PRINTER_NAME
 3. Copy printer_generic_macros.cfg (backup if exists)
 4. Copy ACE configuration file
@@ -379,6 +400,67 @@ EOF
         create_or_replace_symlink "$TEMP_SOURCE" "$TEMP_TARGET" "temperature_ace sensor"
     else
         print_warning "temperature_ace.py not found; skipping sensor symlink"
+    fi
+
+    # ========================================================================
+    # Step 1b: ACE Status Integration (Optional)
+    # ========================================================================
+
+    ACE_STATUS_DIR="$SCRIPT_DIR/ace_status_integration"
+    if [ -d "$ACE_STATUS_DIR" ]; then
+        print_header "Step 1b: ACE Status Integration (Optional)"
+
+        if prompt_yes_no "Install ACE status Moonraker component + dashboard symlinks?"; then
+            ACE_MOONRAKER_DEFAULT="$HOME/moonraker"
+            ACE_MAINSAIL_DEFAULT="$HOME/mainsail"
+            ACE_FLUIDD_DEFAULT="$HOME/fluidd"
+            ACE_MOONRAKER_CONF_DEFAULT="$HOME/printer_data/config/moonraker.conf"
+
+            # Moonraker component
+            ACE_MOONRAKER_DIR=$(prompt_input "Moonraker directory (press ENTER to use default)" "$ACE_MOONRAKER_DEFAULT")
+            ACE_MOONRAKER_COMPONENTS="$ACE_MOONRAKER_DIR/moonraker/components"
+            if [ -d "$ACE_MOONRAKER_COMPONENTS" ]; then
+                ACE_STATUS_SOURCE="$ACE_STATUS_DIR/moonraker/ace_status.py"
+                ACE_STATUS_TARGET="$ACE_MOONRAKER_COMPONENTS/ace_status.py"
+                create_or_replace_symlink "$ACE_STATUS_SOURCE" "$ACE_STATUS_TARGET" "ACE status Moonraker component"
+                MOONRAKER_RESTART_NEEDED=1
+
+                # Ensure moonraker.conf has [ace_status]
+                ACE_MOONRAKER_CONF=$(prompt_input "moonraker.conf path (press ENTER to use default)" "$ACE_MOONRAKER_CONF_DEFAULT")
+                ensure_moonraker_ace_status "$ACE_MOONRAKER_CONF"
+            else
+                print_warning "Moonraker components directory not found: $ACE_MOONRAKER_COMPONENTS"
+                print_info "Skipping Moonraker ACE status symlink"
+            fi
+
+            # Mainsail dashboard files
+            if prompt_yes_no "Link dashboard files into Mainsail?"; then
+                ACE_MAINSAIL_DIR=$(prompt_input "Mainsail install directory" "$ACE_MAINSAIL_DEFAULT")
+                if [ -d "$ACE_MAINSAIL_DIR" ]; then
+                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js favicon.svg; do
+                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_MAINSAIL_DIR/$ace_file" "Mainsail $ace_file"
+                    done
+                else
+                    print_warning "Mainsail directory not found: $ACE_MAINSAIL_DIR"
+                    print_info "Skipped Mainsail dashboard links"
+                fi
+            fi
+
+            # Fluidd dashboard files
+            if prompt_yes_no "Link dashboard files into Fluidd?"; then
+                ACE_FLUIDD_DIR=$(prompt_input "Fluidd install directory" "$ACE_FLUIDD_DEFAULT")
+                if [ -d "$ACE_FLUIDD_DIR" ]; then
+                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js favicon.svg; do
+                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_FLUIDD_DIR/$ace_file" "Fluidd $ace_file"
+                    done
+                else
+                    print_warning "Fluidd directory not found: $ACE_FLUIDD_DIR"
+                    print_info "Skipped Fluidd dashboard links"
+                fi
+            fi
+        else
+            print_info "ACE status integration skipped"
+        fi
     fi
     
     # ========================================================================
@@ -633,9 +715,25 @@ EOF
 
     print_header "Step 7: Service Restart"
     
-    echo "Klipper and KlipperScreen need to be restarted for changes to take effect."
+    echo "Moonraker (if ACE status was linked), Klipper and KlipperScreen need to be restarted for changes to take effect."
     echo ""
-    
+
+    if [ "$MOONRAKER_RESTART_NEEDED" -eq 1 ]; then
+        if prompt_yes_no "Restart Moonraker service now?"; then
+            print_info "Restarting Moonraker..."
+            sudo systemctl restart moonraker
+            if [ $? -eq 0 ]; then
+                print_success "Moonraker restarted"
+            else
+                print_error "Failed to restart Moonraker"
+            fi
+        else
+            print_warning "Moonraker not restarted. You can restart manually:"
+            echo "  sudo systemctl restart moonraker"
+        fi
+        echo ""
+    fi
+
     if prompt_yes_no "Restart Klipper service now?"; then
         print_info "Restarting Klipper..."
         sudo systemctl restart klipper
