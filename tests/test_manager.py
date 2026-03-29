@@ -4535,6 +4535,53 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         self.assertEqual(slots_tested[0], 1, "Current tool slot 1 should be tested first")
         instance._smart_unload_slot.assert_called_once_with(1, length=40)
 
+    def test_prioritized_current_tool_is_skipped_when_empty(self):
+        """Current tool priority must not force testing an empty slot first."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set_and_save = Mock()
+        manager.instances[0].inventory = [
+            {"status": "ready"},  # T0
+            {"status": "empty"},  # T1 - current_tool but empty
+            {"status": "ready"},  # T2
+            {"status": "empty"},
+        ]
+        manager.instances[0]._info = {
+            "slots": [{"status": "ready"}, {"status": "empty"}, {"status": "ready"}, {"status": "empty"}]
+        }
+
+        slots_tested = []
+        original_respond = self.mock_gcode.respond_info
+
+        def track_slot(msg):
+            if "Testing slot" in msg and "via" in msg:
+                slot_num = int(msg.split("slot ")[1].split(" ")[0])
+                slots_tested.append(slot_num)
+            return original_respond(msg)
+
+        self.mock_gcode.respond_info = Mock(side_effect=track_slot)
+
+        manager.execute_coordinated_retraction = Mock()
+        manager.get_instant_switch_state = Mock(return_value=False)  # clear immediately
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager.reactor.pause = Mock()
+
+        result = manager._cycle_slots_with_sensor_check(
+            current_tool_index=1,  # T1 (empty)
+            attempted_tool_index=0,  # T0
+            retract_length=10,
+            retract_speed=5,
+            retract_speed_mmmin=600,
+            full_unload_length=50,
+            sensor_name=SENSOR_TOOLHEAD,
+            use_extruder=True,
+            sensor_to_parking_length=None,
+        )
+
+        self.assertTrue(result)
+        self.assertGreater(len(slots_tested), 0)
+        self.assertNotEqual(slots_tested[0], 1, "Empty current tool slot must not be tested first")
+
     def test_use_extruder_sensor_stays_triggered_cycles_all_slots(self):
         """Test cycling continues when sensor doesn't clear during use_extruder mode."""
         instance = self._make_instance()
