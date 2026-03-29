@@ -1112,7 +1112,15 @@ class AceManager:
             start_instance_num = get_instance_from_tool(current_tool_index)
             start_slot = get_local_slot(current_tool_index, start_instance_num)
             if start_instance_num >= 0 and 0 <= start_slot < self.instances[start_instance_num].SLOT_COUNT:
-                slots_to_try.append((start_instance_num, start_slot, current_tool_index))
+                start_instance = self.instances[start_instance_num]
+                start_slot_status = start_instance.inventory[start_slot].get("status", "empty")
+                if start_slot_status == "empty":
+                    self.gcode.respond_info(
+                        f"ACE[{start_instance_num}]: Skipping prioritized current tool "
+                        f"slot {start_slot} (T{current_tool_index}) - empty"
+                    )
+                else:
+                    slots_to_try.append((start_instance_num, start_slot, current_tool_index))
 
         # Add all other non-empty slots
         for instance_num, instance in enumerate(self.instances):

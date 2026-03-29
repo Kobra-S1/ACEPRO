@@ -1129,7 +1129,7 @@ def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
 
     manager = ace_get_manager()
     manager.state.set("ace_current_index", -1)
-    manager.state.set_and_save("ace_filament_pos", "unknown")
+    manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
     manager.gcode.run_script_from_command(
         "SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1"
@@ -1427,6 +1427,14 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             stats = print_stats.get_status(reactor.monotonic())
             is_printing = stats.get('state') in ['printing', 'paused']
 
+        # Check if this is a startup toolchange (G9111) vs regular print toolchange.
+        # During startup we must NOT pin the requested tool on failure just because
+        # print_stats already reports "printing".
+        ace_state = printer.lookup_object('gcode_macro _ACE_STATE', None)
+        is_startup = False
+        if ace_state and hasattr(ace_state, 'variables'):
+            is_startup = ace_state.variables.get('startup_toolchange', 0) == 1
+
         # Keep existing print/pause recovery behavior (set requested tool),
         # but use smarter fallback while idle/startup.
         fallback_tool = current_tool if 'current_tool' in locals() else manager.state.get("ace_current_index", -1)
@@ -1436,7 +1444,7 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         except Exception:
             filament_pos = None
 
-        if is_printing:
+        if is_printing and not is_startup:
             active_tool = tool_index
         else:
             # If unload already completed, clear active tool in idle/startup mode.
@@ -1464,15 +1472,8 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
                     f"ACE: State preserved - current tool remains T{active_tool} (idle/startup failure)"
                 )
 
-        # Check if this is a startup toolchange (G9111) vs regular print toolchange
         # During G9111: startup_toolchange=1 -> raise exception to abort macro
         # During print: startup_toolchange=0 -> pause and show dialog for recovery
-        # If _ACE_STATE macro not loaded, default to pause behavior (safer for active prints)
-        ace_state = printer.lookup_object('gcode_macro _ACE_STATE', None)
-        is_startup = False
-
-        if ace_state and hasattr(ace_state, 'variables'):
-            is_startup = ace_state.variables.get('startup_toolchange', 0) == 1
 
         # instance_num = get_instance_from_tool(tool_index)
         # slot_index = get_local_slot(tool_index, instance_num)
