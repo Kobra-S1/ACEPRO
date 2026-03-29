@@ -488,6 +488,7 @@ Link `extras/temperature_ace.py` into Klipper extras (see installation) and rest
 - `tangle_detection` / `tangle_detection_length`: Enable encoder-vs-extruder tangle checks (default off; length default 15mm).
 - `persistence_mode`: `deferred` (default) makes `set_and_save` defer disk writes until a safe `flush`; `immediate` writes to disk right away.
 - `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings).
+- `moonraker_lane_sync_orca_compat_enabled` / `moonraker_lane_sync_orca_material_aliases`: Optional, default-off compatibility shim to normalize material labels before publishing (`PLA+ -> PLA`, etc.).
 
 ### OrcaSlicer Filament Sync (Moonraker Lane Data)
 
@@ -515,6 +516,10 @@ moonraker_lane_sync_unknown_material_markers: ???,unknown,n/a,none
 
 # Only used when mode=map: the material name to substitute
 moonraker_lane_sync_unknown_material_map_to: PLA
+
+# Optional default-off Orca compatibility normalization:
+moonraker_lane_sync_orca_compat_enabled: False
+moonraker_lane_sync_orca_material_aliases: PLA+=PLA,PLA PLUS=PLA,PETG+=PETG,ABS+=ABS,ASA+=ASA,TPU+=TPU
 ```
 
 **Typical setup (recommended):**

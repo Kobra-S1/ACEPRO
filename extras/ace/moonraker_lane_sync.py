@@ -34,6 +34,15 @@ class MoonrakerLaneSyncAdapter:
         self.unknown_material_markers = self._parse_markers(
             ace_config.get("moonraker_lane_sync_unknown_material_markers", "???,unknown,n/a,none")
         )
+        self.orca_compat_enabled = bool(
+            ace_config.get("moonraker_lane_sync_orca_compat_enabled", False)
+        )
+        self.orca_material_aliases = self._parse_aliases(
+            ace_config.get(
+                "moonraker_lane_sync_orca_material_aliases",
+                "PLA+=PLA,PLA PLUS=PLA,PETG+=PETG,ABS+=ABS,ASA+=ASA,TPU+=TPU",
+            )
+        )
         self._last_payload = None
         self._warned_unavailable = False
 
@@ -285,6 +294,39 @@ class MoonrakerLaneSyncAdapter:
                 markers.add(marker.upper())
         return markers
 
+    @staticmethod
+    def _parse_aliases(raw):
+        if raw is None:
+            return {}
+        if isinstance(raw, str):
+            parts = raw.split(",")
+        elif isinstance(raw, (list, tuple, set)):
+            parts = list(raw)
+        else:
+            parts = [str(raw)]
+        aliases = {}
+        for item in parts:
+            token = str(item or "").strip()
+            if not token:
+                continue
+            if "=" in token:
+                src, dst = token.split("=", 1)
+            elif ":" in token:
+                src, dst = token.split(":", 1)
+            else:
+                continue
+            src = src.strip().upper()
+            dst = dst.strip()
+            if src and dst:
+                aliases[src] = dst
+        return aliases
+
+    def _map_material_for_orca(self, material):
+        value = str(material or "").strip()
+        if not value:
+            return ""
+        return self.orca_material_aliases.get(value.upper(), value)
+
     def _normalize_material(self, material):
         value = str(material or "").strip()
         if not value:
@@ -292,12 +334,13 @@ class MoonrakerLaneSyncAdapter:
         mode = self.unknown_material_mode
         if mode not in ("passthrough", "empty", "map"):
             mode = "empty"
-        if value.upper() not in self.unknown_material_markers:
-            return value
-        if mode == "empty":
-            return ""
-        if mode == "map":
-            return self.unknown_material_map_to
+        if value.upper() in self.unknown_material_markers:
+            if mode == "empty":
+                value = ""
+            elif mode == "map":
+                value = self.unknown_material_map_to
+        if value and self.orca_compat_enabled:
+            value = self._map_material_for_orca(value)
         return value
 
     @staticmethod

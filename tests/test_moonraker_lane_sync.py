@@ -48,6 +48,8 @@ def make_adapter(instances, enabled=True, **overrides):
         "moonraker_lane_sync_unknown_material_mode": "empty",
         "moonraker_lane_sync_unknown_material_markers": "???,unknown,n/a,none",
         "moonraker_lane_sync_unknown_material_map_to": "",
+        "moonraker_lane_sync_orca_compat_enabled": False,
+        "moonraker_lane_sync_orca_material_aliases": "PLA+=PLA,PLA PLUS=PLA,PETG+=PETG",
     }
     config.update(overrides)
     return MoonrakerLaneSyncAdapter(gcode, manager, config), gcode
@@ -373,6 +375,66 @@ def test_unknown_material_mode_map_replaces_marker():
     lane1 = adapter._build_lane_payload()["lane1"]
     assert lane1["material"] == "PLA"
     assert lane1["color"] == "#0C2238"
+
+
+def test_orca_material_aliases_disabled_by_default():
+    instances = [
+        DummyInstance(
+            0,
+            [
+                {"status": "ready", "material": "PLA+", "color": [200, 100, 50], "temp": 205},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+            ],
+        ),
+    ]
+    adapter, _ = make_adapter(instances, enabled=True)
+    lane1 = adapter._build_lane_payload()["lane1"]
+    assert lane1["material"] == "PLA+"
+
+
+def test_orca_material_aliases_can_be_enabled():
+    instances = [
+        DummyInstance(
+            0,
+            [
+                {"status": "ready", "material": "PLA+", "color": [200, 100, 50], "temp": 205},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+            ],
+        ),
+    ]
+    adapter, _ = make_adapter(
+        instances,
+        enabled=True,
+        moonraker_lane_sync_orca_compat_enabled=True,
+    )
+    lane1 = adapter._build_lane_payload()["lane1"]
+    assert lane1["material"] == "PLA"
+
+
+def test_orca_material_aliases_support_custom_mapping():
+    instances = [
+        DummyInstance(
+            0,
+            [
+                {"status": "ready", "material": "PETG-HF", "color": [90, 90, 90], "temp": 230},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+                {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0},
+            ],
+        ),
+    ]
+    adapter, _ = make_adapter(
+        instances,
+        enabled=True,
+        moonraker_lane_sync_orca_compat_enabled=True,
+        moonraker_lane_sync_orca_material_aliases="PETG-HF=PETG,PLA+=PLA",
+    )
+    lane1 = adapter._build_lane_payload()["lane1"]
+    assert lane1["material"] == "PETG"
 
 
 def test_build_lane_payload_includes_spool_id_and_min_bed_temp_fallback():

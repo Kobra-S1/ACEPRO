@@ -182,6 +182,17 @@ def read_ace_config(config):
     ace_config["moonraker_lane_sync_unknown_material_map_to"] = config.get(
         "moonraker_lane_sync_unknown_material_map_to", ""
     )
+    # Optional compatibility shim for Orca MMU custom-profile sync behavior.
+    # Default is off to keep legacy behavior unchanged unless explicitly enabled.
+    ace_config["moonraker_lane_sync_orca_compat_enabled"] = config.getboolean(
+        "moonraker_lane_sync_orca_compat_enabled", False
+    )
+    # Comma-separated material aliases in source=target format.
+    # Example: "PLA+=PLA,PLA PLUS=PLA,PETG+=PETG"
+    ace_config["moonraker_lane_sync_orca_material_aliases"] = config.get(
+        "moonraker_lane_sync_orca_material_aliases",
+        "PLA+=PLA,PLA PLUS=PLA,PETG+=PETG,ABS+=ABS,ASA+=ASA,TPU+=TPU",
+    )
     ace_config["tangle_detection"] = config.getboolean(
         "tangle_detection", False
     )

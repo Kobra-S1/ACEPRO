@@ -663,6 +663,8 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `moonraker_lane_sync_unknown_material_mode` | `empty` | How to publish placeholder materials: `passthrough`/`empty`/`map` |
 | `moonraker_lane_sync_unknown_material_markers` | `???,unknown,n/a,none` | Values treated as “unknown” for mapping/empty |
 | `moonraker_lane_sync_unknown_material_map_to` | "" | Target material when mode=`map` |
+| `moonraker_lane_sync_orca_compat_enabled` | `False` | Enable optional Orca MMU custom-profile compatibility material aliasing |
+| `moonraker_lane_sync_orca_material_aliases` | `PLA+=PLA,PLA PLUS=PLA,PETG+=PETG,ABS+=ABS,ASA+=ASA,TPU+=TPU` | Comma-separated `source=target` aliases used when Orca compat is enabled |
 | `status_debug_logging` | False | Verbose logging of ACE status update callbacks |
 | `persistence_mode` | `deferred` | `deferred` makes `set_and_save` deferred; `immediate` writes instantly |
 | `purge_multiplier` | 1.0 | Scale factor for all purge operations |
@@ -1214,6 +1216,9 @@ initial `lane_data` snapshot.
 - Unknown/placeholder materials can be filtered or remapped via
   `moonraker_lane_sync_unknown_material_mode` (`passthrough`/`empty`/`map`)
   and its marker/map settings.
+- Optional Orca compatibility aliasing can normalize materials before publishing
+  (for example `PLA+ -> PLA`) when `moonraker_lane_sync_orca_compat_enabled`
+  is enabled.
 
 ### Config (`[ace]`)
 
@@ -1226,6 +1231,8 @@ moonraker_lane_sync_timeout: 2.0
 moonraker_lane_sync_unknown_material_mode: passthrough   # passthrough|empty|map
 moonraker_lane_sync_unknown_material_markers: ???,unknown,n/a,none
 moonraker_lane_sync_unknown_material_map_to: PLA         # used when mode=map
+moonraker_lane_sync_orca_compat_enabled: False           # optional, default off
+moonraker_lane_sync_orca_material_aliases: PLA+=PLA,PLA PLUS=PLA,PETG+=PETG,ABS+=ABS,ASA+=ASA,TPU+=TPU
 ```
 
 ## Test & Debug (Moonraker DB)
