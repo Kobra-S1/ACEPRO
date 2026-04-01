@@ -61,6 +61,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 - ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
+- ✅ **Spoolman Integration**: Automatic spool selection via RFID-to-ID mapping or manual slot assignment
 - 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can by synced automatically the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
 
 ### Standalone Web Dashboard
@@ -103,6 +104,7 @@ config/
 ├── printer_KS1.cfg       # Kobra S1 printer macros
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
 └── ace_macros_generic.cfg # Shared ACE helper macros
+└── spoolman_logic.cfg          # Logic for Spoolman ID mapping and tool hooks
 
 extras/
 ├── ace/                  # ACE core module (multi-instance manager)
@@ -694,6 +696,29 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 | `ACE_QUERY_SLOTS` | Query all slots across instances | `[INSTANCE=<0-3>]` omit for all |
 | `ACE_SAVE_INVENTORY` | Persist inventory to saved_variables.cfg | `[INSTANCE=<0-3>]` |
 | `ACE_RESET_PERSISTENT_INVENTORY` | Clear all slot metadata | `INSTANCE=<0-3>` |
+
+## 🧵 Spoolman Integration
+
+[cite_start]This driver supports integration with [Spoolman](https://github.com/Donkie/Spoolman) to automatically track filament usage and metadata based on ACE RFID tags or manual assignments[cite: 1, 3].
+
+### Prerequisites
+1. [cite_start]Spoolman must be installed and configured in your `moonraker.conf`[cite: 1].
+2. [cite_start]`[save_variables]` must be defined in your printer configuration (standard in this repo)[cite: 2].
+3. [cite_start]Include the logic in your `printer.cfg` **before** the ACE config:
+   `[include spoolman_logic.cfg]`
+
+### How to use
+The integration handles three ways of identifying spools:
+
+* **Custom RFID Tags**: Write your Spoolman ID (integer) directly to a rewritable tag. [cite_start]The driver will load it automatically[cite: 3, 4].
+* [cite_start]**Original Anycubic Tags**: Since these are locked, use the UI to map the SKU to a Spoolman ID[cite: 5, 6].
+    * [cite_start]Use the macro: `MAP_SKU SKU="HPL17-103" ID=15`[cite: 6].
+    * Mappings are saved permanently in `variables.cfg`.
+* [cite_start]**Manual Assignment**: For spools without any RFID, lock a specific slot to an ID[cite: 8].
+    * [cite_start]Use the macro: `SPOOLMAN_MANUAL_SLOT SLOT=1 ID=5`[cite: 8].
+    * This lock remains active until the spool is removed from the slot.
+
+[cite_start]*Note: The included T-macros (T0-T7) are pre-configured to trigger these Spoolman lookups automatically during tool changes[cite: 19, 20].*
 
 ### RFID Inventory Sync (3 commands)
 
