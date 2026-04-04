@@ -524,6 +524,19 @@ moonraker_lane_sync_unknown_material_map_to: PLA
 2. Open OrcaSlicer (latest Beta), connect to your printer via Moonraker
 3. Filament type and color will auto-populate in the tool list
 
+### Smart Bed Mesh Management
+
+The provided printer configurations (`printer_K3.cfg` `printer_K3M.cfg` `printer_KS1.cfg`) include an optional option in the start macro (`G9111`) that features selective bed mesh handling to save time before every print.
+
+
+**How it works:**
+1. **Profile Lookup:** The macro reads the target bed temperature (e.g., 60°C) and looks for a saved bed mesh profile named exactly `BED_60`.
+2. **Auto-Load:** If a profile matching the temperature exists, it loads it immediately, skipping the lengthy probing process.
+3. **Adaptive Fallback:** If no matching profile exists, it automatically performs a fast Adaptive Bed Mesh (`BED_MESH_CALIBRATE PROFILE=adaptive ADAPTIVE=1`) covering only the actual print area.
+
+**No Slicer Changes Required:** You do **not** need to modify your start G-code in your slicer to use this feature. Just create and save a bed mesh with the correct name, and the macro will handle the rest automatically.
+
+
 ### Per-Instance Configuration Overrides
 
 Some configuration parameters can be overridden per ACE instance, allowing different settings for each ACE unit. This is useful when ACE units have different tube lengths or require different speeds.
@@ -699,26 +712,26 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 
 ## 🧵 Spoolman Integration
 
-[cite_start]This driver supports integration with [Spoolman](https://github.com/Donkie/Spoolman) to automatically track filament usage and metadata based on ACE RFID tags or manual assignments[cite: 1, 3].
+This driver supports integration with [Spoolman](https://github.com/Donkie/Spoolman) to automatically track filament usage and metadata based on ACE RFID tags or manual assignments.
 
 ### Prerequisites
-1. [cite_start]Spoolman must be installed and configured in your `moonraker.conf`[cite: 1].
-2. [cite_start]`[save_variables]` must be defined in your printer configuration (standard in this repo)[cite: 2].
-3. [cite_start]Include the logic in your `printer.cfg` **before** the ACE config:
+1. Spoolman must be installed and configured in your `moonraker.conf`.
+2. `[save_variables]` must be defined in your printer configuration (standard in this repo).
+3. Include the logic in your `printer.cfg` **before** the ACE config:
    `[include spoolman_logic.cfg]`
 
 ### How to use
 The integration handles three ways of identifying spools:
 
-* **Custom RFID Tags**: Write your Spoolman ID (integer) directly to a rewritable tag. [cite_start]The driver will load it automatically[cite: 3, 4].
-* [cite_start]**Original Anycubic Tags**: Since these are locked, use the UI to map the SKU to a Spoolman ID[cite: 5, 6].
-    * [cite_start]Use the macro: `MAP_SKU SKU="HPL17-103" ID=15`[cite: 6].
+* **Custom RFID Tags**: Write your Spoolman ID (integer) directly to a rewritable tag. The driver will load it automatically.
+* **Original Anycubic Tags**: Since these are locked, use the UI to map the SKU to a Spoolman ID.
+    * Use the macro: `MAP_SKU SKU="HPL17-103" ID=15`.
     * Mappings are saved permanently in `variables.cfg`.
-* [cite_start]**Manual Assignment**: For spools without any RFID, lock a specific slot to an ID[cite: 8].
-    * [cite_start]Use the macro: `SPOOLMAN_MANUAL_SLOT SLOT=1 ID=5`[cite: 8].
+* **Manual Assignment**: For spools without any RFID, lock a specific slot to an ID.
+    * Use the macro: `SPOOLMAN_MANUAL_SLOT SLOT=1 ID=5`.
     * This lock remains active until the spool is removed from the slot.
 
-[cite_start]*Note: The included T-macros (T0-T7) are pre-configured to trigger these Spoolman lookups automatically during tool changes[cite: 19, 20].*
+*Note: The included T-macros (T0-T7) are pre-configured to trigger these Spoolman lookups automatically during tool changes.*
 
 ### RFID Inventory Sync (3 commands)
 
