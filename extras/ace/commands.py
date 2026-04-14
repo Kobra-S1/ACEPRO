@@ -1305,14 +1305,12 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
     if not do_cut:
         gcmd.respond_info("ACE: Print end - skipping unload (CUT_TIP=0), tool remains loaded")
 
-        # Disable feed assist on all instances except the one with the loaded tool
+        # Disable feed assist on all instances when print ends.
         tool_index = manager.state.get("ace_current_index", -1)
         if tool_index >= 0:
-            active_instance = get_instance_from_tool(tool_index)
-            for_each_instance(lambda inst_num, mgr, instance:
-                              instance.reset_feed_assist_state() if inst_num != active_instance else None)
+            for_each_instance(lambda inst_num, mgr, instance: instance.reset_feed_assist_state())
             gcmd.respond_info(
-                f"ACE: Feed assist disabled on all instances except ACE[{active_instance}] (T{tool_index})")
+                "ACE: Feed assist disabled for all instances")
 
         # Refresh Orca lane_data snapshot after print end even when keeping filament loaded
         manager._sync_moonraker_lane_data(force=True, reason="print_end_skip_cut")

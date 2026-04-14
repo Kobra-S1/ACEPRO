@@ -1411,6 +1411,56 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
     @patch('ace.manager.get_ace_instance_and_slot_for_tool')
+    def test_print_end_skip_cut_then_reselect_same_tool_reenables_feed_assist(
+        self, mock_get_ace, mock_endless_spool, mock_ace_instance
+    ):
+        """Test CUT_TIP=0 print end reset does not prevent same-tool feed-assist reactivation."""
+        from ace import commands as ace_commands
+
+        manager = AceManager(self.mock_config)
+        self.variables['ace_current_index'] = 1
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
+
+        # Instance used for T1 (instance 0, local slot 1)
+        target_instance = Mock()
+        target_instance.instance_num = 0
+        target_instance.inventory = {1: {'status': 'loaded', 'temp': 0}}
+        target_instance._feed_assist_index = 1
+        target_instance._enable_feed_assist = Mock()
+
+        def reset_target_feed_assist():
+            target_instance._feed_assist_index = -1
+        target_instance.reset_feed_assist_state = Mock(side_effect=reset_target_feed_assist)
+
+        # Second instance exists because ace_count=2; include reset mock for completeness.
+        instance1 = Mock()
+        instance1.instance_num = 1
+        instance1.reset_feed_assist_state = Mock()
+
+        manager.instances[0] = target_instance
+        manager.instances[1] = instance1
+        mock_get_ace.return_value = (target_instance, 1)
+
+        # Step 1: _ACE_HANDLE_PRINT_END CUT_TIP=0 -> reset feed assist on all instances.
+        gcmd_print_end = Mock()
+        gcmd_print_end.get_int = Mock(return_value=0)
+        gcmd_print_end.respond_info = Mock()
+        ace_commands.cmd_ACE_HANDLE_PRINT_END(gcmd_print_end)
+
+        target_instance.reset_feed_assist_state.assert_called_once()
+        instance1.reset_feed_assist_state.assert_called_once()
+        self.assertEqual(target_instance._feed_assist_index, -1)
+
+        # Step 2: Reselect same tool (equivalent to issuing T1) -> feed assist must be re-enabled.
+        result = manager.perform_tool_change(current_tool=1, target_tool=1)
+
+        self.assertIn("already loaded", result)
+        target_instance._enable_feed_assist.assert_called_once_with(1)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    @patch('ace.manager.get_ace_instance_and_slot_for_tool')
     def test_tool_reselection_state_correction(self, mock_get_ace, mock_endless_spool, mock_ace_instance):
         """Test reselecting same tool when state is nozzle but sensor is empty."""
         manager = AceManager(self.mock_config)
