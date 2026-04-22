@@ -1816,7 +1816,12 @@ class Panel(ScreenPanel):
             outer.add(main_box)
             self.content.add(outer)
         else:
-            main_box.pack_start(instances_box, False, False, 0)
+            landscape_scroll = Gtk.ScrolledWindow()
+            landscape_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            landscape_scroll.set_vexpand(True)
+            landscape_scroll.set_propagate_natural_width(False)
+            landscape_scroll.add(instances_box)
+            main_box.pack_start(landscape_scroll, True, True, 0)
             main_box.pack_start(button_box, False, False, 0)
             self.content.add(main_box)
 
@@ -2495,14 +2500,10 @@ class Panel(ScreenPanel):
                 frame_label = self._dryer_controls[instance_id]['frame_label']
                 
                 if self.selected_dryer_instance == "ALL":
-                    # When ALL is selected, show only ACE 0's controls
-                    if instance_id == 0:
-                        if frame:
-                            frame.show_all()
-                        frame_label.set_markup("<b>ALL ACEs (Temp of ACE 0 shown)</b>")
-                    else:
-                        if frame:
-                            frame.hide()
+                    # Show every instance frame so each ACE's actual temp/state is visible
+                    if frame:
+                        frame.show_all()
+                    frame_label.set_markup(f"<b>ACE {instance_id}</b>")
                 elif self.selected_dryer_instance == instance_id:
                     # Show only selected frame with highlight
                     if frame:

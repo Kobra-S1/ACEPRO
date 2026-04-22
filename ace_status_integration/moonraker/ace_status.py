@@ -135,7 +135,21 @@ class AceStatus:
 
             # Choose which instance to expose at top-level (default: current_index or 0)
             chosen_idx = 0
-            if instance_idx is not None and instance_idx in instances:
+            if instance_idx is not None:
+                if instance_idx < 0 or instance_idx >= instance_count:
+                    return {
+                        "error": f"Requested ACE instance {instance_idx} is out of range",
+                        "instance_index": instance_idx,
+                        "available_instances": sorted(instances.keys()),
+                        "ace_instance_count": instance_count,
+                    }
+                if instance_idx not in instances:
+                    return {
+                        "error": f"Requested ACE instance {instance_idx} is unavailable",
+                        "instance_index": instance_idx,
+                        "available_instances": sorted(instances.keys()),
+                        "ace_instance_count": instance_count,
+                    }
                 chosen_idx = instance_idx
             elif isinstance(ace_mgr, dict):
                 try:
@@ -158,7 +172,7 @@ class AceStatus:
                 self._last_status = payload
                 return payload
 
-            if self._last_status:
+            if instance_idx is None and self._last_status:
                 self.logger.debug("Returning cached ACE status")
                 return self._last_status
 

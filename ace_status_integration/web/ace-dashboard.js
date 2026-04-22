@@ -175,6 +175,7 @@ createApp({
             feedAssistSlot: -1,  // Индекс слота с активным feed assist (-1 = выключен)
             instanceOptions: [],
             selectedInstance: 0,
+            statusRequestSeq: 0,
             instancesPanels: [],
             colorPresets: ['#ff0000', '#00ff00', '#0000ff', '#ff9900', '#ffff00', '#ff00ff', '#00ffff', '#ffffff', '#808080', '#000000'],
             colorPickerTarget: null,
@@ -363,8 +364,24 @@ createApp({
         handleWebSocketMessage(data) {
             if (data.method === "notify_status_update") {
                 const aceData = data.params[0]?.ace;
-                if (aceData) {
-                    if (typeof aceData.instance_index === 'number' && aceData.instance_index !== this.selectedInstance) {
+                if (aceData && typeof aceData === 'object') {
+                    const wsInstance = Number(aceData.instance_index);
+                    if (!Number.isInteger(wsInstance)) {
+                        // Manager-level push updates are not instance-scoped.
+                        // Apply only global fields that are safe across instances.
+                        const globalUpdate = {};
+                        if (aceData.current_index !== undefined) {
+                            globalUpdate.current_index = aceData.current_index;
+                        }
+                        if (typeof aceData.rfid_sync_enabled === 'boolean') {
+                            globalUpdate.rfid_sync_enabled = aceData.rfid_sync_enabled;
+                        }
+                        if (Object.keys(globalUpdate).length > 0) {
+                            this.updateStatus(globalUpdate);
+                        }
+                        return;
+                    }
+                    if (wsInstance !== this.selectedInstance) {
                         // Ignore updates for other instances; periodic polling will fetch selected instance
                         return;
                     }
@@ -377,6 +394,8 @@ createApp({
         async loadStatus() {
             try {
                 const inst = Number.isInteger(this.selectedInstance) ? this.selectedInstance : 0;
+                const requestSeq = ++this.statusRequestSeq;
+                const requestInstance = inst;
                 const response = await fetch(`${this.apiBase}/server/ace/status?instance=${inst}`);
                 
                 if (!response.ok) {
@@ -398,6 +417,29 @@ createApp({
                 // API может возвращать данные напрямую или в result.result
                 // Обрабатываем оба случая
                 const statusData = result.result || result;
+
+                // Ignore stale responses from older requests.
+                if (requestSeq !== this.statusRequestSeq) {
+                    return;
+                }
+
+                // Ignore response if user changed selected instance while request was in flight.
+                if (this.selectedInstance !== requestInstance) {
+                    return;
+                }
+
+                // Reject mismatched instance payloads to prevent cross-instance display bleed-through.
+                if (
+                    Number.isInteger(requestInstance) &&
+                    typeof statusData?.instance_index === 'number' &&
+                    statusData.instance_index !== requestInstance
+                ) {
+                    console.warn('Ignoring mismatched ACE status payload:', {
+                        requested: requestInstance,
+                        received: statusData.instance_index
+                    });
+                    return;
+                }
                 
                 // Проверяем, что это действительно данные статуса (есть хотя бы одно из полей)
                 if (statusData && typeof statusData === 'object' && 
@@ -441,16 +483,18 @@ createApp({
             }
             
             // Track instances list
-            const instances = Array.isArray(data.instances) ? data.instances : [];
-            this.instanceOptions = instances
-                .map(item => ({ index: typeof item?.index === 'number' ? item.index : 0 }))
-                .sort((a, b) => a.index - b.index);
-            if (typeof data.instance_index === 'number') {
-                if (
-                    !Number.isInteger(this.selectedInstance) ||
-                    !this.instanceOptions.find(opt => opt.index === this.selectedInstance)
-                ) {
-                    this.selectedInstance = data.instance_index;
+            const instances = Array.isArray(data.instances) ? data.instances : null;
+            if (instances) {
+                this.instanceOptions = instances
+                    .map(item => ({ index: typeof item?.index === 'number' ? item.index : 0 }))
+                    .sort((a, b) => a.index - b.index);
+                if (typeof data.instance_index === 'number') {
+                    if (
+                        !Number.isInteger(this.selectedInstance) ||
+                        !this.instanceOptions.find(opt => opt.index === this.selectedInstance)
+                    ) {
+                        this.selectedInstance = data.instance_index;
+                    }
                 }
             }
             
