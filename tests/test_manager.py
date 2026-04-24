@@ -1429,27 +1429,29 @@ class TestPerformToolChange(unittest.TestCase):
         target_instance._feed_assist_index = 1
         target_instance._enable_feed_assist = Mock()
 
-        def reset_target_feed_assist():
+        def disable_target_feed_assist(slot_index):
+            assert slot_index == 1
             target_instance._feed_assist_index = -1
-        target_instance.reset_feed_assist_state = Mock(side_effect=reset_target_feed_assist)
+        target_instance._disable_feed_assist = Mock(side_effect=disable_target_feed_assist)
 
-        # Second instance exists because ace_count=2; include reset mock for completeness.
+        # Second instance exists because ace_count=2; include disable mock for completeness.
         instance1 = Mock()
         instance1.instance_num = 1
-        instance1.reset_feed_assist_state = Mock()
+        instance1._feed_assist_index = -1
+        instance1._disable_feed_assist = Mock()
 
         manager.instances[0] = target_instance
         manager.instances[1] = instance1
         mock_get_ace.return_value = (target_instance, 1)
 
-        # Step 1: _ACE_HANDLE_PRINT_END CUT_TIP=0 -> reset feed assist on all instances.
+        # Step 1: _ACE_HANDLE_PRINT_END CUT_TIP=0 -> disable feed assist on all instances.
         gcmd_print_end = Mock()
         gcmd_print_end.get_int = Mock(return_value=0)
         gcmd_print_end.respond_info = Mock()
         ace_commands.cmd_ACE_HANDLE_PRINT_END(gcmd_print_end)
 
-        target_instance.reset_feed_assist_state.assert_called_once()
-        instance1.reset_feed_assist_state.assert_called_once()
+        target_instance._disable_feed_assist.assert_called_once_with(1)
+        instance1._disable_feed_assist.assert_called_once_with(-1)
         self.assertEqual(target_instance._feed_assist_index, -1)
 
         # Step 2: Reselect same tool (equivalent to issuing T1) -> feed assist must be re-enabled.

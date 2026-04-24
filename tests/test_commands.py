@@ -1243,13 +1243,17 @@ class TestDryingCommands:
     def test_cmd_ACE_HANDLE_PRINT_END_skip_cut_disables_feed_assist_all_instances(
         self, mock_gcmd, setup_mocks
     ):
-        """Test ACE_HANDLE_PRINT_END with CUT_TIP=0 resets feed assist on all ACEs."""
+        """Test ACE_HANDLE_PRINT_END with CUT_TIP=0 disables feed assist on all ACEs."""
         mock_gcmd.get_int = Mock(return_value=0)  # CUT_TIP=0
         INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
 
+        ACE_INSTANCES[0]._feed_assist_index = 0
+        ACE_INSTANCES[0]._disable_feed_assist = Mock()
+
         instance1 = Mock()
         instance1.instance_num = 1
-        instance1.reset_feed_assist_state = Mock()
+        instance1._feed_assist_index = 2
+        instance1._disable_feed_assist = Mock()
         ACE_INSTANCES[1] = instance1
 
         manager1 = Mock()
@@ -1258,8 +1262,8 @@ class TestDryingCommands:
 
         ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
 
-        ACE_INSTANCES[0].reset_feed_assist_state.assert_called_once()
-        ACE_INSTANCES[1].reset_feed_assist_state.assert_called_once()
+        ACE_INSTANCES[0]._disable_feed_assist.assert_called_once_with(0)
+        ACE_INSTANCES[1]._disable_feed_assist.assert_called_once_with(2)
 
     def test_cmd_ACE_SMART_LOAD(self, mock_gcmd, setup_mocks):
         """Test ACE_SMART_LOAD."""
