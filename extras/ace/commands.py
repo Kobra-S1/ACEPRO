@@ -224,6 +224,10 @@ def cmd_ACE_GET_STATUS(gcmd):
         instance_num = gcmd.get_int("INSTANCE", None)
         verbose = gcmd.get_int("VERBOSE", 0)
 
+        def build_status_request(ace_instance):
+            """Build one protocol-correct status request without leaking transport details here."""
+            return ace_instance.protocol.build_get_status_request()
+
         def format_verbose_status(result, inst_num, ace_instance=None):
             """Format all status information in a readable, grouped format."""
             lines = []
@@ -435,7 +439,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                     msg = response.get("msg") if response else "No response"
                     gcmd.respond_info(f"Status query failed: {msg}")
 
-            ace.send_request({"method": "get_status"}, status_callback)
+            ace.send_request(build_status_request(ace), status_callback)
         else:
             if verbose:
                 gcmd.respond_info("=== ACE Status (All Instances - Verbose) ===\n")
@@ -466,7 +470,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                         msg = response.get("msg") if response else "No response"
                         gcmd.respond_info(f"Instance {inst_num}: Status query failed: {msg}")
 
-                ace.send_request({"method": "get_status"}, status_callback)
+                ace.send_request(build_status_request(ace), status_callback)
 
             for_each_instance(query_instance)
 
@@ -767,10 +771,6 @@ def cmd_ACE_START_DRYING(gcmd):
             if temperature <= 0 or temperature > ace.max_dryer_temperature:
                 raise gcmd.error(f"TEMP must be between 1 and {ace.max_dryer_temperature}°C")
 
-            ace._dryer_active = True
-            ace._dryer_temperature = temperature
-            ace._dryer_duration = duration
-
             def callback(response):
                 if response and response.get("code") == 0:
                     if not getattr(ace, "_dryer_start_logged", False):
@@ -780,17 +780,12 @@ def cmd_ACE_START_DRYING(gcmd):
                     msg = response.get("msg", "Unknown error") if response else ""
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer start failed: {msg}")
 
-            request = {"method": "drying", "params": {"temp": temperature, "duration": duration}}
-            ace.send_request(request, callback)
+            ace.start_drying(temperature, duration, callback)
         else:
             def start_dryer(inst_num, manager, ace):
                 if temperature <= 0 or temperature > ace.max_dryer_temperature:
                     gcmd.respond_info(f"ACE[{inst_num}]: Temp {temperature}°C out of range, skipping")
                     return
-
-                ace._dryer_active = True
-                ace._dryer_temperature = temperature
-                ace._dryer_duration = duration
 
                 def callback(response):
                     if response and response.get("code") == 0:
@@ -801,8 +796,7 @@ def cmd_ACE_START_DRYING(gcmd):
                         msg = response.get("msg", "Unknown error") if response else ""
                         gcmd.respond_info(f"ACE[{inst_num}]: Dryer start failed: {msg}")
 
-                request = {"method": "drying", "params": {"temp": temperature, "duration": duration}}
-                ace.send_request(request, callback)
+                ace.start_drying(temperature, duration, callback)
 
             for_each_instance(start_dryer)
 
@@ -818,10 +812,6 @@ def cmd_ACE_STOP_DRYING(gcmd):
         if instance_num is not None:
             ace = ace_get_instance(gcmd)
 
-            ace._dryer_active = False
-            ace._dryer_temperature = 0
-            ace._dryer_duration = 0
-
             def callback(response):
                 if response and response.get("code") == 0:
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer stopped")
@@ -830,14 +820,9 @@ def cmd_ACE_STOP_DRYING(gcmd):
                     msg = response.get("msg", "Unknown error") if response else ""
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer stop failed: {msg}")
 
-            request = {"method": "drying_stop"}
-            ace.send_request(request, callback)
+            ace.stop_drying(callback)
         else:
             def stop_dryer(inst_num, manager, ace):
-                ace._dryer_active = False
-                ace._dryer_temperature = 0
-                ace._dryer_duration = 0
-
                 def callback(response):
                     if response and response.get("code") == 0:
                         gcmd.respond_info(f"ACE[{inst_num}]: Dryer stopped")
@@ -845,8 +830,7 @@ def cmd_ACE_STOP_DRYING(gcmd):
                         msg = response.get("msg", "Unknown error") if response else ""
                         gcmd.respond_info(f"ACE[{inst_num}]: Dryer stop failed: {msg}")
 
-                request = {"method": "drying_stop"}
-                ace.send_request(request, callback)
+                ace.stop_drying(callback)
 
             for_each_instance(stop_dryer)
 
@@ -1262,7 +1246,7 @@ def cmd_ACE_DEBUG(gcmd):
     def callback(response):
         gcmd.respond_info(f"Debug response: {json.dumps(response)}")
 
-    request = {"method": method, "params": params}
+    request = ace.protocol.build_debug_request(method, params)
     ace.send_request(request, callback)
 
 

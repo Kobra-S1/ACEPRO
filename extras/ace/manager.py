@@ -9,22 +9,30 @@ from .config import (
     FILAMENT_STATE_NOZZLE,
     FILAMENT_STATE_TOOLHEAD,
     OVERRIDABLE_PARAMS,
+    CHOICE_OVERRIDABLE_PARAMS,
     get_instance_from_tool,
     get_local_slot,
     get_tool_offset,
     get_ace_instance_and_slot_for_tool,
     parse_instance_config,
+    parse_instance_baud_config,
+    parse_instance_choice_config,
     create_inventory,
 )
 from .persistent_state import PersistentState
 
 from .instance import AceInstance
+from .ace2_bus import Ace2BusSession
 from .endless_spool import EndlessSpool
 from .runout_monitor import RunoutMonitor
 from .moonraker_lane_sync import MoonrakerLaneSyncAdapter
 from . import commands
 from .config import read_ace_config
+from .protocol import create_protocol_adapter, resolve_protocol_name
+from .serial_manager import AceSerialManager
 import logging
+import serial
+import time
 
 
 class FilamentTrackerAdapter:
@@ -153,17 +161,28 @@ class AceManager:
         )
 
         self._ace_pro_enabled = initial_ace_enabled
+        self._shared_transport_contexts = {}
 
         # Create all AceInstance objects
         self.instances = []
         for instance_num in range(self.ace_count):
             instance_config = self._resolve_instance_config(instance_num)
+            protocol = create_protocol_adapter(instance_config["active_protocol_name"])
+            shared_kwargs = self._build_shared_transport_kwargs(
+                instance_num,
+                instance_config,
+                initial_ace_enabled,
+                protocol,
+            )
 
             instance = AceInstance(
                 instance_num,
                 instance_config,
                 self.printer,
-                ace_enabled=initial_ace_enabled  # Pass initial state
+                ace_enabled=initial_ace_enabled,  # Pass initial state
+                protocol=protocol,
+                active_protocol_name=instance_config["active_protocol_name"],
+                **shared_kwargs,
             )
 
             self.instances.append(instance)
@@ -288,8 +307,12 @@ class AceManager:
         self.gcode.run_script_from_command(f"SET_PIN PIN=ACE_Pro VALUE={pin_value}")
 
         if self._ace_pro_enabled:
-            for instance in self.instances:
-                instance.serial_mgr.connect_to_ace(self.ace_config["baud"], 2)
+            for instance in self._iter_unique_transport_instances():
+                instance.serial_mgr.connect_to_ace(instance.baud, 2)
+                if instance.bus_session is not None and instance.serial_mgr._port:
+                    instance.bus_session.port = instance.serial_mgr._port
+                    self._initialize_shared_bus_transport(instance)
+                    self._start_shared_bus_runtime(instance.bus_session)
             self._setup_sensors()
         else:
             self.gcode.respond_info("ACE: ACE Pro disabled on startup - skipping connections")
@@ -330,7 +353,7 @@ class AceManager:
         except Exception:
             logging.exception("ACE: Failed to flush state on disconnect")
 
-        for instance in self.instances:
+        for instance in self._iter_unique_transport_instances():
             instance.serial_mgr.disconnect()
 
         self._stop_monitoring()
@@ -2137,7 +2160,254 @@ class AceManager:
                 raw_value = self.ace_config[param]
                 resolved[param] = parse_instance_config(raw_value, instance_num, param)
 
+        for param in CHOICE_OVERRIDABLE_PARAMS:
+            if param in self.ace_config:
+                raw_value = self.ace_config[param]
+                resolved[param] = parse_instance_choice_config(raw_value, instance_num, param)
+
+        resolved["active_protocol_name"] = resolve_protocol_name(
+            resolved.get("protocol", "auto"),
+            instance_num=instance_num,
+            available_port_descriptions=self._get_available_port_descriptions(),
+        )
+
+        if "baud" in self.ace_config:
+            resolved["baud"] = parse_instance_baud_config(
+                self.ace_config["baud"],
+                instance_num,
+                resolved["active_protocol_name"],
+            )
+
         return resolved
+
+    def _get_available_port_descriptions(self):
+        """List visible serial-port signatures for protocol auto-selection."""
+        try:
+            signatures = []
+            for portinfo in serial.tools.list_ports.comports():
+                signature = getattr(portinfo, "description", "")
+                if not signature:
+                    signature = getattr(portinfo, "product", "")
+                if not signature:
+                    signature = getattr(portinfo, "interface", "")
+                if not signature:
+                    signature = getattr(portinfo, "hwid", "")
+                signatures.append(signature)
+            return signatures
+        except Exception:
+            return []
+
+    def _iter_unique_transport_instances(self):
+        """Yield one representative instance per underlying serial transport."""
+        seen_managers = set()
+        for instance in self.instances:
+            serial_mgr = getattr(instance, "serial_mgr", None)
+            serial_mgr_id = id(serial_mgr)
+            if serial_mgr_id in seen_managers:
+                continue
+            seen_managers.add(serial_mgr_id)
+            yield instance
+
+    def _get_instances_for_bus_session(self, bus_session):
+        """Return logical instances that share one ACE2 bus session."""
+        return [
+            instance for instance in self.instances
+            if getattr(instance, "bus_session", None) is bus_session
+        ]
+
+    def _get_shared_bus_bindings_varname(self, shared_instances):
+        """Build stable persistent-state variable name for one ACE2 bus group."""
+        instance_ids = "_".join(
+            str(instance.instance_num)
+            for instance in sorted(shared_instances, key=lambda item: item.instance_num)
+        )
+        return f"ace2_bus_bindings_{instance_ids}"
+
+    def _load_shared_bus_bindings(self, bus_session, shared_instances):
+        """Restore persisted ACE2 UID bindings for one shared bus group."""
+        raw_mapping = self.state.get(
+            self._get_shared_bus_bindings_varname(shared_instances),
+            {},
+        )
+        normalized_mapping = {}
+        for instance_num, uid_tuple in dict(raw_mapping or {}).items():
+            try:
+                normalized_instance = int(instance_num)
+                uid1, uid2, uid3 = uid_tuple
+                normalized_mapping[normalized_instance] = (
+                    int(uid1),
+                    int(uid2),
+                    int(uid3),
+                )
+            except (TypeError, ValueError):
+                continue
+        bus_session.bind_persisted_instances(normalized_mapping)
+
+    def _persist_shared_bus_bindings(self, bus_session, shared_instances):
+        """Store current ACE2 UID bindings for one shared bus group."""
+        self.state.set(
+            self._get_shared_bus_bindings_varname(shared_instances),
+            bus_session.export_bindings(),
+        )
+
+    def _start_shared_bus_runtime(self, bus_session):
+        """Start per-instance ACE2 status polling for one shared bus group."""
+        for instance in self._get_instances_for_bus_session(bus_session):
+            instance.request_shared_bus_info_refresh()
+            instance.start_shared_bus_heartbeat()
+
+    def _handle_shared_bus_unsolicited(self, bus_session, response):
+        """Route unmatched ACE2 shared-bus responses to their logical instance."""
+        device_id = response.get("device_id")
+        if not device_id:
+            return False
+
+        device = bus_session.get_device_for_device_id(device_id)
+        if device is None or device.logical_instance is None:
+            return False
+
+        for instance in self._get_instances_for_bus_session(bus_session):
+            if instance.instance_num == device.logical_instance:
+                return bool(instance.protocol.handle_bound_shared_bus_unsolicited(instance, response))
+
+        return False
+
+    def _send_shared_bus_request(self, instance, request, timeout_s=5.0):
+        """Send one manager-owned request over shared ACE2 transport and wait for reply."""
+        response_container = {"done": False, "response": None}
+
+        def callback(response):
+            response_container["response"] = response
+            response_container["done"] = True
+
+        instance.serial_mgr.send_high_prio_request(request, callback)
+
+        timeout_at = time.monotonic() + timeout_s
+        while not response_container["done"] and time.monotonic() < timeout_at:
+            self.reactor.pause(self.reactor.monotonic() + 0.05)
+
+        return response_container["response"]
+
+    def _initialize_shared_bus_transport(self, instance):
+        """Discover and assign ACE2 devices on a shared bus transport."""
+        bus_session = getattr(instance, "bus_session", None)
+        if bus_session is None:
+            return
+
+        shared_instances = self._get_instances_for_bus_session(bus_session)
+        if not shared_instances:
+            return
+
+        bus_session.reset()
+        self._load_shared_bus_bindings(bus_session, shared_instances)
+
+        protocol = getattr(instance.serial_mgr, "protocol", None)
+        if protocol is None:
+            return
+
+        discovered_devices = []
+        for _ in range(len(shared_instances)):
+            response = self._send_shared_bus_request(
+                instance,
+                protocol.build_discover_device_request(),
+            )
+            if not response or "result" not in response:
+                break
+
+            result = response["result"]
+            device = bus_session.record_discovered_device(
+                result.get("uid1", 0),
+                result.get("uid2", 0),
+                result.get("uid3", 0),
+            )
+            discovered_devices.append(device)
+
+        if not discovered_devices:
+            self.gcode.respond_info(
+                f"ACE[{instance.instance_num}]: ACE2 discovery returned no devices on shared bus"
+            )
+            return
+
+        ordered_instances = sorted(shared_instances, key=lambda item: item.instance_num)
+        ordered_devices = list(bus_session.iter_discovered_devices())
+        for logical_instance, device in zip(ordered_instances, ordered_devices):
+            if device.logical_instance is None:
+                bus_session.bind_logical_instance(
+                    logical_instance.instance_num,
+                    device.identity.uid1,
+                    device.identity.uid2,
+                    device.identity.uid3,
+                )
+
+        for device in bus_session.build_assignment_plan(start_device_id=1):
+            response = self._send_shared_bus_request(
+                instance,
+                protocol.build_assign_device_id_request(
+                    device.identity.uid1,
+                    device.identity.uid2,
+                    device.identity.uid3,
+                    device.device_id,
+                ),
+            )
+            if not response or response.get("code") != 0:
+                self.gcode.respond_info(
+                    f"ACE[{instance.instance_num}]: ACE2 device-id assignment failed for UID={device.identity.uid_tuple}: {response}"
+                )
+
+        self._persist_shared_bus_bindings(bus_session, shared_instances)
+
+    def _on_shared_bus_connected(self, bus_session):
+        """Reinitialize and restart one ACE2 shared bus after connect."""
+        shared_instances = self._get_instances_for_bus_session(bus_session)
+        if not shared_instances:
+            return
+
+        instance = sorted(shared_instances, key=lambda item: item.instance_num)[0]
+        if instance.serial_mgr._port:
+            bus_session.port = instance.serial_mgr._port
+
+        self._initialize_shared_bus_transport(instance)
+        self._start_shared_bus_runtime(bus_session)
+
+    def _build_shared_transport_kwargs(self, instance_num, instance_config, ace_enabled, protocol):
+        """Create or reuse transport objects for protocols that share a physical bus."""
+        transport_spec = protocol.get_transport_spec()
+        if not transport_spec.shared_bus:
+            return {}
+
+        transport_key = (
+            instance_config["active_protocol_name"],
+            instance_config["baud"],
+            transport_spec.port_description,
+        )
+        context = self._shared_transport_contexts.get(transport_key)
+        if context is None:
+            serial_mgr = AceSerialManager(
+                self.gcode,
+                self.reactor,
+                instance_num,
+                ace_enabled=ace_enabled,
+                status_debug_logging=bool(instance_config.get("status_debug_logging", False)),
+                supervision_enabled=bool(instance_config.get("ace_connection_supervision", True)),
+                protocol=protocol,
+            )
+            bus_session = Ace2BusSession(port="", baud=instance_config["baud"])
+            context = {
+                "serial_mgr": serial_mgr,
+                "bus_session": bus_session,
+            }
+            serial_mgr.set_on_connect_callback(
+                lambda bus_session=bus_session: self._on_shared_bus_connected(bus_session)
+            )
+            serial_mgr.set_unsolicited_response_callback(
+                lambda response, bus_session=bus_session: self._handle_shared_bus_unsolicited(
+                    bus_session,
+                    response,
+                )
+            )
+            self._shared_transport_contexts[transport_key] = context
+
+        return dict(context)
 
     def check_and_wait_for_spool_ready(self, target_tool, timeout_s=300, check_interval_s=1.0, stable_ready_s=3.0):
         """

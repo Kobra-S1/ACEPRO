@@ -91,11 +91,18 @@ ace/
 ├── __init__.py           # Module initialization
 ├── manager.py            # AceManager - orchestrates all ACE units
 ├── instance.py           # AceInstance - per-unit handler
+├── protocol.py           # Protocol seam: ACE1 JSON & ACE2 protobuf adapters,
+│                         #   command catalog, request builders, wire codecs,
+│                         #   transport rules, baud/port selection
+├── ace2_bus.py           # ACE2 shared-bus session: UID discovery, device-id
+│                         #   binding, assignment planning
+├── serial_manager.py     # Serial transport: connect, frame I/O, request queue
 ├── endless_spool.py      # Automatic filament switching logic
 ├── runout_monitor.py     # Filament runout detection during printing
-├── serial_manager.py     # USB communication protocol
 ├── commands.py           # G-code command handlers
-└── config.py             # Configuration constants and helpers
+├── config.py             # Configuration constants and helpers
+├── persistent_state.py   # Deferred-flush saved_variables wrapper
+└── moonraker_lane_sync.py # OrcaSlicer lane_data sync via Moonraker DB
 
 config/
 ├── ace_K3.cfg            # Kobra 3 ACE configuration
@@ -412,6 +419,85 @@ baud: 115200
 feed_speed: 60
 retract_speed: 50
 ```
+
+### Tool Index Assignment
+
+Each ACE instance owns 4 tool slots. Tool indices are assigned sequentially based on instance number:
+
+| Instance | Tools | Slots |
+|----------|-------|-------|
+| 0 | T0 – T3 | Slot 0–3 on the first ACE unit |
+| 1 | T4 – T7 | Slot 0–3 on the second ACE unit |
+| 2 | T8 – T11 | Slot 0–3 on the third ACE unit |
+| N | T(N×4) – T(N×4+3) | Slot 0–3 on the Nth ACE unit |
+
+The formula is: **Tool = Instance × 4 + LocalSlot**
+
+Instance numbers are assigned by USB topology order (physical port position on the host). The first ACE detected becomes instance 0, the next becomes instance 1, etc. This is deterministic across reboots as long as you don't change which USB ports the ACE units are plugged into.
+
+Use `ACE_GET_STATUS` to verify which instance maps to which physical unit after first setup.
+
+### Protocol Selection (ACE1 / ACE2 / Mixed)
+
+The driver supports two hardware protocols:
+- **ACE1** (`ace1_json`): Original ACE Pro units — one dedicated USB port per unit, JSON-over-serial wire format, 115200 baud default.
+- **ACE2** (`ace2_proto`): ACE 2 Pro units — multiple units share a single USB-to-RS485 adapter, protobuf wire format, 230400 baud default. Requires bus discovery and device-id assignment (handled automatically by the driver).
+
+Protocol selection is configured via the `protocol` option in `[ace]`:
+
+```ini
+[ace]
+# Auto-detect (default): assigns dedicated ACE1 ports to lower instance
+# numbers, then falls back to ACE2 shared-bus for remaining instances.
+protocol: auto
+
+# Force all instances to ACE1:
+# protocol: ace1
+
+# Force all instances to ACE2:
+# protocol: ace2
+```
+
+**Baud rate** is protocol-aware and normally does not need to be set explicitly:
+- `protocol: auto` or `protocol: ace1` → default baud 115200
+- `protocol: ace2` → default baud 230400
+
+You can still override baud explicitly (including per-instance) if needed:
+```ini
+baud: 115200           # same baud for all instances
+baud: 115200,1:230400  # instance 1 uses 230400
+```
+
+**Mixed ACE1 + ACE2 setup (auto mode):**
+
+If you have e.g. 2 original ACE Pro units and 1 ACE 2 Pro unit, `protocol: auto` will:
+1. Detect ACE1-style USB ports and assign them to lower instance numbers (0, 1)
+2. Detect the ACE2 USB-RS485 adapter and assign remaining instances (2) to ACE2
+
+```ini
+[ace]
+ace_count: 3        # 2x ACE1 + 1x ACE2
+protocol: auto      # auto-detect handles mixed hardware
+# Instance 0: ACE1 (dedicated USB, 115200 baud)
+# Instance 1: ACE1 (dedicated USB, 115200 baud)
+# Instance 2: ACE2 (shared RS-485 bus, 230400 baud)
+```
+
+**Pure ACE2 setup:**
+```ini
+[ace]
+ace_count: 2
+protocol: ace2
+# Both instances share one USB-RS485 adapter
+# Bus discovery and device-id assignment happen automatically
+```
+
+**Protocol aliases:**
+| Config value | Resolves to | Description |
+|---|---|---|
+| `auto` | auto-detect | Default; prefers ACE1 ports, falls back to ACE2 |
+| `ace1` / `ace1_json` / `json` | `ace1_json` | Force ACE1 JSON protocol |
+| `ace2` / `ace2_proto` / `proto` | `ace2_proto` | Force ACE2 protobuf protocol |
 
 ### Sensor Configuration
 

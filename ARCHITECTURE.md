@@ -2,7 +2,30 @@
 
 ## System Overview
 
-The ACE Pro is a multi-material filament management system for Klipper-based 3D printers. This implementation supports multiple ACE Pro units.
+The ACE Pro is a multi-material filament management system for Klipper-based 3D printers. This implementation supports both ACE Pro (Gen1, JSON protocol) and ACE 2 Pro (Gen2, protobuf protocol) units, including mixed configurations.
+
+## Module Index
+
+```
+extras/ace/
+├── __init__.py             # Module initialization
+├── manager.py              # AceManager — orchestrates all instances, shared transport,
+│                           #   ACE2 bus discovery, sensor management, tool changes
+├── instance.py             # AceInstance — per-unit state, feed/retract, inventory, RFID
+├── protocol.py             # Protocol seam — ACE1 JSON & ACE2 protobuf adapters,
+│                           #   command catalog, request builders, wire codecs,
+│                           #   transport rules, baud/port auto-selection
+├── ace2_bus.py             # ACE2 shared-bus session — UID discovery, device-id binding,
+│                           #   deterministic assignment planning
+├── serial_manager.py       # Serial transport — connect/reconnect, frame I/O, sliding-
+│                           #   window request queue, heartbeat, CRC, timeout tracking
+├── endless_spool.py        # Automatic filament switching on runout
+├── runout_monitor.py       # Filament runout & tangle detection during printing
+├── commands.py             # G-code command handlers (transport-agnostic)
+├── config.py               # Configuration constants, tool mapping, per-instance overrides
+├── persistent_state.py     # Deferred-flush saved_variables wrapper
+└── moonraker_lane_sync.py  # OrcaSlicer lane_data sync via Moonraker DB
+```
 
 ## High-Level Architecture
 
@@ -28,7 +51,8 @@ The ACE Pro is a multi-material filament management system for Klipper-based 3D 
 │  │   │ Slot 2: PETG   │ │            │   │ Slot 2: PLA    │ │   │
 │  │   │ Slot 3: Empty  │ │            │   │ Slot 3: Nylon  │ │   │
 │  │   └────────────────┘ │            │   └────────────────┘ │   │
-│  │ Serial: /dev/ttyACM0 |            │ Serial: /dev/ttyACM1 │   │
+│  │ ACE1: /dev/ttyACM0   |            │ ACE1: /dev/ttyACM1   │   │
+│  │ (or ACE2 shared bus) |            │ (or ACE2 shared bus) │   │
 │  └──────────────────────┘            └──────────────────────┘   │
 │                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
@@ -406,12 +430,22 @@ reads present again, or on any baseline reset (pause, stop, no active tool).
 - **Port Detection**: Automatic USB port discovery by topology
 - **Heartbeat**: Periodic status updates (1 Hz)
 
+For ACE1 this is still effectively one serial port per physical unit. For ACE2,
+that assumption is no longer sufficient because multiple ACE2 units may share a
+single USB-to-RS485 adapter and must first be discovered and addressed on the
+bus.
+
 **Protocol:**
 - Binary frames with CRC-16
 - Request ID tracking for callback dispatch (never resets on reconnect)
 - High-priority queue for time-sensitive operations
 - 5-second timeout with elapsed time logging
 - Unsolicited messages logged with response ID and current request ID
+- Protocol-specific request construction now lives in `extras/ace/protocol.py`
+   so manager, instance, and command code stay focused on behavior rather than
+   wire format details
+- The protocol layer now also owns debug request construction and the
+   proto-derived ACE2 command catalog used for future ACE2 expansion
 
 **Request ID Behavior:**
 - IDs start at 0 and increment indefinitely (no wraparound)
@@ -438,6 +472,119 @@ DEFAULT_TIMEOUT_S = 5.0                 # Request timeout
 WINDOW_SIZE = 4                          # Max concurrent in-flight requests
 QUEUE_MAXSIZE = 1024                     # Request queue size
 ```
+
+Each instance now resolves its own active `protocol` and `baud` before startup
+connection. Explicit config overrides still win, while `protocol=auto` now uses
+visible serial-port signatures to prefer dedicated ACE1 ports for lower
+instance numbers and then fall back to ACE2 shared-bus transport when an
+ACE2 USB-RS485 adapter is present. If one port description is blank, manager
+falls back to other visible metadata such as product/interface/hwid before
+giving up on detection. This keeps default baud selection protocol-aware in
+mixed ACE1/ACE2 chains without forcing per-instance overrides.
+
+For ACE2, protocol selection and baud selection are still not enough on their
+own. The transport layer also needs a bus-level discovery and addressing phase
+using `DISCOVER_DEVICE` and `ASSIGN_DEVICE_ID`, plus stable mapping from
+discovered ACE2 identities to configured logical instances. That work belongs
+below `AceInstance`: ACE filament logic should still operate on logical devices,
+while the transport layer handles whether those logical devices are reached via
+dedicated USB ports (ACE1) or shared RS-485 bus addresses (ACE2).
+
+The current refactor now also moves port-selection policy behind the protocol
+seam. `AceSerialManager` no longer hardcodes "ACE by per-instance USB index" as
+its only model; instead, the protocol provides transport rules such as port
+description matching, whether the transport is shared-bus, and whether USB
+topology validation should apply. ACE1 still uses USB-topology validation,
+while future ACE2 transports can route multiple logical instances through one
+adapter and skip ACE1-style topology assumptions.
+
+`AceSerialManager` also no longer owns the ACE1 JSON wire codec directly.
+Outbound frame encoding and inbound response extraction now route through the
+active protocol adapter. For ACE1, that keeps the existing `0xFF 0xAA` +
+length + JSON payload + CRC + `0xFE` framing unchanged while removing the last
+hardcoded JSON serialization/parsing path from the serial manager itself.
+That seam is the prerequisite for letting ACE2 supply a different framed codec
+without re-teaching `AceSerialManager` about protobuf message shapes.
+
+The codebase now also contains dormant ACE2 scaffolding for that next layer:
+- an ACE2 protocol adapter that models command-based requests such as
+   `DISCOVER_DEVICE`, `ASSIGN_DEVICE_ID`, `GET_INFO`, and `GET_STATUS`
+- an ACE2 shared-bus session object that tracks discovered UID triplets,
+   binds them to logical instance numbers, and plans deterministic device-id
+   assignments
+
+That ACE2 adapter is now selectable explicitly via `protocol=ace2_proto` and
+it normalizes decoded `GET_STATUS`, `GET_INFO`, RFID, and generic response-code
+payloads into the response shape that existing `AceInstance` callbacks already
+consume (`code`, `msg`, and `result`). This keeps protobuf field naming and
+enum decoding in the protocol layer instead of leaking those details into
+instance-level filament logic.
+
+`AceManager` now also owns shared ACE2 transport contexts. When a protocol's
+transport spec reports `shared_bus=True`, the manager reuses one
+`AceSerialManager` and one `Ace2BusSession` for all logical instances on that
+physical RS-485 transport, and startup/shutdown only connect or disconnect that
+physical transport once.
+
+That startup flow now also performs manager-owned ACE2 discovery and address
+assignment on shared transports. After connect, the manager issues
+`DISCOVER_DEVICE` requests on the shared bus, records discovered UID triplets
+into `Ace2BusSession`, binds them deterministically to logical instance numbers,
+and then sends `ASSIGN_DEVICE_ID` requests in that planned order. This keeps
+discovery/address assignment below `AceInstance`, where it belongs.
+
+Those logical-instance bindings are now also persisted through `PersistentState`.
+On a fresh startup or reconnect, `AceManager` clears stale runtime discovery
+state, restores saved UID-to-instance bindings for that shared bus group, then
+applies discovery results on top. This means ACE2 daisy-chain discovery order
+can change without shuffling which logical ACE instance each physical unit maps
+to.
+
+That scaffold now includes ACE2 wire-codec helpers for framed request
+serialization and framed response extraction plus shared transport ownership.
+Live solicited ACE2 runtime requests now reuse the persisted device-id binding
+for each logical instance, so normal callback-driven request/response traffic
+can target the bound physical unit on one shared bus without changing the
+existing `AceInstance` response contract. Shared-bus heartbeat polling now runs
+as targeted per-instance `GET_STATUS` requests after manager-owned discovery and
+device-id assignment complete, including after reconnect. Unsolicited ACE2
+`GET_STATUS` traffic is now demultiplexed by shared-bus `device_id` back to the
+bound logical instance.  The unsolicited policy is now complete: passive
+`GET_STATUS` and `GET_INFO` responses update runtime state, pending-slot
+`GET_FILAMENT_INFO` replays use a conditional rule, all non-debug generic ACK
+replies are catalog-driven suppressed, and remaining diagnostic/debug responses
+with unique response types (e.g. `IAP_VERSION`, `GET_TEMP`) are intentionally
+not suppressed so they count against supervision thresholds as genuinely
+unexpected traffic.  Shared-bus `GET_INFO` now follows same rule: raw
+connect-time probing no longer sends an untargeted info request, and manager-
+owned shared-bus runtime startup refreshes device info only after device-id
+assignment via targeted per-instance `GET_INFO`, with late unmatched `GET_INFO`
+responses routed back through the same `device_id` demultiplexing path.
+Shared-bus `GET_FILAMENT_INFO` replies use a narrower rule: manager first
+routes by `device_id`, then the owning logical instance replays the reply only
+if that slot still has an in-flight RFID query, so stale post-timeout RFID
+responses still fall back to generic unsolicited handling instead of mutating
+inventory late.
+Late shared-bus generic ACK replies for bound ACE2 non-debug commands are
+handled differently again: active protocol adapter uses proto-derived command
+catalog to recognize and suppress them from unsolicited supervision, but they
+are not replayed into higher-level instance callbacks because those callbacks
+may already have timed out or committed fallback behavior.
+That bound-response policy is now owned by the active protocol adapter rather
+than hardcoded in `AceManager`, so manager only resolves `device_id` to one
+logical instance and lets protocol decide whether that response should update
+runtime state, replay one pending callback shape, or be suppressed as a late
+generic ACK.
+
+All outbound instance requests now consistently route through `_prepare_request`
+which attaches the persisted `target_device_id` for shared-bus transports. This
+includes the retract path which previously bypassed request preparation when
+calling the serial manager directly.
+
+Shared-bus manager requests now use a real monotonic timeout instead of the
+reactor clock for their wait loop. This avoids deadlocks in test and startup
+paths where the reactor's mocked monotonic clock may not advance while waiting
+for a callback.
 
 **Key Methods:**
 ```python
@@ -504,7 +651,38 @@ disable_ace_pro()                        # Disable reconnection attempts
 is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 ```
 
-### 6. PersistentState (`persistent_state.py`)
+### 6. Protocol Layer (`protocol.py`)
+
+**Primary Responsibilities:**
+- **Protocol Seam**: Single abstraction boundary between transport-agnostic instance
+  logic and wire-format-specific encode/decode
+- **Dual Protocol Support**: `AceJsonProtocolAdapter` (ACE1) and
+  `AceProtoProtocolAdapter` (ACE2) implement the same `AceProtocolAdapter` interface
+- **Command Catalog**: `ACE2_COMMAND_CATALOG` maps command names to `AceCommandSpec`
+  dataclasses with field schemas, response decoders, and timeout hints
+- **Request Builders**: `build_feed_filament_request()`, `build_get_status_request()`,
+  `build_stop_drying_request()`, etc. — callers never touch raw wire bytes
+- **Response Normalization**: `_decode_response_payload()` converts raw protobuf
+  fields into the `{"code", "msg", "result"}` contract that `AceInstance`
+  callbacks already consume
+- **Transport Rules**: `AceTransportSpec` describes per-protocol port matching,
+  shared-bus flag, baud defaults, and USB topology policy
+- **Wire Codec**: Frame serialization (`serialize_request_frame`) and response
+  extraction (`extract_responses`) for both ACE1 (JSON + CRC) and ACE2
+  (protobuf + CRC) framing
+- **Auto-Detection**: `resolve_protocol_name("auto", instance_num, port_descriptions)`
+  prefers ACE1 ports for lower instances, falls back to ACE2 when a shared
+  RS-485 adapter is present
+
+**Protocol Selection Values:**
+
+| Config value | Internal name | Wire format | Default baud | Transport |
+|---|---|---|---|---|
+| `auto` | auto-detect | depends on available ports | per-protocol | per-protocol |
+| `ace1` / `json` | `ace1_json` | JSON over serial | 115200 | dedicated USB per unit |
+| `ace2` / `proto` | `ace2_proto` | protobuf over RS-485 | 230400 | shared USB-RS485 bus |
+
+### 7. PersistentState (`persistent_state.py`)
 
 **Primary Responsibilities:**
 - **Single access point** for all `saved_variables.cfg` reads and writes
@@ -564,7 +742,7 @@ state.flush()
 - `ACE_FLUSH` gcode command — on user request
 - `_flush_if_idle()` timer callback — background idle-time flush
 
-### 7. Configuration (`config.py`)
+### 8. Configuration (`config.py`)
 
 **Global State & Constants:**
 ```python
@@ -638,7 +816,8 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | Key | Default | Description |
 |-----|---------|-------------|
 | `ace_count` | 1 | Number of ACE Pro units |
-| `baud` | 115200 | Serial baud rate |
+| `protocol` | `auto` | Protocol selection: `auto`, `ace1`/`ace1_json`/`json`, `ace2`/`ace2_proto`/`proto`. Auto prefers ACE1 ports for lower instances, falls back to ACE2 shared bus |
+| `baud` | protocol-aware | Serial baud rate. Default 115200 for ACE1, 230400 for ACE2. Per-instance overridable |
 | `parkposition_to_toolhead_length` | 1000 | Distance park → nozzle (mm) |
 | `parkposition_to_rdm_length` | 150 | Distance park → RDM (mm) |
 | `toolhead_retraction_speed` | 10 | Retraction speed at toolhead (mm/s) |
@@ -674,11 +853,18 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `heartbeat_interval` | 1.0 | Heartbeat polling interval (s); per-instance overridable |
 | `max_dryer_temperature` | 60 | Dryer temperature cap (°C); per-instance overridable |
 
-### 8. Commands (`commands.py`)
+### 9. Commands (`commands.py`)
 
 **GCode Command Handlers:**
 
 All commands are table-driven and globally registered. Commands use flexible parameter resolution:
+
+Commands should stay transport-agnostic. When a command needs to talk to an ACE
+device, it should delegate request construction to the active protocol adapter
+instead of embedding raw wire details in the command handler.
+`ACE_GET_STATUS` now follows that rule through `build_get_status_request()`,
+while `ACE_DEBUG` remains method-driven on purpose but still delegates final
+request construction to `build_debug_request()`.
 
 **Core Operations:**
 ```
@@ -886,7 +1072,7 @@ def ace_get_instance_and_slot(gcmd):
     # 2. INSTANCE=<n> INDEX=<n> parameters → explicit slot
 ```
 
-### 9. Macros (`ace.cfg`)
+### 10. Macros (`ace.cfg`)
 
 **Key Macros:**
 
@@ -1117,7 +1303,8 @@ This example is just for reference; check printer_KS1.cfg / printer_K3.cfg for l
 ```ini
 [ace]
 ace_count: 1
-baud: 115200
+protocol: auto                               # auto | ace1 | ace2 (default: auto-detect)
+baud: 115200                                 # protocol-aware default; omit to auto-select
 
 # Tube Lengths
 parkposition_to_toolhead_length: 800

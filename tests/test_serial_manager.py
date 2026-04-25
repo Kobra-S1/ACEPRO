@@ -14,6 +14,8 @@ import struct
 import json
 from unittest.mock import Mock, patch
 
+from ace.protocol import AceTransportSpec
+
 
 class TestParseUsbLocation:
     """Test USB location string parsing for device sorting."""
@@ -198,6 +200,14 @@ class TestFindComPort:
         self.serial_mod.tools.list_ports.comports = lambda: ports
 
         result = self.manager.find_com_port("ACE", instance=0)
+        assert result is None
+
+    def test_does_not_match_ace2_transport_when_looking_for_ace1(self):
+        ports = [SimpleNamespace(device="/dev/ttyUSB9", description="ACE2 USB-RS485", hwid="LOCATION=1-1.1")]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        result = self.manager.find_com_port("ACE", instance=0)
+
         assert result is None
 
     def test_mixed_ports_continue_on_non_match_then_selects_match(self):
@@ -630,6 +640,19 @@ class TestReader:
         assert any("UNSOLICITED" in args[0] and "ID=99" in args[0] 
                   for args, _ in self.mock_gcode.respond_info.call_args_list)
 
+    def test_unsolicited_callback_handles_response_without_logging(self):
+        frame = self._make_frame({"id": 77, "result": "ok"})
+        self.manager._serial.read.return_value = frame
+        self.manager.dispatch_response.return_value = (None, False)
+        self.manager.unsolicited_response_callback = Mock(return_value=True)
+        self.manager._track_comm_unsolicited = Mock()
+
+        self.manager._reader(eventtime=6.0)
+
+        self.manager.unsolicited_response_callback.assert_called_once_with({"id": 77, "result": "ok"})
+        self.manager._track_comm_unsolicited.assert_not_called()
+        assert not any("UNSOLICITED" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
+
     def test_new_response_after_disconnect_logs_warning(self):
         """Responses without callback should be logged as unsolicited."""
         # Response with ID 55 arrives (no callback)
@@ -864,6 +887,23 @@ class TestConnectionLifecycle:
         self.manager.send_request({"m": 1}, lambda r: None)
         assert any("Request queue full" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
 
+    def test_send_request_normalizes_via_protocol(self):
+        protocol = Mock()
+        protocol.get_transport_spec.return_value = AceTransportSpec(
+            mode="usb-topology",
+            port_description="ACE",
+        )
+        protocol.normalize_request.return_value = {"method": "normalized"}
+        self.manager.protocol = protocol
+
+        callback = Mock()
+        self.manager.send_request({"method": "original"}, callback)
+
+        protocol.normalize_request.assert_called_once_with({"method": "original"})
+        request, queued_callback = self.manager.get_pending_request()
+        assert request == {"method": "normalized"}
+        assert queued_callback is callback
+
     def test_send_frame_not_connected(self):
         self.manager._connected = False
         self.manager._send_frame({"method": "ping"})
@@ -999,6 +1039,45 @@ class TestConnectionLifecycle:
         call_args = self.manager.send_request.call_args
         assert call_args[1]['request'] == {"method": "get_info"}
         assert callable(call_args[1]['callback'])
+
+    def test_find_connection_port_uses_shared_bus_index_zero(self):
+        self.manager.find_com_port = Mock(return_value="/dev/ttyUSB-bus")
+        protocol = Mock()
+        protocol.get_transport_spec.return_value = AceTransportSpec(
+            mode="rs485-bus",
+            port_description="ACE2 USB-RS485",
+            shared_bus=True,
+            topology_validation=False,
+        )
+        self.manager.protocol = protocol
+
+        port = self.manager.find_connection_port(instance=3)
+
+        assert port == "/dev/ttyUSB-bus"
+        self.manager.find_com_port.assert_called_once_with("ACE2 USB-RS485", 0)
+
+    def test_auto_connect_shared_bus_skips_topology_validation(self):
+        self.manager.find_connection_port = Mock(return_value="/dev/ttyUSB-bus")
+        self.manager.connect = Mock(return_value=True)
+        self.manager._get_usb_location_for_port = Mock(return_value="2-2.5")
+        self.manager._validate_topology_position = Mock(return_value=False)
+        self.manager.send_request = Mock()
+        protocol = Mock()
+        protocol.get_transport_spec.return_value = AceTransportSpec(
+            mode="rs485-bus",
+            port_description="ACE2 USB-RS485",
+            shared_bus=True,
+            topology_validation=False,
+        )
+        protocol.build_get_info_request.return_value = {"method": "get_info"}
+        self.manager.protocol = protocol
+
+        ok = self.manager.auto_connect(2, 230400)
+
+        assert ok is True
+        self.manager._validate_topology_position.assert_not_called()
+        self.manager.connect.assert_called_once_with("/dev/ttyUSB-bus", 230400)
+        self.manager.send_request.assert_not_called()
 
     def test_auto_connect_connect_failure_returns_false(self):
         """Test auto_connect when connect() fails."""
@@ -1612,6 +1691,12 @@ class TestOnConnectCallback:
         mock_callback = Mock()
         self.manager.set_on_connect_callback(mock_callback)
         assert self.manager.on_connect_callback == mock_callback
+
+    def test_set_unsolicited_response_callback(self):
+        """set_unsolicited_response_callback should store callback."""
+        mock_callback = Mock()
+        self.manager.set_unsolicited_response_callback(mock_callback)
+        assert self.manager.unsolicited_response_callback == mock_callback
 
     @patch('ace.serial_manager.serial')
     def test_on_connect_callback_called_on_successful_connect(self, mock_serial_module):
@@ -2299,6 +2384,19 @@ class TestHeartbeat:
         request = call_args[0][0]
         
         assert request == {"method": "get_status"}
+
+    def test_send_heartbeat_request_uses_protocol_builder(self):
+        """Heartbeat requests should come from the protocol adapter."""
+        protocol = Mock()
+        protocol.build_get_status_request.return_value = {"method": "status_via_protocol"}
+        self.manager.protocol = protocol
+        self.manager.send_high_prio_request = Mock()
+
+        self.manager._send_heartbeat_request()
+
+        protocol.build_get_status_request.assert_called_once_with()
+        request = self.manager.send_high_prio_request.call_args[0][0]
+        assert request == {"method": "status_via_protocol"}
     
     def test_send_heartbeat_request_calls_callback(self):
         """Test send heartbeat request invokes callback on response."""

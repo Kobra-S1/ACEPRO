@@ -153,6 +153,7 @@ createApp({
                 firmware: 'N/A',
                 boot_firmware: 'N/A',
                 temp: 0,
+                humidity: null,
                 fan_speed: 0,
                 enable_rfid: 0,
                 usb_port: '',
@@ -517,6 +518,11 @@ createApp({
             if (data.temp !== undefined) {
                 this.deviceStatus.temp = data.temp;
             }
+            if (data.humidity !== undefined) {
+                this.deviceStatus.humidity = data.humidity;
+            } else {
+                this.deviceStatus.humidity = null;
+            }
             if (data.fan_speed !== undefined) {
                 this.deviceStatus.fan_speed = data.fan_speed;
             }
@@ -796,7 +802,7 @@ createApp({
         
         // Dryer Actions
         async startDrying() {
-            if (this.dryingTemp < 20 || this.dryingTemp > 55) {
+            if (this.dryingTemp < 20 || this.dryingTemp > 65) {
                 this.showNotification(this.t('notifications.validation.tempRange'), 'error');
                 return;
             }
@@ -920,10 +926,14 @@ createApp({
         },
         
         formatUsbPath(port, usbPath) {
-            if (port && usbPath) {
-                return `${port} (${usbPath})`;
+            let displayPort = port;
+            if (displayPort && displayPort.includes('USB_Single_Serial_')) {
+                displayPort = displayPort.replace(/(USB_Single_Serial_)[A-Z0-9]+(-if)/i, '$1***$2');
             }
-            if (port) return port;
+            if (displayPort && usbPath) {
+                return `${displayPort} (${usbPath})`;
+            }
+            if (displayPort) return displayPort;
             if (usbPath) return usbPath;
             return this.t('common.unknown');
         },

@@ -96,12 +96,12 @@ class TestValidateStartupToolState(unittest.TestCase):
         self.mock_config.get.side_effect = get
         self.mock_config.getboolean.side_effect = getboolean
 
-    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled):
+    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled, **kwargs):
         inst = Mock()
         inst.instance_num = instance_num
         inst.SLOT_COUNT = SLOTS_PER_ACE
         inst.tool_offset = instance_num * SLOTS_PER_ACE
-        inst.serial_mgr = Mock()
+        inst.serial_mgr = kwargs.get("serial_mgr", Mock())
         inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
         inst.filament_runout_sensor_name_rdm = "return_module"
         inst.inventory = [{"status": "ready"} for _ in range(SLOTS_PER_ACE)]

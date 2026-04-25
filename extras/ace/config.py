@@ -8,6 +8,8 @@ that don't depend on specific instances.
 import re
 from enum import Enum
 
+from .protocol import get_default_baud_for_protocol
+
 
 # ========== ACE Instance Constants ==========
 
@@ -107,7 +109,10 @@ def read_ace_config(config):
 
     # Non-overridable settings (apply to all instances)
     ace_config["ace_count"] = config.getint("ace_count", 1)
-    ace_config["baud"] = config.getint("baud", 115200)
+    raw_baud = config.get("baud", None)
+    if raw_baud is None:
+        raw_baud = str(config.getint("baud", 115200))
+    ace_config["baud"] = raw_baud
     ace_config["filament_runout_sensor_name_rdm"] = config.get(
         "filament_runout_sensor_name_rdm", None
     )
@@ -199,6 +204,7 @@ def read_ace_config(config):
     ).strip().lower()
     if ace_config["persistence_mode"] not in ("deferred", "immediate"):
         ace_config["persistence_mode"] = "deferred"
+    ace_config["protocol"] = config.get("protocol", "auto")
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"
     ace_config["feed_speed"] = config.get("feed_speed", "60")
@@ -442,6 +448,69 @@ def parse_instance_config(config_value, instance_num, param_name):
         )
 
 
+def parse_instance_choice_config(config_value, instance_num, param_name):
+    """Parse string config values that support per-instance overrides."""
+    value_str = str(config_value).strip()
+
+    if ':' not in value_str:
+        if not value_str:
+            raise ValueError(f"Invalid config value for {param_name}: '{value_str}'")
+        return value_str
+
+    parts = value_str.split(',')
+    instance_map = {}
+    global_default = None
+
+    for part in parts:
+        part = part.strip()
+        if ':' in part:
+            inst_str, val_str = part.split(':', 1)
+            try:
+                inst = int(inst_str.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid instance override for {param_name}: '{part}'"
+                ) from exc
+
+            value = val_str.strip()
+            if not value:
+                raise ValueError(
+                    f"Invalid instance override for {param_name}: '{part}'"
+                )
+            instance_map[inst] = value
+            continue
+
+        if global_default is not None:
+            raise ValueError(
+                f"Multiple global defaults for {param_name}: '{value_str}'"
+            )
+        if not part:
+            raise ValueError(f"Invalid global default for {param_name}: '{part}'")
+        global_default = part
+
+    if instance_num in instance_map:
+        return instance_map[instance_num]
+    if global_default is not None:
+        return global_default
+    raise ValueError(
+        f"No value found for instance {instance_num} in {param_name}: '{value_str}'"
+    )
+
+
+def parse_instance_baud_config(config_value, instance_num, protocol_name):
+    """Parse per-instance baud config with protocol-aware defaults."""
+    raw_value = parse_instance_choice_config(config_value, instance_num, "baud")
+    normalized = str(raw_value).strip().lower()
+
+    if normalized == "auto":
+        return get_default_baud_for_protocol(protocol_name)
+
+    try:
+        return int(str(raw_value).strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid config value for baud: '{raw_value}'") from exc
+
+
 OVERRIDABLE_PARAMS = [
     "feed_speed",
     "retract_speed",
@@ -451,4 +520,9 @@ OVERRIDABLE_PARAMS = [
     "incremental_feeding_speed",
     "heartbeat_interval",
     "max_dryer_temperature"
+]
+
+
+CHOICE_OVERRIDABLE_PARAMS = [
+    "protocol",
 ]
