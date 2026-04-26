@@ -1348,10 +1348,16 @@ class AceSerialManager:
         dryer_status = result.get("dryer_status", {})
         feed_assist_count = result.get("feed_assist_count")
         cont_assist_time = result.get("cont_assist_time")
+        raw_fields = result.get("raw_fields")
         slots = result.get("slots", [])
 
         if current_status is None:
             return
+
+        if raw_fields is not None:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: GET_STATUS raw_fields: {raw_fields}"
+            )
 
         # Detect overall status/action change
         status_changed = (current_status != self.last_status or

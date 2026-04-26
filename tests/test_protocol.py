@@ -218,6 +218,15 @@ class TestAceProtoProtocolAdapter:
                     "humidity": 40,
                     "feed_assist_count": 3,
                     "cont_assist_time": 12,
+                    "raw_fields": {
+                        1: [(0, 1)],
+                        2: [(2, b"\x08\x02\x10- Z")],
+                        3: [(0, 31)],
+                        4: [(0, 40)],
+                        7: [(0, 3)],
+                        8: [(0, 12)],
+                        9: [(2, b"\x08\x00\x10\x02"), (2, b"\x08\x01\x10\x02")],
+                    },
                     "slots": [
                         {
                             "index": 0,
@@ -275,6 +284,11 @@ class TestAceProtoProtocolAdapter:
                     "humidity": 0,
                     "feed_assist_count": 0,
                     "cont_assist_time": 0,
+                    "raw_fields": {
+                        1: [(0, 77)],
+                        2: [(2, b"\x08c\x10(")],
+                        9: [(2, b"\x08\x8c\x01\x10\x01")],
+                    },
                     "slots": [
                         {
                             "index": 0,

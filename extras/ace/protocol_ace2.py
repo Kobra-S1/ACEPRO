@@ -408,6 +408,7 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                     "humidity": _pb_first(fields, 4, 0),
                     "feed_assist_count": _pb_first(fields, 7, 0),
                     "cont_assist_time": _pb_first(fields, 8, 0),
+                    "raw_fields": fields,
                     "slots": slots,
                 },
             }

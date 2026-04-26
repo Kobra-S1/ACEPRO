@@ -1808,6 +1808,7 @@ class AceInstance:
         # Debug logging reserved for status_debug_logging; keep silent by default
 
         status = copy.deepcopy(self._info)
+        status.pop("raw_fields", None)
         status["instance"] = self.instance_num
         status["protocol"] = self.protocol_name
         status["rfid_sync_enabled"] = bool(self.rfid_inventory_sync_enabled)

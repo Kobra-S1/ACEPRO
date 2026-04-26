@@ -1413,6 +1413,23 @@ class TestStatusUpdateChangeDetection:
         log_calls = [call[0][0] for call in self.mock_gcode.respond_info.call_args_list]
         assert any("STATUS CHANGE" in msg for msg in log_calls)
 
+    def test_logs_get_status_raw_fields_when_present(self):
+        """GET_STATUS raw_fields should be logged for ACE2 debugging."""
+        response = {
+            "result": {
+                "status": "ready",
+                "action": "none",
+                "temp": 25,
+                "raw_fields": {3: [(0, 25)], 4: [(0, 40)]},
+                "slots": [],
+            }
+        }
+
+        self.manager._status_update_callback(response)
+
+        log_calls = [call[0][0] for call in self.mock_gcode.respond_info.call_args_list]
+        assert any("GET_STATUS raw_fields" in msg for msg in log_calls)
+
     def test_no_log_when_status_unchanged(self):
         """No logging when status hasn't changed."""
         self.manager.last_status = "ready"
