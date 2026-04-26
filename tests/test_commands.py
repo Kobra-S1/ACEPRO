@@ -1227,6 +1227,27 @@ class TestDryingCommands:
         )
         assert ACE_INSTANCES[0].send_request.called
 
+    def test_cmd_ACE_DEBUG_bytes_response(self, mock_gcmd, setup_mocks):
+        """Test ACE_DEBUG callback safely serializes bytes in response."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})
+        mock_gcmd.get = Mock(side_effect=["get_status", "{}"])
+
+        captured_callback = None
+
+        def capture_callback(_request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+
+        ace.commands.cmd_ACE_DEBUG(mock_gcmd)
+        assert captured_callback is not None
+
+        captured_callback({"raw_fields": {1: [(2, b"V1.1.24")]}})
+
+        assert mock_gcmd.respond_info.called
+        assert "Debug response:" in mock_gcmd.respond_info.call_args[0][0]
+
     def test_protocol_catalog_contains_ace2_status_command(self, setup_mocks):
         """Test the proto-derived ACE2 catalog exposes key operational commands."""
         status_spec = ACE2_COMMANDS_BY_NAME["GET_STATUS"]

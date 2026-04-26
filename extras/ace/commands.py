@@ -1244,7 +1244,9 @@ def cmd_ACE_DEBUG(gcmd):
         raise gcmd.error(f"Invalid JSON in PARAMS: {params_str}")
 
     def callback(response):
-        gcmd.respond_info(f"Debug response: {json.dumps(response)}")
+        # Some protocol debug payloads contain raw bytes (e.g. raw_fields).
+        # Use default=str so debug output never crashes callback handling.
+        gcmd.respond_info(f"Debug response: {json.dumps(response, default=str)}")
 
     request = ace.protocol.build_debug_request(method, params)
     ace.send_request(request, callback)
