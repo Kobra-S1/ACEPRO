@@ -150,6 +150,38 @@ class TestAceInstance(unittest.TestCase):
         mock_serial.send_high_prio_request.assert_called_once_with(request, callback)
 
     @patch('ace.instance.AceSerialManager')
+    def test_get_status_uses_protocol_aware_model_fallback_for_ace2(self, mock_serial_mgr_class):
+        """ACE2 should expose a protocol-aware model label when model metadata is missing."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+
+        instance = AceInstance(0, ace_config, self.mock_printer)
+        instance.serial_mgr.device_info = {}
+        instance.serial_mgr._port_description = 'USB Single Serial'
+
+        status = instance.get_status()
+
+        self.assertEqual(status.get('protocol'), 'ace2_proto')
+        self.assertEqual(status.get('model'), 'ACE2 (USB Single Serial)')
+
+    @patch('ace.instance.AceSerialManager')
+    def test_get_status_maps_ace2_version_fields_to_firmware(self, mock_serial_mgr_class):
+        """ACE2 version keys should map to dashboard firmware fields."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+
+        instance = AceInstance(0, ace_config, self.mock_printer)
+        instance.serial_mgr.device_info = {
+            'version': '2.3.4',
+            'boot_version': '1.0.0',
+        }
+
+        status = instance.get_status()
+
+        self.assertEqual(status.get('firmware'), '2.3.4')
+        self.assertEqual(status.get('boot_firmware'), '1.0.0')
+
+    @patch('ace.instance.AceSerialManager')
     def test_send_request_targets_shared_bus_device(self, mock_serial_mgr_class):
         """ACE2 shared-bus requests should carry the assigned device ID."""
         ace_config = dict(self.ace_config)

@@ -358,6 +358,7 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                     "version": _pb_first(fields, 1, b"").decode(errors="ignore"),
                     "boot_version": _pb_first(fields, 2, b"").decode(errors="ignore"),
                     "first_request": bool(_pb_first(fields, 3, 0)),
+                    "raw_fields": fields,
                 },
             }
         if command_name == "GET_STATUS":

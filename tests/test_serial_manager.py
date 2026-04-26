@@ -2482,11 +2482,25 @@ class TestHandleInfoResponse:
 
     def test_handle_info_response_updates_device_info(self):
         self.manager.handle_info_response(
-            {"result": {"version": "1.2.3", "boot_version": "0.9.1"}}
+            {
+                "result": {
+                    "version": "1.2.3",
+                    "boot_version": "0.9.1",
+                    "raw_fields": {1: [(2, b"1.2.3")]},
+                }
+            }
         )
 
-        assert self.manager.device_info == {"version": "1.2.3", "boot_version": "0.9.1"}
-        self.mock_gcode.respond_info.assert_called_once()
+        assert self.manager.device_info == {
+            "version": "1.2.3",
+            "boot_version": "0.9.1",
+            "raw_fields": {1: [(2, b"1.2.3")]},
+        }
+        assert self.mock_gcode.respond_info.call_count == 3
+        logged_lines = [call.args[0] for call in self.mock_gcode.respond_info.call_args_list]
+        assert any("GET_INFO raw_info:" in line for line in logged_lines)
+        assert any("GET_INFO raw_fields:" in line for line in logged_lines)
+        assert any("GET_INFO summary:" in line for line in logged_lines)
 
     def test_handle_info_response_handles_malformed_response(self):
         self.manager.device_info = {"version": "stale"}
@@ -2494,7 +2508,10 @@ class TestHandleInfoResponse:
         self.manager.handle_info_response(None)
 
         assert self.manager.device_info == {}
-        self.mock_gcode.respond_info.assert_called_once()
+        assert self.mock_gcode.respond_info.call_count == 2
+        logged_lines = [call.args[0] for call in self.mock_gcode.respond_info.call_args_list]
+        assert any("GET_INFO raw_info:" in line for line in logged_lines)
+        assert any("GET_INFO summary:" in line for line in logged_lines)
 
 
 if __name__ == '__main__':

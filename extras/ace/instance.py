@@ -1809,15 +1809,34 @@ class AceInstance:
 
         status = copy.deepcopy(self._info)
         status["instance"] = self.instance_num
+        status["protocol"] = self.protocol_name
         status["rfid_sync_enabled"] = bool(self.rfid_inventory_sync_enabled)
         status["feed_assist_slot"] = self._get_current_feed_assist_index()
 
         # Attach device info from last get_info response, if available
         device_info = getattr(self.serial_mgr, "device_info", {})
         if isinstance(device_info, dict):
+            normalized_info = {}
             for key in ("model", "firmware", "boot_firmware", "structure_version"):
                 if key in device_info and device_info[key] is not None:
-                    status.setdefault(key, device_info[key])
+                    normalized_info[key] = device_info[key]
+
+            # ACE2 get_info currently reports version and boot_version keys.
+            if "firmware" not in normalized_info and device_info.get("version"):
+                normalized_info["firmware"] = device_info["version"]
+            if "boot_firmware" not in normalized_info and device_info.get("boot_version"):
+                normalized_info["boot_firmware"] = device_info["boot_version"]
+
+            for key, value in normalized_info.items():
+                status.setdefault(key, value)
+
+        # Protocol-aware fallback label when the device does not report model metadata.
+        if not status.get("model") and self.protocol_name == "ace2_proto":
+            port_description = getattr(self.serial_mgr, "_port_description", None)
+            if port_description:
+                status["model"] = f"ACE2 ({port_description})"
+            else:
+                status["model"] = "ACE2 (Shared Bus)"
         # Attach connection info (port / usb path) for diagnostics
         port = getattr(self.serial_mgr, "serial_name", None) or getattr(self.serial_mgr, "_port", None)
         usb_path = getattr(self.serial_mgr, "_usb_location", None)

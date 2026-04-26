@@ -520,8 +520,6 @@ createApp({
             }
             if (data.humidity !== undefined) {
                 this.deviceStatus.humidity = data.humidity;
-            } else {
-                this.deviceStatus.humidity = null;
             }
             if (data.fan_speed !== undefined) {
                 this.deviceStatus.fan_speed = data.fan_speed;

@@ -146,6 +146,35 @@ class TestAceProtoProtocolAdapter:
             }
         ]
 
+    def test_extract_responses_decodes_get_info_raw_fields(self):
+        payload = _pb_bytes(1, b"1.2.3") + _pb_bytes(2, b"0.9.1") + _pb_bool(3, True)
+        inner = b"\x80\x08\x00\x07" + bytes([len(payload)]) + payload
+        frame = b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+
+        responses, remaining, notices = self.adapter.extract_responses(bytearray(frame), _calc_crc)
+
+        assert notices == []
+        assert remaining == bytearray()
+        assert responses == [
+            {
+                "id": 8,
+                "command": "GET_INFO",
+                "flags": 0x80,
+                "code": 0,
+                "msg": "SUCCESS",
+                "result": {
+                    "version": "1.2.3",
+                    "boot_version": "0.9.1",
+                    "first_request": True,
+                    "raw_fields": {
+                        1: [(2, b"1.2.3")],
+                        2: [(2, b"0.9.1")],
+                        3: [(0, 1)],
+                    },
+                },
+            }
+        ]
+
     def test_extract_responses_normalizes_status_for_instance_callbacks(self):
         dry_status = _pb_uint(1, 2) + _pb_uint(2, 45) + _pb_uint(4, 90)
         slot_ready = _pb_uint(1, 0) + _pb_uint(2, 2)

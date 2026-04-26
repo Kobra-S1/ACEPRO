@@ -52,6 +52,7 @@ class AceSerialManager:
         """
         self._port = None
         self._usb_location = None
+        self._port_description = None
         self._baud = None
         self.serial_name = None
 
@@ -311,6 +312,13 @@ class AceSerialManager:
                 return portinfo.device
         return None
 
+    def _get_port_description_for_port(self, port):
+        """Get human-readable USB port description for a specific port."""
+        for portinfo in serial.tools.list_ports.comports():
+            if portinfo.device == port:
+                return str(portinfo.description or "")
+        return None
+
     def get_usb_location(self):
         """Get current USB location."""
         return getattr(self, '_usb_location', None)
@@ -544,6 +552,7 @@ class AceSerialManager:
         self._port = port
         self._baud = baud
         self._usb_location = self._get_usb_location_for_port(port)
+        self._port_description = self._get_port_description_for_port(port)
 
         logging.info('Try connecting to ' + str(port))
         connected = self.connect(port, baud)
@@ -582,13 +591,44 @@ class AceSerialManager:
         """
         port = getattr(self, "serial_name", None) or self._port or "unknown"
         topo = self._usb_location or "unknown"
+        raw_info = json.dumps(response, sort_keys=True, default=str)
         self.gcode.respond_info(
-            f"ACE[{self.instance_num}]: {response} (port={port}, usb={topo})"
+            f"ACE[{self.instance_num}]: GET_INFO raw_info: {raw_info} (port={port}, usb={topo})"
         )
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        if not isinstance(result, dict):
+            result = {}
+
+        raw_fields = result.get("raw_fields")
+        if raw_fields is not None:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: GET_INFO raw_fields: {raw_fields}"
+            )
+
+        # Normalize keys across ACE1/ACE2 payload variants.
+        model = result.get("model") or "n/a"
+        firmware = result.get("firmware") or result.get("version") or "n/a"
+        boot_firmware = result.get("boot_firmware") or result.get("boot_version") or "n/a"
+        code = response.get("code", "n/a") if isinstance(response, dict) else "n/a"
+        msg = response.get("msg", "n/a") if isinstance(response, dict) else "n/a"
+
+        self.gcode.respond_info(
+            "ACE[%s]: GET_INFO summary: model=%s fw=%s boot=%s code=%s msg=%s (port=%s usb=%s)"
+            % (
+                self.instance_num,
+                model,
+                firmware,
+                boot_firmware,
+                code,
+                msg,
+                port,
+                topo,
+            )
+        )
+
         try:
-            result = response.get("result", {})
-            if isinstance(result, dict):
-                self.device_info = result
+            self.device_info = result if isinstance(result, dict) else {}
         except Exception:
             self.device_info = {}
 
@@ -598,13 +638,20 @@ class AceSerialManager:
 
     def connect(self, port, baud):
         """
-        Connect to serial device.
-
-        Args:
             port: Serial port path (e.g., "/dev/ttyACM0")
             baud: Baud rate
 
         Returns:
+
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: GET_INFO raw_info: {response} (port={port}, usb={topo})"
+        )
+
+        raw_fields = result.get("raw_fields")
+        if raw_fields is not None:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: GET_INFO raw_fields: {raw_fields}"
+            )
             bool: True if successfully connected
         """
         try:
