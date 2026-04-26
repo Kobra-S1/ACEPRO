@@ -5,7 +5,7 @@ import struct
 import pytest
 
 from ace.ace2_bus import Ace2BusSession
-from ace.protocol_ace2 import AceProtoProtocolAdapter
+from ace.protocol_ace2 import ACE2_COMMAND_CATALOG, AceProtoProtocolAdapter
 
 
 def _calc_crc(buffer):
@@ -75,6 +75,30 @@ class TestAceProtoProtocolAdapter:
 
         assert request == {"command": "GET_STATUS", "params": {}}
 
+    def test_build_start_feed_assist_request(self):
+        request = self.adapter.build_start_feed_assist_request(2)
+
+        assert request == {
+            "command": "FEED_OR_ROLLBACK",
+            "params": {"index": 2, "speed": 10, "length": 0, "mode": 2},
+        }
+
+    def test_build_stop_feed_assist_request(self):
+        request = self.adapter.build_stop_feed_assist_request(2)
+
+        assert request == {
+            "command": "STOP_FEED_OR_ROLLBACK",
+            "params": {"index": 2},
+        }
+
+    def test_build_stop_drying_request(self):
+        request = self.adapter.build_stop_drying_request()
+
+        assert request == {
+            "command": "DRYING",
+            "params": {"temp": 0, "duration": 0, "auto_roll": False},
+        }
+
     def test_build_debug_request_rejects_unknown_command(self):
         with pytest.raises(ValueError, match="Unsupported ACE2 command"):
             self.adapter.build_debug_request("NOT_REAL")
@@ -95,6 +119,13 @@ class TestAceProtoProtocolAdapter:
         frame = self.adapter.serialize_request_frame(request, _calc_crc)
 
         assert frame == b"\xFF\xAA\x03\x09\x00\x06\x00" + struct.pack("<H", _calc_crc(b"\x03\x09\x00\x06\x00")) + b"\xFE"
+
+    def test_serialize_request_frame_rejects_unaddressed_runtime_command(self):
+        request = self.adapter.build_get_status_request()
+        request["id"] = 9
+
+        with pytest.raises(ValueError, match="target_device_id must be between 1 and"):
+            self.adapter.serialize_request_frame(request, _calc_crc)
 
     def test_extract_responses_decodes_discover_device_frame(self):
         payload = b"\x08\x0B\x10\x16\x18\x21"
@@ -144,8 +175,11 @@ class TestAceProtoProtocolAdapter:
                 "msg": "SUCCESS",
                 "result": {
                     "status": "ready",
+                    "status_code": 1,
                     "dryer_status": {
-                        "status": "keeping",
+                        "status": "drying",
+                        "state_detail": "keeping",
+                        "state_code": 2,
                         "target_temp": 45,
                         "duration": 0,
                         "remain_time": 90,
@@ -155,8 +189,70 @@ class TestAceProtoProtocolAdapter:
                     "feed_assist_count": 3,
                     "cont_assist_time": 12,
                     "slots": [
-                        {"index": 0, "status": "ready", "rfid": 2},
-                        {"index": 1, "status": "feeding", "rfid": 2},
+                        {
+                            "index": 0,
+                            "status": "ready",
+                            "status_detail": "ready",
+                            "status_code": 0,
+                            "rfid": 2,
+                        },
+                        {
+                            "index": 1,
+                            "status": "feeding",
+                            "status_detail": "feeding",
+                            "status_code": 1,
+                            "rfid": 2,
+                        },
+                    ],
+                },
+            }
+        ]
+
+    def test_extract_responses_status_uses_unknown_fallbacks(self):
+        dry_status = _pb_uint(1, 99) + _pb_uint(2, 40)
+        slot_unknown = _pb_uint(1, 140) + _pb_uint(2, 1)
+        payload = (
+            _pb_uint(1, 77)
+            + _pb_bytes(2, dry_status)
+            + _pb_bytes(9, slot_unknown)
+        )
+        inner = b"\x80\x09\x00\x06" + bytes([len(payload)]) + payload
+        frame = b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+
+        responses, remaining, notices = self.adapter.extract_responses(bytearray(frame), _calc_crc)
+
+        assert notices == []
+        assert remaining == bytearray()
+        assert responses == [
+            {
+                "id": 9,
+                "command": "GET_STATUS",
+                "flags": 0x80,
+                "code": 0,
+                "msg": "SUCCESS",
+                "result": {
+                    "status": "unknown",
+                    "status_code": 77,
+                    "dryer_status": {
+                        "status": "unknown",
+                        "state_detail": "unknown",
+                        "state_code": 99,
+                        "target_temp": 40,
+                        "duration": 0,
+                        "remain_time": 0,
+                    },
+                    "temp": 0,
+                    "humidity": 0,
+                    "feed_assist_count": 0,
+                    "cont_assist_time": 0,
+                    "slots": [
+                        {
+                            "index": 0,
+                            "status": "gear_err",
+                            "status_detail": "unknown",
+                            "status_code": 140,
+                            "rfid": 1,
+                        }
                     ],
                 },
             }
@@ -196,6 +292,55 @@ class TestAceProtoProtocolAdapter:
                 "msg": "SUCCESS",
             }
         ]
+
+    def test_serialize_request_frame_supports_all_catalog_commands(self):
+        command_params = {
+            "FEED_OR_ROLLBACK": {"index": 0, "speed": 10, "length": 5, "mode": 0},
+            "STOP_FEED_OR_ROLLBACK": {"index": 0},
+            "UPDATE_SPEED": {"index": 0, "speed": 15},
+            "DRYING": {"temp": 45, "duration": 30, "auto_roll": False},
+            "SET_DRY_TEMP": {"temp": 45},
+            "GET_FILAMENT_INFO": {"index": 0},
+            "SET_RFID_ENABLE": {"index": 0, "enable": True},
+            "LINEAR_KEY_CALIBRATE": {"id": 0, "type": 1},
+            "SET_FEED_CHECK": {"check_length": 200, "error_length": 30},
+            "SET_DRY_POWER": {"power": 1},
+            "SET_VALVE": {"valve1": True, "valve2": False},
+            "FILAMENT_IDENTIFY": {"index": 0},
+            "RFID_TEST": {"enable": True},
+            "FLASH_LED": {
+                "components": 1,
+                "loop": 2,
+                "quick1": 3,
+                "slow1": 4,
+                "quick2": 5,
+                "slow2": 6,
+            },
+            "SET_FAN": {"speed": 80, "fan1": True, "fan2": False},
+            "SET_OUTPUT": {"components": 3, "state": 1},
+            "SET_PTC_TEMP": {"temp": 50},
+        }
+
+        request_id = 1
+        for spec in ACE2_COMMAND_CATALOG:
+            if spec.name == "DISCOVER_DEVICE":
+                request = self.adapter.build_discover_device_request()
+            elif spec.name == "ASSIGN_DEVICE_ID":
+                request = self.adapter.build_assign_device_id_request(1, 2, 3, 4)
+            else:
+                request = self.adapter.build_debug_request(
+                    spec.name,
+                    command_params.get(spec.name, {}),
+                )
+
+            request["id"] = request_id
+            request_id += 1
+            if request["command"] not in {"DISCOVER_DEVICE", "ASSIGN_DEVICE_ID"}:
+                request["target_device_id"] = 1
+
+            frame = self.adapter.serialize_request_frame(request, _calc_crc)
+            assert frame.startswith(b"\xFF\xAA")
+            assert frame.endswith(b"\xFE")
 
 
 class TestAce2BusSession:

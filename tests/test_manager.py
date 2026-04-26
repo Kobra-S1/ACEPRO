@@ -473,6 +473,9 @@ class TestSharedAce2Transport(unittest.TestCase):
         serial_mgr = Mock(connect_to_ace=Mock(), disconnect=Mock(), send_high_prio_request=Mock())
         serial_mgr._port = "/dev/ttyUSB0"
         serial_mgr.protocol = kwargs.get("protocol")
+        serial_mgr.ensure_connect_timer = Mock()
+        serial_mgr.is_connected = Mock(return_value=False)
+        serial_mgr.get_connection_status = Mock(return_value={"last_connected_time": 0.0})
         self.created_serial_managers.append(serial_mgr)
         return serial_mgr
 
@@ -484,6 +487,8 @@ class TestSharedAce2Transport(unittest.TestCase):
         inst.baud = instance_config["baud"]
         inst.serial_mgr = kwargs.get("serial_mgr")
         inst.bus_session = kwargs.get("bus_session")
+        inst.protocol = kwargs.get("protocol")
+        inst.rfid_inventory_sync_enabled = True
         inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
         inst.filament_runout_sensor_name_rdm = "return_module"
         return inst
@@ -509,6 +514,7 @@ class TestSharedAce2Transport(unittest.TestCase):
         manager._setup_sensors = Mock()
         manager._start_monitoring = Mock()
         manager._initialize_shared_bus_transport = Mock()
+        manager._queue_shared_bus_instance_setup = Mock()
 
         manager._handle_ready()
 
@@ -516,6 +522,9 @@ class TestSharedAce2Transport(unittest.TestCase):
         shared_serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
         self.assertEqual(manager.instances[0].bus_session.port, "/dev/ttyUSB0")
         manager._initialize_shared_bus_transport.assert_called_once_with(manager.instances[0])
+        manager._queue_shared_bus_instance_setup.assert_called_once_with(
+            manager.instances[0].bus_session
+        )
         manager._setup_sensors.assert_called_once()
         manager._start_monitoring.assert_called_once()
 
@@ -655,6 +664,64 @@ class TestSharedAce2Transport(unittest.TestCase):
 
         discovered = [device.identity.uid_tuple for device in bus_session.iter_discovered_devices()]
         assert discovered == [(11, 22, 33), (44, 55, 66)]
+
+    def test_monitor_transport_reconnects_calls_ensure_connect_timer_once_per_transport(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        manager._monitor_transport_reconnects()
+
+        shared_serial_mgr.ensure_connect_timer.assert_called_once_with()
+
+    def test_monitor_transport_reconnects_reinitializes_once_per_connection_generation(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+        bus_session = manager.instances[0].bus_session
+        manager._on_shared_bus_connected = Mock()
+
+        shared_serial_mgr.is_connected.return_value = True
+        shared_serial_mgr.get_connection_status.return_value = {"last_connected_time": 12.0}
+
+        manager._monitor_transport_reconnects()
+        manager._monitor_transport_reconnects()
+
+        manager._on_shared_bus_connected.assert_called_once_with(bus_session)
+
+        shared_serial_mgr.get_connection_status.return_value = {"last_connected_time": 13.0}
+        manager._monitor_transport_reconnects()
+
+        self.assertEqual(manager._on_shared_bus_connected.call_count, 2)
+
+    def test_queue_shared_bus_instance_setup_enqueues_expected_requests(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+
+        manager._queue_shared_bus_instance_setup(bus_session)
+
+        instance0_calls = manager.instances[0].send_high_prio_request.call_args_list
+        instance1_calls = manager.instances[1].send_high_prio_request.call_args_list
+        self.assertEqual(len(instance0_calls), 3)
+        self.assertEqual(len(instance1_calls), 3)
+
+        for calls in (instance0_calls, instance1_calls):
+            request0 = calls[0][0][0]
+            request1 = calls[1][0][0]
+            request2 = calls[2][0][0]
+            self.assertEqual(
+                request0,
+                {"command": "SET_RFID_ENABLE", "params": {"index": 0, "enable": True}},
+            )
+            self.assertEqual(
+                request1,
+                {"command": "SET_RFID_ENABLE", "params": {"index": 2, "enable": True}},
+            )
+            self.assertEqual(
+                request2,
+                {
+                    "command": "SET_FEED_CHECK",
+                    "params": {"check_length": 110, "error_length": 100},
+                },
+            )
 
 
 class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
@@ -3779,11 +3846,13 @@ class TestMonitorAceState(unittest.TestCase):
         manager._ace_pro_enabled = True
         manager._connection_supervision_enabled = True
         manager.update_ace_support_active_state = Mock()
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(5.0)
 
         manager.update_ace_support_active_state.assert_called_once()
+        manager._monitor_transport_reconnects.assert_called_once_with()
         manager._check_connection_health.assert_called_once_with(5.0)
         self.assertEqual(next_time, 7.0)
 
@@ -3792,21 +3861,25 @@ class TestMonitorAceState(unittest.TestCase):
         manager._ace_pro_enabled = False
         manager._connection_supervision_enabled = True
         manager.update_ace_support_active_state = Mock()
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(10.0)
 
         manager.update_ace_support_active_state.assert_called_once()
+        manager._monitor_transport_reconnects.assert_called_once_with()
         manager._check_connection_health.assert_not_called()
         self.assertEqual(next_time, 12.0)
 
     def test_exception_logged_and_returns_next_interval(self):
         manager = self._build_manager()
         manager.update_ace_support_active_state = Mock(side_effect=RuntimeError("boom"))
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(2.5)
 
+        manager._monitor_transport_reconnects.assert_not_called()
         manager._check_connection_health.assert_not_called()
         self.assertEqual(next_time, 4.5)
 

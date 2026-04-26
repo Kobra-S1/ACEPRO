@@ -18,10 +18,6 @@ def _build_ace2_command_catalog() -> Tuple[AceCommandSpec, ...]:
     return (
         AceCommandSpec("DISCOVER_DEVICE", 0, "diagnostic", response_type="DiscoverDeviceResponse"),
         AceCommandSpec("ASSIGN_DEVICE_ID", 1, "diagnostic", "AssignDeviceIdRequest", "GenericResponse"),
-        AceCommandSpec("IAP_UPGRADE", 2, "debug", "UpgradeRequest", "GenericResponse"),
-        AceCommandSpec("IAP_FIRMWARE", 3, "debug", "FirmwareRequest", "GenericResponse"),
-        AceCommandSpec("IAP_UPGRADE_FINISH", 4, "debug", response_type="GenericResponse"),
-        AceCommandSpec("IAP_VERSION", 5, "diagnostic", response_type="VersionResponse"),
         AceCommandSpec("GET_STATUS", 6, "operational", response_type="StatusResponse"),
         AceCommandSpec("GET_INFO", 7, "operational", response_type="InfoResponse"),
         AceCommandSpec("FEED_OR_ROLLBACK", 8, "operational", "FeedOrRollbackRequest", "GenericResponse"),
@@ -32,24 +28,18 @@ def _build_ace2_command_catalog() -> Tuple[AceCommandSpec, ...]:
         AceCommandSpec("GET_FILAMENT_INFO", 13, "operational", "RfidRequest", "FilamentInfoResponse"),
         AceCommandSpec("SET_RFID_ENABLE", 14, "diagnostic", "SetRfidEnableRequest", "GenericResponse"),
         AceCommandSpec("LINEAR_KEY_CALIBRATE", 15, "debug", "LinearCalibrationRequest", "GenericResponse"),
-        AceCommandSpec("READ_TESTER_DATA", 16, "debug", "ReadTesterRequest", "ReadTesterResponse"),
-        AceCommandSpec("WRITE_TESTER_RESULT", 17, "debug", "WriteTesterResultRequest", "GenericResponse"),
-        AceCommandSpec("WRITE_TESTER_SN", 18, "debug", "WriteTesterSnRequest", "GenericResponse"),
         AceCommandSpec("SET_FEED_CHECK", 19, "diagnostic", "SetFeedCheckRequest", "GenericResponse"),
         AceCommandSpec("GET_TEMP", 64, "diagnostic", response_type="GetTempResponse"),
         AceCommandSpec("SET_DRY_POWER", 65, "debug", "SetDryPowerRequest", "GenericResponse"),
         AceCommandSpec("SET_VALVE", 66, "debug", "SetValveRequest", "GenericResponse"),
-        AceCommandSpec("DRY_TEST", 67, "debug", "DryTestRequest", "GenericResponse"),
         AceCommandSpec("FILAMENT_IDENTIFY", 68, "diagnostic", "RfidRequest", "GenericResponse"),
         AceCommandSpec("RFID_TEST", 69, "debug", "RfidTestRequest", "GenericResponse"),
         AceCommandSpec("FLASH_LED", 70, "debug", "FlashLedRequest", "GenericResponse"),
         AceCommandSpec("SET_FAN", 71, "debug", "SetFanRequest", "GenericResponse"),
         AceCommandSpec("SET_OUTPUT", 72, "debug", "SetOutputRequest", "GenericResponse"),
         AceCommandSpec("GET_KEY_STATE", 73, "diagnostic", response_type="KeyStateResponse"),
-        AceCommandSpec("SET_KEY_LOG_ENABLE", 74, "debug", "SetKeyLogEnableRequest", "GenericResponse"),
         AceCommandSpec("SET_PTC_TEMP", 75, "debug", "SetDryTempRequest", "GenericResponse"),
         AceCommandSpec("GET_FEED_INFO", 76, "diagnostic", response_type="FeedInfoResponse"),
-        AceCommandSpec("MOTOR_TEST", 77, "debug", "FeedOrRollbackRequest", "GenericResponse"),
     )
 
 
@@ -57,6 +47,11 @@ ACE2_COMMAND_CATALOG = _build_ace2_command_catalog()
 ACE2_COMMANDS_BY_NAME = {spec.name: spec for spec in ACE2_COMMAND_CATALOG}
 ACE2_COMMANDS_BY_CODE = {
     spec.code: spec for spec in ACE2_COMMAND_CATALOG if spec.code is not None
+}
+ACE2_GENERIC_RESPONSE_COMMANDS = {
+    spec.name
+    for spec in ACE2_COMMAND_CATALOG
+    if spec.response_type == "GenericResponse"
 }
 ACE2_BOUND_GENERIC_ACK_COMMANDS = {
     spec.name
@@ -82,13 +77,21 @@ ACE2_RESPONSE_CODE_NAMES = {
     6: "READFAILED",
     400: "UNSUPPORTED",
 }
-ACE2_WORK_STATE_NAMES = {
+ACE2_WORK_STATUS_BY_CODE = {
     0: "init",
     1: "ready",
     2: "busy",
     3: "upgrading",
 }
-ACE2_DRY_STATE_NAMES = {
+ACE2_DRY_STATUS_BY_CODE = {
+    0: "stop",
+    1: "drying",
+    2: "drying",
+    3: "stop",
+    4: "error",
+    5: "error",
+}
+ACE2_DRY_STATE_DETAIL_BY_CODE = {
     0: "stop",
     1: "starting",
     2: "keeping",
@@ -96,7 +99,41 @@ ACE2_DRY_STATE_NAMES = {
     4: "ptc_error",
     5: "ntc_error",
 }
+ACE2_SLOT_STATUS_BY_CODE = {
+    0: "ready",
+    1: "feeding",
+    2: "unwinding",
+    3: "shifting",
+    4: "shifting",
+    5: "preload",
+    6: "upgrading",
+    129: "gear_err",
+    130: "gear_err",
+    131: "gear_err",
+    132: "gear_err",
+    133: "gear_err",
+    134: "gear_err",
+    135: "gear_err",
+}
+ACE2_SLOT_STATUS_DETAIL_BY_CODE = {
+    0: "ready",
+    1: "feeding",
+    2: "rollback",
+    3: "assisting",
+    4: "rollback_assisting",
+    5: "preloading",
+    6: "upgrading",
+    129: "feed_error",
+    130: "rollback_error",
+    131: "assist_error",
+    132: "preload_error",
+    133: "stuck_error",
+    134: "tangled_error",
+    135: "motor_error",
+}
 ACE2_FILAMENT_TO_RFID_STATE = {
+    0: 0,
+    1: 1,
     2: 2,
     3: 3,
 }
@@ -124,6 +161,16 @@ def _pb_uint32(field: int, value: int) -> bytes:
 def _pb_bool(field: int, value: bool) -> bytes:
     """Encode a bool protobuf field."""
     return _pb_varint((field << 3) | 0) + _pb_varint(1 if value else 0)
+
+
+def _pb_bytes(field: int, value: bytes) -> bytes:
+    """Encode a bytes protobuf field."""
+    return _pb_varint((field << 3) | 2) + _pb_varint(len(value)) + value
+
+
+def _pb_string(field: int, value: str) -> bytes:
+    """Encode a string protobuf field."""
+    return _pb_bytes(field, value.encode())
 
 
 def _pb_decode_varint(data: bytes, pos: int) -> tuple[int, int]:
@@ -215,7 +262,14 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
 
     def _encode_request_payload(self, command_name: str, params: Mapping[str, Any]) -> bytes:
         """Encode supported ACE2 request payloads as protobuf bytes."""
-        if command_name in {"DISCOVER_DEVICE", "GET_INFO", "GET_STATUS"}:
+        if command_name in {
+            "DISCOVER_DEVICE",
+            "GET_INFO",
+            "GET_STATUS",
+            "GET_TEMP",
+            "GET_KEY_STATE",
+            "GET_FEED_INFO",
+        }:
             return b""
         if command_name == "ASSIGN_DEVICE_ID":
             return (
@@ -241,6 +295,42 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                 + _pb_uint32(2, int(params["duration"]))
                 + _pb_bool(3, bool(params.get("auto_roll", False)))
             )
+        if command_name in {"SET_DRY_TEMP", "SET_PTC_TEMP"}:
+            return _pb_uint32(1, int(params["temp"]))
+        if command_name == "SET_RFID_ENABLE":
+            return _pb_uint32(1, int(params["index"])) + _pb_bool(2, bool(params["enable"]))
+        if command_name == "LINEAR_KEY_CALIBRATE":
+            return _pb_uint32(1, int(params["id"])) + _pb_uint32(2, int(params["type"]))
+        if command_name == "SET_FEED_CHECK":
+            return (
+                _pb_uint32(1, int(params["check_length"]))
+                + _pb_uint32(2, int(params["error_length"]))
+            )
+        if command_name == "SET_DRY_POWER":
+            return _pb_uint32(1, int(params["power"]))
+        if command_name == "SET_VALVE":
+            return _pb_bool(1, bool(params["valve1"])) + _pb_bool(2, bool(params["valve2"]))
+        if command_name == "FILAMENT_IDENTIFY":
+            return _pb_uint32(1, int(params["index"]))
+        if command_name == "RFID_TEST":
+            return _pb_bool(1, bool(params["enable"]))
+        if command_name == "FLASH_LED":
+            return (
+                _pb_uint32(1, int(params["components"]))
+                + _pb_uint32(2, int(params["loop"]))
+                + _pb_uint32(3, int(params["quick1"]))
+                + _pb_uint32(4, int(params["slow1"]))
+                + _pb_uint32(5, int(params["quick2"]))
+                + _pb_uint32(6, int(params["slow2"]))
+            )
+        if command_name == "SET_FAN":
+            return (
+                _pb_uint32(1, int(params["speed"]))
+                + _pb_bool(2, bool(params["fan1"]))
+                + _pb_bool(3, bool(params["fan2"]))
+            )
+        if command_name == "SET_OUTPUT":
+            return _pb_uint32(1, int(params["components"])) + _pb_uint32(2, int(params["state"]))
         raise NotImplementedError(
             f"ACE2 payload encoding is not implemented yet for command '{command_name}'"
         )
@@ -254,15 +344,7 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                 "uid2": _pb_first(fields, 2),
                 "uid3": _pb_first(fields, 3),
             }
-        if command_name in {
-            "ASSIGN_DEVICE_ID",
-            "DRYING",
-            "SET_DRY_TEMP",
-            "SET_RFID_ENABLE",
-            "UPDATE_SPEED",
-            "STOP_FEED_OR_ROLLBACK",
-            "FEED_OR_ROLLBACK",
-        }:
+        if command_name in ACE2_GENERIC_RESPONSE_COMMANDS:
             code = _pb_first(fields, 1, 0)
             return {
                 "code": code,
@@ -281,30 +363,29 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
         if command_name == "GET_STATUS":
             dry_status_payload = _pb_first(fields, 2, b"")
             dry_status_fields = _pb_decode(dry_status_payload) if dry_status_payload else {}
+            work_state_code = _pb_first(fields, 1, 0)
+            dry_state_code = _pb_first(dry_status_fields, 1, 0)
             slots = []
             for index, (_, slot_payload) in enumerate(fields.get(9, [])):
                 slot_fields = _pb_decode(slot_payload) if slot_payload else {}
                 slot_state = _pb_first(slot_fields, 1, 0)
                 filament_state = _pb_first(slot_fields, 2, 0)
-                normalized_slot_state = "ready"
-                if filament_state == 0:
-                    normalized_slot_state = "empty"
-                elif slot_state == 1:
-                    normalized_slot_state = "feeding"
-                elif slot_state == 2:
-                    normalized_slot_state = "unwinding"
-                elif slot_state in {3, 4}:
-                    normalized_slot_state = "shifting"
-                elif slot_state == 5:
-                    normalized_slot_state = "preload"
-                elif slot_state == 6:
-                    normalized_slot_state = "upgrading"
-                elif slot_state >= 129:
-                    normalized_slot_state = "gear_err"
+                normalized_slot_state = "empty" if filament_state == 0 else "ready"
+                if filament_state != 0:
+                    normalized_slot_state = ACE2_SLOT_STATUS_BY_CODE.get(
+                        slot_state,
+                        "gear_err" if slot_state >= 129 else "ready",
+                    )
+                slot_status_detail = "empty" if filament_state == 0 else ACE2_SLOT_STATUS_DETAIL_BY_CODE.get(
+                    slot_state,
+                    "unknown",
+                )
                 slots.append(
                     {
                         "index": index,
                         "status": normalized_slot_state,
+                        "status_detail": slot_status_detail,
+                        "status_code": slot_state,
                         "rfid": ACE2_FILAMENT_TO_RFID_STATE.get(filament_state, 0),
                     }
                 )
@@ -312,15 +393,12 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                 "code": 0,
                 "msg": ACE2_RESPONSE_CODE_NAMES[0],
                 "result": {
-                    "status": ACE2_WORK_STATE_NAMES.get(
-                        _pb_first(fields, 1, 0),
-                        str(_pb_first(fields, 1, 0)),
-                    ),
+                    "status": ACE2_WORK_STATUS_BY_CODE.get(work_state_code, "unknown"),
+                    "status_code": work_state_code,
                     "dryer_status": {
-                        "status": ACE2_DRY_STATE_NAMES.get(
-                            _pb_first(dry_status_fields, 1, 0),
-                            str(_pb_first(dry_status_fields, 1, 0)),
-                        ),
+                        "status": ACE2_DRY_STATUS_BY_CODE.get(dry_state_code, "unknown"),
+                        "state_detail": ACE2_DRY_STATE_DETAIL_BY_CODE.get(dry_state_code, "unknown"),
+                        "state_code": dry_state_code,
                         "target_temp": _pb_first(dry_status_fields, 2, 0),
                         "duration": _pb_first(dry_status_fields, 3, 0),
                         "remain_time": _pb_first(dry_status_fields, 4, 0),
@@ -413,9 +491,9 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
             return 0
 
         target_device_id = int(request.get("target_device_id", 0))
-        if target_device_id < 0 or target_device_id > ACE2_FLAG_DEVICE_ID_MASK:
+        if target_device_id <= 0 or target_device_id > ACE2_FLAG_DEVICE_ID_MASK:
             raise ValueError(
-                f"ACE2 target_device_id must be between 0 and {ACE2_FLAG_DEVICE_ID_MASK}"
+                f"ACE2 target_device_id must be between 1 and {ACE2_FLAG_DEVICE_ID_MASK}"
             )
         return target_device_id & ACE2_FLAG_DEVICE_ID_MASK
 
@@ -516,12 +594,23 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
         return self._build_command_request("GET_STATUS")
 
     def build_start_feed_assist_request(self, slot_index: int) -> Dict[str, Any]:
-        """ACE2 feed assist semantics still need protocol confirmation."""
-        raise NotImplementedError("ACE2 feed assist request mapping is not implemented yet")
+        """Build the ACE2 feed-assist start request."""
+        return self._build_command_request(
+            "FEED_OR_ROLLBACK",
+            {
+                "index": slot_index,
+                "speed": 10,
+                "length": 0,
+                "mode": 2,
+            },
+        )
 
     def build_stop_feed_assist_request(self, slot_index: int) -> Dict[str, Any]:
-        """ACE2 feed assist semantics still need protocol confirmation."""
-        raise NotImplementedError("ACE2 feed assist request mapping is not implemented yet")
+        """Build the ACE2 feed-assist stop request."""
+        return self._build_command_request(
+            "STOP_FEED_OR_ROLLBACK",
+            {"index": slot_index},
+        )
 
     def build_feed_filament_request(
         self,
@@ -603,5 +692,8 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
         )
 
     def build_stop_drying_request(self) -> Dict[str, Any]:
-        """ACE2 drying stop semantics still need transport-level confirmation."""
-        raise NotImplementedError("ACE2 drying stop request mapping is not implemented yet")
+        """Build the ACE2 stop-drying request."""
+        return self._build_command_request(
+            "DRYING",
+            {"temp": 0, "duration": 0, "auto_roll": False},
+        )

@@ -2465,5 +2465,37 @@ class TestHeartbeat:
         self.manager.send_request.assert_not_called()
 
 
+class TestHandleInfoResponse:
+    """Tests for get_info callback handling through public helper."""
+
+    def setup_method(self):
+        from ace.serial_manager import AceSerialManager
+
+        self.mock_gcode = Mock()
+        self.mock_reactor = Mock()
+        self.manager = AceSerialManager(
+            gcode=self.mock_gcode,
+            reactor=self.mock_reactor,
+            instance_num=0,
+            ace_enabled=False,
+        )
+
+    def test_handle_info_response_updates_device_info(self):
+        self.manager.handle_info_response(
+            {"result": {"version": "1.2.3", "boot_version": "0.9.1"}}
+        )
+
+        assert self.manager.device_info == {"version": "1.2.3", "boot_version": "0.9.1"}
+        self.mock_gcode.respond_info.assert_called_once()
+
+    def test_handle_info_response_handles_malformed_response(self):
+        self.manager.device_info = {"version": "stale"}
+
+        self.manager.handle_info_response(None)
+
+        assert self.manager.device_info == {}
+        self.mock_gcode.respond_info.assert_called_once()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

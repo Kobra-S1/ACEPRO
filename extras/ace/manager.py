@@ -116,7 +116,6 @@ class AceManager:
 
     DESIGN: Single AceManager creates N AceInstance objects (one per physical ACE unit).
     """
-
     def __init__(self, config, dummy_ace_count=1):
         """
         Initialize THE AceManager.
@@ -250,6 +249,7 @@ class AceManager:
         )
         self._connection_issue_shown = False  # Track if dialog is currently shown
         self._last_connection_status = {}     # Track per-instance connection state
+        self._shared_bus_last_connected_time = {}
 
         # Register event handlers
         handler = self.printer.register_event_handler
@@ -312,6 +312,7 @@ class AceManager:
                 if instance.bus_session is not None and instance.serial_mgr._port:
                     instance.bus_session.port = instance.serial_mgr._port
                     self._initialize_shared_bus_transport(instance)
+                    self._queue_shared_bus_instance_setup(instance.bus_session)
                     self._start_shared_bus_runtime(instance.bus_session)
             self._setup_sensors()
         else:
@@ -1573,6 +1574,7 @@ class AceManager:
         """
         try:
             self.update_ace_support_active_state()
+            self._monitor_transport_reconnects()
 
             # Check connection health for all instances (if supervision enabled)
             if self._ace_pro_enabled and self._connection_supervision_enabled:
@@ -2256,6 +2258,106 @@ class AceManager:
             instance.request_shared_bus_info_refresh()
             instance.start_shared_bus_heartbeat()
 
+    def _queue_shared_bus_instance_setup(self, bus_session):
+        """Queue ACE2 startup setup commands for each logical instance on one bus."""
+        shared_instances = sorted(
+            self._get_instances_for_bus_session(bus_session),
+            key=lambda item: item.instance_num,
+        )
+        for instance in shared_instances:
+            protocol = getattr(instance, "protocol", None)
+            if protocol is None:
+                continue
+
+            rfid_enable = bool(getattr(instance, "rfid_inventory_sync_enabled", True))
+            requests = (
+                protocol.build_debug_request(
+                    "SET_RFID_ENABLE",
+                    {"index": 0, "enable": rfid_enable},
+                ),
+                protocol.build_debug_request(
+                    "SET_RFID_ENABLE",
+                    {"index": 2, "enable": rfid_enable},
+                ),
+                protocol.build_debug_request(
+                    "SET_FEED_CHECK",
+                    {
+                        "check_length": int(self.ace_config.get("ace2_feed_check_length", 110)),
+                        "error_length": int(self.ace_config.get("ace2_feed_error_length", 100)),
+                    },
+                ),
+            )
+
+            for request in requests:
+                try:
+                    instance.send_high_prio_request(request, lambda response: response)
+                except Exception as exc:
+                    logging.warning(
+                        "ACE[%s]: failed to queue ACE2 setup request %s: %s",
+                        instance.instance_num,
+                        request.get("command"),
+                        exc,
+                    )
+
+    def _get_transport_last_connected_time(self, serial_mgr):
+        """Return last successful connect timestamp for one serial manager."""
+        get_status = getattr(serial_mgr, "get_connection_status", None)
+        if not callable(get_status):
+            return None
+
+        try:
+            status = get_status() or {}
+            last_connected_time = status.get("last_connected_time")
+            if isinstance(last_connected_time, (int, float)) and last_connected_time > 0:
+                return float(last_connected_time)
+        except Exception:
+            return None
+        return None
+
+    def _monitor_transport_reconnects(self):
+        """Keep reconnect timers alive and reinitialize shared buses after reconnect."""
+        for instance in self._iter_unique_transport_instances():
+            serial_mgr = getattr(instance, "serial_mgr", None)
+            if serial_mgr is None:
+                continue
+
+            ensure_connect_timer = getattr(serial_mgr, "ensure_connect_timer", None)
+            if callable(ensure_connect_timer):
+                try:
+                    ensure_connect_timer()
+                except Exception as exc:
+                    logging.debug(
+                        "ACE[%s]: ensure_connect_timer failed: %s",
+                        instance.instance_num,
+                        exc,
+                    )
+
+            bus_session = getattr(instance, "bus_session", None)
+            if bus_session is None:
+                continue
+
+            is_connected = getattr(serial_mgr, "is_connected", None)
+            if not callable(is_connected):
+                continue
+            try:
+                if not is_connected():
+                    continue
+            except Exception:
+                continue
+
+            last_connected_time = self._get_transport_last_connected_time(serial_mgr)
+            if last_connected_time is None:
+                continue
+
+            bus_key = id(bus_session)
+            if self._shared_bus_last_connected_time.get(bus_key) == last_connected_time:
+                continue
+
+            if getattr(serial_mgr, "_port", None):
+                bus_session.port = serial_mgr._port
+            self._shared_bus_last_connected_time[bus_key] = last_connected_time
+            self._on_shared_bus_connected(bus_session)
+
     def _handle_shared_bus_unsolicited(self, bus_session, response):
         """Route unmatched ACE2 shared-bus responses to their logical instance."""
         device_id = response.get("device_id")
@@ -2365,8 +2467,12 @@ class AceManager:
         instance = sorted(shared_instances, key=lambda item: item.instance_num)[0]
         if instance.serial_mgr._port:
             bus_session.port = instance.serial_mgr._port
+        last_connected_time = self._get_transport_last_connected_time(instance.serial_mgr)
+        if last_connected_time is not None:
+            self._shared_bus_last_connected_time[id(bus_session)] = last_connected_time
 
         self._initialize_shared_bus_transport(instance)
+        self._queue_shared_bus_instance_setup(bus_session)
         self._start_shared_bus_runtime(bus_session)
 
     def _build_shared_transport_kwargs(self, instance_num, instance_config, ace_enabled, protocol):

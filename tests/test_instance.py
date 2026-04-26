@@ -192,6 +192,36 @@ class TestAceInstance(unittest.TestCase):
         )
 
     @patch('ace.instance.AceSerialManager')
+    def test_send_request_requires_shared_bus_target_assignment(self, mock_serial_mgr_class):
+        """Shared-bus runtime requests must fail fast until a device ID is assigned."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+
+        with self.assertRaisesRegex(RuntimeError, "requires an assigned target device_id"):
+            instance.send_request({'command': 'GET_STATUS', 'params': {}}, Mock())
+
+        instance.serial_mgr.send_request.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_send_request_allows_shared_bus_discovery_without_target(self, mock_serial_mgr_class):
+        """Manager-scope shared-bus commands must remain untargeted."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        callback = Mock()
+
+        instance.send_request({'command': 'DISCOVER_DEVICE', 'params': {}}, callback)
+
+        instance.serial_mgr.send_request.assert_called_once_with(
+            {'command': 'DISCOVER_DEVICE', 'params': {}},
+            callback,
+        )
+
+    @patch('ace.instance.AceSerialManager')
     def test_start_shared_bus_heartbeat_sends_targeted_status_poll(self, mock_serial_mgr_class):
         """Shared-bus heartbeat should poll through per-instance targeted requests."""
         ace_config = dict(self.ace_config)
@@ -1723,6 +1753,45 @@ class TestStatusCallbacks(unittest.TestCase):
         
         self.assertEqual(instance._info['status'], 'ready')
         self.assertEqual(instance._info['temp'], 25)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_heartbeat_failures_trigger_reconnect_after_threshold(self, mock_serial_mgr_class):
+        """Repeated heartbeat failures should trigger reconnect once threshold is hit."""
+        ace_config = dict(self.ace_config)
+        ace_config['status_failure_threshold'] = 2
+        instance = AceInstance(0, ace_config, self.mock_printer)
+
+        instance._on_heartbeat_response(None)
+        instance._on_heartbeat_response(None)
+        instance._on_heartbeat_response(None)
+
+        instance.serial_mgr.reconnect.assert_called_once_with()
+        self.assertEqual(instance._status_failure_streak, 3)
+        self.assertTrue(instance._status_recovery_in_progress)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_heartbeat_success_resets_failure_tracking(self, mock_serial_mgr_class):
+        """Successful heartbeat should clear failure streak and recovery flag."""
+        ace_config = dict(self.ace_config)
+        ace_config['status_failure_threshold'] = 2
+        instance = AceInstance(0, ace_config, self.mock_printer)
+
+        instance._on_heartbeat_response(None)
+        self.assertEqual(instance._status_failure_streak, 1)
+        self.assertFalse(instance._status_recovery_in_progress)
+
+        success_response = {
+            'code': 0,
+            'result': {
+                'status': 'ready',
+                'slots': [],
+            }
+        }
+        instance._on_heartbeat_response(success_response)
+
+        self.assertEqual(instance._status_failure_streak, 0)
+        self.assertFalse(instance._status_recovery_in_progress)
+        instance.serial_mgr.reconnect.assert_not_called()
 
     @patch('ace.instance.AceSerialManager')
     def test_is_ready_true(self, mock_serial_mgr_class):

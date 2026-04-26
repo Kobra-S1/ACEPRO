@@ -118,6 +118,12 @@ class AceInstance:
         self._dryer_temperature = 0
         self._dryer_duration = 0
         self._pending_rfid_queries = set()  # Track slots with in-flight RFID queries
+        self.status_failure_threshold = max(
+            1,
+            int(ace_config.get("status_failure_threshold", 4)),
+        )
+        self._status_failure_streak = 0
+        self._status_recovery_in_progress = False
 
         self.status_debug_logging = bool(ace_config.get("status_debug_logging", False))
         self.supervision_enabled = bool(ace_config.get("ace_connection_supervision", True))
@@ -151,9 +157,16 @@ class AceInstance:
         if not self.transport_spec.shared_bus or self.bus_session is None:
             return prepared_request
 
+        command_name = str(prepared_request.get("command", "")).strip().upper()
+        if command_name in {"DISCOVER_DEVICE", "ASSIGN_DEVICE_ID"}:
+            return prepared_request
+
         device = self.bus_session.get_device_for_instance(self.instance_num)
         if device is None or device.device_id is None:
-            return prepared_request
+            raise RuntimeError(
+                f"ACE[{self.instance_num}]: Shared-bus request '{command_name or 'UNKNOWN'}' "
+                "requires an assigned target device_id"
+            )
 
         prepared_request["target_device_id"] = device.device_id
         return prepared_request
@@ -1629,9 +1642,11 @@ class AceInstance:
     def _on_heartbeat_response(self, response):
         """Handle heartbeat response."""
         if response is None:
+            self._record_status_failure("no response")
             return
 
         if response.get("code") == 0 and "result" in response:
+            self._reset_status_failure_tracking()
             self._status_update_callback(response)
 
             # Restore pending feed assist after first successful heartbeat
@@ -1641,6 +1656,49 @@ class AceInstance:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Heartbeat response error: {msg}"
             )
+            self._record_status_failure(str(msg))
+
+    def _reset_status_failure_tracking(self):
+        """Clear heartbeat/status failure tracking after successful communication."""
+        self._status_failure_streak = 0
+        self._status_recovery_in_progress = False
+
+    def _record_status_failure(self, reason):
+        """Track one failed heartbeat/status response and trigger reconnect if needed."""
+        self._status_failure_streak += 1
+        if self._status_failure_streak < self.status_failure_threshold:
+            return
+        if self._status_recovery_in_progress:
+            return
+
+        self._status_recovery_in_progress = True
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: Heartbeat/status failed "
+            f"{self._status_failure_streak} times ({reason}) - reconnecting"
+        )
+
+        reconnect = getattr(self.serial_mgr, "reconnect", None)
+        if callable(reconnect):
+            try:
+                reconnect()
+                return
+            except Exception as exc:
+                logging.warning(
+                    "ACE[%s]: reconnect() after status failures failed: %s",
+                    self.instance_num,
+                    exc,
+                )
+
+        disconnect = getattr(self.serial_mgr, "disconnect", None)
+        if callable(disconnect):
+            try:
+                disconnect()
+            except Exception as exc:
+                logging.warning(
+                    "ACE[%s]: disconnect() after status failures failed: %s",
+                    self.instance_num,
+                    exc,
+                )
 
     def _maybe_restore_pending_feed_assist(self):
         """
@@ -1703,6 +1761,8 @@ class AceInstance:
         Defers feed assist restoration and RFID refresh until after first
         successful status update to ensure connection is stable.
         """
+        self._reset_status_failure_tracking()
+
         # Set flag to refresh RFID data on next status update
         # This ensures we have current data if spools were changed during disconnect
         self._pending_rfid_refresh = True

@@ -53,6 +53,7 @@ class AceSerialManager:
         self._port = None
         self._usb_location = None
         self._baud = None
+        self.serial_name = None
 
         self.gcode = gcode
         self.reactor = reactor
@@ -579,7 +580,7 @@ class AceSerialManager:
         """
         Log get_info response with port and USB topology context.
         """
-        port = self.serial_name or self._port or "unknown"
+        port = getattr(self, "serial_name", None) or self._port or "unknown"
         topo = self._usb_location or "unknown"
         self.gcode.respond_info(
             f"ACE[{self.instance_num}]: {response} (port={port}, usb={topo})"
@@ -590,6 +591,10 @@ class AceSerialManager:
                 self.device_info = result
         except Exception:
             self.device_info = {}
+
+    def handle_info_response(self, response):
+        """Handle one get_info response and store normalized device metadata."""
+        self._log_info_response(response)
 
     def connect(self, port, baud):
         """

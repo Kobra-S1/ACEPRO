@@ -125,6 +125,12 @@ def read_ace_config(config):
     ace_config["rfid_inventory_sync_enabled"] = config.getboolean(
         "rfid_inventory_sync_enabled", True
     )
+    ace_config["ace2_feed_check_length"] = config.getint(
+        "ace2_feed_check_length", 110
+    )
+    ace_config["ace2_feed_error_length"] = config.getint(
+        "ace2_feed_error_length", 100
+    )
     # RFID temperature mode: how to calculate print temp from min/max
     # Options: "average" (default), "min", "max"
     ace_config["rfid_temp_mode"] = config.get("rfid_temp_mode", "average").lower()
