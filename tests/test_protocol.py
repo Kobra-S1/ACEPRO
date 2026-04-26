@@ -5,6 +5,7 @@ import struct
 import pytest
 
 from ace.ace2_bus import Ace2BusSession
+from ace.protocol import resolve_protocol_name, transport_description_matches
 from ace.protocol_ace2 import ACE2_COMMAND_CATALOG, AceProtoProtocolAdapter
 
 
@@ -378,3 +379,19 @@ class TestAce2BusSession:
 
         assert list(session.iter_discovered_devices()) == []
         assert session.get_device_for_instance(1) is None
+
+
+class TestTransportDescriptionMatching:
+    """Test transport description matching and protocol auto-resolution."""
+
+    def test_ace2_transport_matches_usb_single_serial_alias(self):
+        assert transport_description_matches("ACE2-USB-RS485", "USB Single Serial") is True
+
+    def test_auto_protocol_resolves_to_ace2_for_usb_single_serial(self):
+        resolved = resolve_protocol_name(
+            "auto",
+            instance_num=0,
+            available_port_descriptions=["USB Single Serial"],
+        )
+
+        assert resolved == "ace2_proto"

@@ -79,6 +79,14 @@ def transport_description_matches(expected_description: str, actual_description:
     if expected == "ace":
         return "ace" in actual and not actual.startswith("ace2")
 
+    if expected == "ace2usbrs485":
+        # Some ACE2 USB-RS485 bridges enumerate with generic labels.
+        ace2_aliases = {
+            "ace2usbrs485",
+            "usbsingleserial",
+        }
+        return any(alias in actual for alias in ace2_aliases)
+
     return expected in actual
 
 
