@@ -250,6 +250,10 @@ class AceManager:
         self._connection_issue_shown = False  # Track if dialog is currently shown
         self._last_connection_status = {}     # Track per-instance connection state
         self._shared_bus_last_connected_time = {}
+        self._shared_bus_retry_timers = {}
+        self._shared_bus_retry_delays = {}
+        self._shared_bus_retry_min_delay = 2.0
+        self._shared_bus_retry_max_delay = 15.0
 
         # Register event handlers
         handler = self.printer.register_event_handler
@@ -311,9 +315,6 @@ class AceManager:
                 instance.serial_mgr.connect_to_ace(instance.baud, 2)
                 if instance.bus_session is not None and instance.serial_mgr._port:
                     instance.bus_session.port = instance.serial_mgr._port
-                    self._initialize_shared_bus_transport(instance)
-                    self._queue_shared_bus_instance_setup(instance.bus_session)
-                    self._start_shared_bus_runtime(instance.bus_session)
             self._setup_sensors()
         else:
             self.gcode.respond_info("ACE: ACE Pro disabled on startup - skipping connections")
@@ -2252,9 +2253,71 @@ class AceManager:
             bus_session.export_bindings(),
         )
 
+    def _get_shared_bus_ready_instances(self, bus_session):
+        """Return shared-bus instances that currently have an assigned target device id."""
+        ready_instances = []
+        for instance in self._get_instances_for_bus_session(bus_session):
+            device = bus_session.get_device_for_instance(instance.instance_num)
+            if device is not None and device.device_id is not None:
+                ready_instances.append(instance)
+        return ready_instances
+
+    def _cancel_shared_bus_retry(self, bus_session):
+        """Cancel pending discovery retry timer for one shared bus."""
+        bus_key = id(bus_session)
+        timer = self._shared_bus_retry_timers.pop(bus_key, None)
+        if timer is not None:
+            try:
+                self.reactor.unregister_timer(timer)
+            except Exception:
+                pass
+        self._shared_bus_retry_delays.pop(bus_key, None)
+
+    def _schedule_shared_bus_retry(self, bus_session, reason):
+        """Schedule a bounded backoff retry for ACE2 shared-bus discovery."""
+        bus_key = id(bus_session)
+        if self._shared_bus_retry_timers.get(bus_key) is not None:
+            return
+
+        delay = self._shared_bus_retry_delays.get(bus_key, self._shared_bus_retry_min_delay)
+        next_delay = min(delay * 2.0, self._shared_bus_retry_max_delay)
+        self._shared_bus_retry_delays[bus_key] = next_delay
+
+        shared_instances = self._get_instances_for_bus_session(bus_session)
+        if not shared_instances:
+            return
+        lead_instance = sorted(shared_instances, key=lambda item: item.instance_num)[0]
+        self.gcode.respond_info(
+            f"ACE[{lead_instance.instance_num}]: ACE2 bus discovery retry in {delay:.1f}s ({reason})"
+        )
+
+        def _retry_callback(eventtime):
+            self._shared_bus_retry_timers.pop(bus_key, None)
+            shared = sorted(
+                self._get_instances_for_bus_session(bus_session),
+                key=lambda item: item.instance_num,
+            )
+            if not shared:
+                return self.reactor.NEVER
+            lead = shared[0]
+            is_connected = getattr(lead.serial_mgr, "is_connected", None)
+            if callable(is_connected):
+                try:
+                    if not is_connected():
+                        return self.reactor.NEVER
+                except Exception:
+                    return self.reactor.NEVER
+            self._on_shared_bus_connected(bus_session)
+            return self.reactor.NEVER
+
+        self._shared_bus_retry_timers[bus_key] = self.reactor.register_timer(
+            _retry_callback,
+            self.reactor.monotonic() + delay,
+        )
+
     def _start_shared_bus_runtime(self, bus_session):
         """Start per-instance ACE2 status polling for one shared bus group."""
-        for instance in self._get_instances_for_bus_session(bus_session):
+        for instance in self._get_shared_bus_ready_instances(bus_session):
             instance.request_shared_bus_info_refresh()
             instance.start_shared_bus_heartbeat()
 
@@ -2265,6 +2328,14 @@ class AceManager:
             key=lambda item: item.instance_num,
         )
         for instance in shared_instances:
+            device = bus_session.get_device_for_instance(instance.instance_num)
+            if device is None or device.device_id is None:
+                logging.info(
+                    "ACE[%s]: skipping ACE2 setup requests until shared-bus device_id is assigned",
+                    instance.instance_num,
+                )
+                continue
+
             protocol = getattr(instance, "protocol", None)
             if protocol is None:
                 continue
@@ -2394,18 +2465,18 @@ class AceManager:
         """Discover and assign ACE2 devices on a shared bus transport."""
         bus_session = getattr(instance, "bus_session", None)
         if bus_session is None:
-            return
+            return 0
 
         shared_instances = self._get_instances_for_bus_session(bus_session)
         if not shared_instances:
-            return
+            return 0
 
         bus_session.reset()
         self._load_shared_bus_bindings(bus_session, shared_instances)
 
         protocol = getattr(instance.serial_mgr, "protocol", None)
         if protocol is None:
-            return
+            return 0
 
         discovered_devices = []
         for _ in range(len(shared_instances)):
@@ -2428,7 +2499,7 @@ class AceManager:
             self.gcode.respond_info(
                 f"ACE[{instance.instance_num}]: ACE2 discovery returned no devices on shared bus"
             )
-            return
+            return 0
 
         ordered_instances = sorted(shared_instances, key=lambda item: item.instance_num)
         ordered_devices = list(bus_session.iter_discovered_devices())
@@ -2457,6 +2528,7 @@ class AceManager:
                 )
 
         self._persist_shared_bus_bindings(bus_session, shared_instances)
+        return len(self._get_shared_bus_ready_instances(bus_session))
 
     def _on_shared_bus_connected(self, bus_session):
         """Reinitialize and restart one ACE2 shared bus after connect."""
@@ -2471,7 +2543,15 @@ class AceManager:
         if last_connected_time is not None:
             self._shared_bus_last_connected_time[id(bus_session)] = last_connected_time
 
-        self._initialize_shared_bus_transport(instance)
+        ready_count = self._initialize_shared_bus_transport(instance)
+        if ready_count <= 0:
+            self._schedule_shared_bus_retry(
+                bus_session,
+                "discovery returned no assignable devices",
+            )
+            return
+
+        self._cancel_shared_bus_retry(bus_session)
         self._queue_shared_bus_instance_setup(bus_session)
         self._start_shared_bus_runtime(bus_session)
 

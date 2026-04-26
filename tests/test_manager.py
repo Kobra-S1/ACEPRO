@@ -515,16 +515,16 @@ class TestSharedAce2Transport(unittest.TestCase):
         manager._start_monitoring = Mock()
         manager._initialize_shared_bus_transport = Mock()
         manager._queue_shared_bus_instance_setup = Mock()
+        manager._start_shared_bus_runtime = Mock()
 
         manager._handle_ready()
 
         shared_serial_mgr = manager.instances[0].serial_mgr
         shared_serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
         self.assertEqual(manager.instances[0].bus_session.port, "/dev/ttyUSB0")
-        manager._initialize_shared_bus_transport.assert_called_once_with(manager.instances[0])
-        manager._queue_shared_bus_instance_setup.assert_called_once_with(
-            manager.instances[0].bus_session
-        )
+        manager._initialize_shared_bus_transport.assert_not_called()
+        manager._queue_shared_bus_instance_setup.assert_not_called()
+        manager._start_shared_bus_runtime.assert_not_called()
         manager._setup_sensors.assert_called_once()
         manager._start_monitoring.assert_called_once()
 
@@ -618,11 +618,12 @@ class TestSharedAce2Transport(unittest.TestCase):
             lambda request, callback: callback(None)
         )
 
-        manager._initialize_shared_bus_transport(manager.instances[0])
+        ready_count = manager._initialize_shared_bus_transport(manager.instances[0])
 
         self.mock_gcode.respond_info.assert_any_call(
             "ACE[0]: ACE2 discovery returned no devices on shared bus"
         )
+        self.assertEqual(ready_count, 0)
 
     def test_send_shared_bus_request_times_out_when_callback_never_fires(self):
         manager = self._build_manager()
@@ -696,6 +697,11 @@ class TestSharedAce2Transport(unittest.TestCase):
         manager = self._build_manager()
         bus_session = manager.instances[0].bus_session
 
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 1)
+        bus_session.bind_logical_instance(1, 44, 55, 66)
+        bus_session.assign_device_id(44, 55, 66, 2)
+
         manager._queue_shared_bus_instance_setup(bus_session)
 
         instance0_calls = manager.instances[0].send_high_prio_request.call_args_list
@@ -722,6 +728,20 @@ class TestSharedAce2Transport(unittest.TestCase):
                     "params": {"check_length": 110, "error_length": 100},
                 },
             )
+
+    def test_on_shared_bus_connected_schedules_retry_when_no_devices_discovered(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+
+        manager._initialize_shared_bus_transport = Mock(return_value=0)
+        manager._queue_shared_bus_instance_setup = Mock()
+        manager._start_shared_bus_runtime = Mock()
+
+        manager._on_shared_bus_connected(bus_session)
+
+        manager._queue_shared_bus_instance_setup.assert_not_called()
+        manager._start_shared_bus_runtime.assert_not_called()
+        self.assertIn(id(bus_session), manager._shared_bus_retry_timers)
 
 
 class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
