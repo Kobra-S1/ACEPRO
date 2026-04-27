@@ -2025,7 +2025,10 @@ class AceManager:
 
             gcode_move.reset_last_position()
 
-            target_ace._enable_feed_assist(target_slot)
+            # Feed assist is already enabled at the end of _feed_filament_into_toolhead
+            # (_feed_to_toolhead_with_extruder_assist always ends with _enable_feed_assist).
+            # Calling it again here is redundant and causes wait_ready() to time out on ACE2
+            # because the device is already in feed_assist mode (status != "ready").
 
             # Re-initialize runout detection baseline after successful load
             self.runout_monitor.prev_toolhead_sensor_state = self.get_switch_state(SENSOR_TOOLHEAD)

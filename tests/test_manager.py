@@ -2079,7 +2079,8 @@ class TestPerformToolChange(unittest.TestCase):
             
             # Should have loaded new tool
             mock_instance._feed_filament_into_toolhead.assert_called_once()
-            mock_instance._enable_feed_assist.assert_called_once_with(2)
+            # _enable_feed_assist is now called inside _feed_filament_into_toolhead, not in manager.py
+            mock_instance._enable_feed_assist.assert_not_called()
             self.assertEqual(self.variables['ace_current_index'], 2)
             # Should have passed purged amount to POST macro (note: values are floats with .0)
             self.mock_gcode.run_script_from_command.assert_any_call(
