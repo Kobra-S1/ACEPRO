@@ -782,6 +782,11 @@ def cmd_ACE_START_DRYING(gcmd):
 
             ace.start_drying(temperature, duration, callback)
         else:
+            if len(ACE_INSTANCES) > 1:
+                gcmd.respond_info(
+                    "ACE_START_DRYING: INSTANCE not provided - applying to all ACE instances"
+                )
+
             def start_dryer(inst_num, manager, ace):
                 if temperature <= 0 or temperature > ace.max_dryer_temperature:
                     gcmd.respond_info(f"ACE[{inst_num}]: Temp {temperature}°C out of range, skipping")
@@ -822,6 +827,11 @@ def cmd_ACE_STOP_DRYING(gcmd):
 
             ace.stop_drying(callback)
         else:
+            if len(ACE_INSTANCES) > 1:
+                gcmd.respond_info(
+                    "ACE_STOP_DRYING: INSTANCE not provided - applying to all ACE instances"
+                )
+
             def stop_dryer(inst_num, manager, ace):
                 def callback(response):
                     if response and response.get("code") == 0:

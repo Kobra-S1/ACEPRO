@@ -520,6 +520,15 @@ createApp({
             }
             if (data.humidity !== undefined) {
                 this.deviceStatus.humidity = data.humidity;
+            } else {
+                const hasProtocol = data.protocol !== undefined && data.protocol !== null;
+                const protocolName = hasProtocol ? String(data.protocol).toLowerCase() : '';
+                // Only clear when payload explicitly identifies a non-ACE2 protocol.
+                // Partial updates may omit protocol and humidity, and should not wipe
+                // a previously displayed ACE2 humidity value.
+                if (hasProtocol && protocolName !== 'ace2_proto') {
+                    this.deviceStatus.humidity = null;
+                }
             }
             if (data.fan_speed !== undefined) {
                 this.deviceStatus.fan_speed = data.fan_speed;
@@ -642,6 +651,7 @@ createApp({
         },
         
         onInstanceChange() {
+            this.deviceStatus.humidity = null;
             this.loadStatus();
         },
         
@@ -812,12 +822,13 @@ createApp({
             
             await this.executeCommand('ACE_START_DRYING', {
                 TEMP: this.dryingTemp,
-                DURATION: this.dryingDuration
+                DURATION: this.dryingDuration,
+                INSTANCE: this.selectedInstance
             });
         },
         
         async stopDrying() {
-            await this.executeCommand('ACE_STOP_DRYING');
+            await this.executeCommand('ACE_STOP_DRYING', { INSTANCE: this.selectedInstance });
         },
         
         // Feed/Retract Actions
