@@ -400,7 +400,7 @@ For multiple ACE units, simply set `ace_count`:
 ```ini
 [ace]
 ace_count: 2    # Instance 0 (T0-T3) + Instance 1 (T4-T7)
-baud: 115200
+baud: auto      # protocol-aware default (ACE1=115200, ACE2=230400)
 feed_speed: 60
 # ... rest of config shared by all instances
 ```
@@ -415,7 +415,7 @@ Each unit is automatically detected by USB topology and assigned:
 ```ini
 [ace]
 ace_count: 4    # e.g. for four ACE units (16 tools total: T0-T15)
-baud: 115200
+baud: auto
 feed_speed: 60
 retract_speed: 50
 ```

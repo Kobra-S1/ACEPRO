@@ -109,9 +109,9 @@ def read_ace_config(config):
 
     # Non-overridable settings (apply to all instances)
     ace_config["ace_count"] = config.getint("ace_count", 1)
-    raw_baud = config.get("baud", None)
-    if raw_baud is None:
-        raw_baud = str(config.getint("baud", 115200))
+    # Keep baud protocol-aware by default. When omitted, resolve per-instance
+    # from the active protocol (ACE1=115200, ACE2=230400).
+    raw_baud = config.get("baud", "auto")
     ace_config["baud"] = raw_baud
     ace_config["filament_runout_sensor_name_rdm"] = config.get(
         "filament_runout_sensor_name_rdm", None

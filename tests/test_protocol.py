@@ -449,3 +449,21 @@ class TestTransportDescriptionMatching:
         )
 
         assert resolved == "ace2_proto"
+
+    def test_auto_protocol_resolves_mixed_ace1_and_ace2_by_instance(self):
+        """Mixed topology should map instance 0 to ACE1 and instance 1 to ACE2."""
+        available = ["ACE", "USB Single Serial"]
+
+        resolved_instance0 = resolve_protocol_name(
+            "auto",
+            instance_num=0,
+            available_port_descriptions=available,
+        )
+        resolved_instance1 = resolve_protocol_name(
+            "auto",
+            instance_num=1,
+            available_port_descriptions=available,
+        )
+
+        assert resolved_instance0 == "ace1_json"
+        assert resolved_instance1 == "ace2_proto"

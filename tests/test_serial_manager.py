@@ -260,7 +260,7 @@ class TestFindComPort:
             SimpleNamespace(
                 device="/dev/ttyACM0",
                 description="USB Single Serial",
-                hwid="USB VID:PID=1A86:55D3 SER=AABBCCDD01 LOCATION=1-1.4:1.0",
+                hwid="USB VID:PID=1A86:55D3 SER=ANONACE2SN LOCATION=1-1.4:1.0",
             )
         ]
         self.serial_mod.tools.list_ports.comports = lambda: ports
@@ -269,6 +269,29 @@ class TestFindComPort:
 
         assert result == "/dev/ttyACM0"
         assert self.manager._expected_topology_positions == [(1, 1, 4)]
+
+    def test_find_com_port_detects_mixed_ace1_ace2_real_topology(self):
+        """Mixed enumeration should keep ACE1 and ACE2 transports distinct."""
+        ports = [
+            SimpleNamespace(
+                device="/dev/ttyACM0",
+                description="ACE",
+                hwid="USB VID:PID=28E9:018A SER=ANONACE1SN LOCATION=1-1.4.3:1.0",
+            ),
+            SimpleNamespace(
+                device="/dev/ttyACM1",
+                description="USB Single Serial",
+                hwid="USB VID:PID=1A86:55D3 SER=ANONACE2SN2 LOCATION=1-1.4.4:1.0",
+            ),
+        ]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        ace1_port = self.manager.find_com_port("ACE", instance=0)
+        self.manager._expected_topology_positions = None
+        ace2_port = self.manager.find_com_port("USB Single Serial", instance=0)
+
+        assert ace1_port == "/dev/ttyACM0"
+        assert ace2_port == "/dev/ttyACM1"
 
     def test_handles_more_aces_than_configured_instances(self):
         # With two ACEs on the bus but only instance 0 requested, it should still pick the matching expected topo

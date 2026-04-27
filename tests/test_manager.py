@@ -1163,6 +1163,23 @@ class TestConfigResolution(unittest.TestCase):
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
+    def test_resolve_instance_config_auto_baud_defaults_for_mixed_protocols(self, mock_endless_spool, mock_ace_instance):
+        """Omitted baud should use protocol-aware defaults in mixed ACE1+ACE2 mode."""
+        manager = AceManager(self.mock_config)
+        manager._get_available_port_descriptions = Mock(
+            return_value=["ACE", "USB Single Serial"]
+        )
+
+        resolved_inst0 = manager._resolve_instance_config(0)
+        resolved_inst1 = manager._resolve_instance_config(1)
+
+        self.assertEqual(resolved_inst0['active_protocol_name'], 'ace1_json')
+        self.assertEqual(resolved_inst1['active_protocol_name'], 'ace2_proto')
+        self.assertEqual(resolved_inst0['baud'], 115200)
+        self.assertEqual(resolved_inst1['baud'], 230400)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
     def test_resolve_instance_config_singleton_params(self, mock_endless_spool, mock_ace_instance):
         """Test that singleton params are NOT resolved per instance."""
         manager = AceManager(self.mock_config)
