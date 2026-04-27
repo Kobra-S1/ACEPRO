@@ -1883,11 +1883,23 @@ class AceManager:
                     target_ace = self.instances[target_instance] if target_instance < len(self.instances) else None
 
                     if target_ace:
-                        self.gcode.respond_info(
-                            f"ACE: Tool {target_tool} already loaded - "
-                            f"re-enabling feed assist on slot {target_local_slot}"
-                        )
-                        target_ace._enable_feed_assist(target_local_slot)
+                        current_fa = target_ace._get_current_feed_assist_index()
+                        if current_fa == target_local_slot:
+                            # Feed assist already active on the correct slot - nothing to do.
+                            # Do NOT call _enable_feed_assist here: on ACE2 the device is
+                            # already 'busy' because feed assist is active, and _enable_feed_assist
+                            # starts with wait_ready() which would deadlock.
+                            self.gcode.respond_info(
+                                f"ACE: Tool {target_tool} already loaded - "
+                                f"feed assist already active on slot {target_local_slot}"
+                            )
+                        else:
+                            # Feed assist lost (e.g. after ACE power cycle) - restore it.
+                            self.gcode.respond_info(
+                                f"ACE: Tool {target_tool} already loaded - "
+                                f"re-enabling feed assist on slot {target_local_slot}"
+                            )
+                            target_ace._enable_feed_assist(target_local_slot)
 
                     return f"Tool {target_tool} (already loaded)"
                 else:
@@ -2027,9 +2039,7 @@ class AceManager:
 
             # Feed assist is already enabled at the end of _feed_filament_into_toolhead
             # (_feed_to_toolhead_with_extruder_assist always ends with _enable_feed_assist).
-            # Calling it again here is redundant and causes wait_ready() to time out on ACE2
-            # because the device is already in feed_assist mode (status != "ready").
-
+            # Calling it again here is redundant
             # Re-initialize runout detection baseline after successful load
             self.runout_monitor.prev_toolhead_sensor_state = self.get_switch_state(SENSOR_TOOLHEAD)
             logging.info(

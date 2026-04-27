@@ -176,7 +176,13 @@ rmd_triggered_unload_slot(...)               # RDM-triggered unload with coordin
 
 # Feed Assist
 _enable_feed_assist(slot)                    # Auto-push filament on detection
+                                             # Contains protocol-aware post-send wait_ready():
+                                             # runs on ACE1 (stays ready); skipped on ACE2
+                                             # (transitions to busy — see Protocol Layer)
 _disable_feed_assist(slot)                   # Disable auto-push
+                                             # Contains protocol-aware pre-send wait_ready():
+                                             # runs on ACE1 (busy = transient); skipped on ACE2
+                                             # (busy IS the feed-assist state → deadlock if waited)
 _update_feed_assist(slot)                    # Update active feed assist slot
 _get_current_feed_assist_index()             # Query current feed assist slot
 _on_ace_connect()                            # Mark feed assist for deferred restoration
@@ -673,6 +679,48 @@ is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 - **Auto-Detection**: `resolve_protocol_name("auto", instance_num, port_descriptions)`
   prefers ACE1 ports for lower instances, falls back to ACE2 when a shared
   RS-485 adapter is present
+
+**Protocol Capability Flags:**
+
+The base `AceProtocolAdapter` class exposes behavioural capability flags that
+`AceInstance` uses to make protocol-aware decisions without embedding
+protocol-specific `if/else` branches in filament logic.
+
+| Method | ACE1 | ACE2 | Meaning |
+|---|---|---|---|
+| `feed_assist_causes_busy()` | `False` | `True` | Whether activating feed assist transitions the device to a non-ready status |
+
+**ACE2 feed assist and `wait_ready()`:**
+
+On ACE1 the device stays at `status="ready"` while feed assist is active.
+`wait_ready()` can be called freely before and after feed assist commands to
+confirm the device has finished processing.
+
+On ACE2 the firmware transitions to `status="busy"` (work_state code 2) the
+moment a `START_FEED_ASSIST` command is acknowledged.  The device stays in
+`busy` until `STOP_FEED_ASSIST` is explicitly sent and acknowledged — it never
+self-transitions back to `ready`.  This has two consequences:
+
+1. Any `wait_ready()` call issued *while feed assist is active on ACE2* will
+   time out after 60 s because `busy` is the expected stable state, not a
+   transient processing state.
+2. The pre-send `wait_ready()` inside `_disable_feed_assist` cannot run on
+   ACE2: the device is `busy` *because* feed assist is active, so waiting for
+   `ready` before sending `STOP_FEED_ASSIST` is a deadlock — the stop command
+   is the only thing that ends the busy state.
+
+`AceInstance` guards these three specific `wait_ready()` calls with
+`if not self.protocol.feed_assist_causes_busy()`:
+- Post-send wait in `_enable_feed_assist` (confirms command processed on ACE1;
+  skipped on ACE2 where `busy` already confirms acceptance)
+- Pre-send wait in `_disable_feed_assist` (guards concurrent operations on
+  ACE1; skipped on ACE2 where it deadlocks)
+- Post-`_enable_feed_assist` wait in `_feed_to_toolhead_with_extruder_assist`
+  (redundant for ACE1 since `_enable_feed_assist` already did its own wait;
+  deadlock on ACE2)
+
+All other `wait_ready()` calls in `AceInstance` are unaffected because they
+are only reached when feed assist is not active.
 
 **Protocol Selection Values:**
 
