@@ -895,7 +895,11 @@ class AceManager:
 
             # Sensor triggered - coordinated retraction
             try:
-                instance.wait_ready()
+                # ACE2 may be 'busy' because feed assist is active — do not call
+                # wait_ready() here, as that would deadlock.  _disable_feed_assist
+                # handles correct sequencing (stop → dwell → wait_ready) internally.
+                if not instance.protocol.feed_assist_causes_busy():
+                    instance.wait_ready()
                 parkposition_to_toolhead_length = self._get_config_for_tool(
                     tool_index, "parkposition_to_toolhead_length"
                 )
