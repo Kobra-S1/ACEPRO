@@ -4122,7 +4122,11 @@ class TestFeedToToolheadWithExtruderAssist(unittest.TestCase):
         instance._change_feed_speed.assert_called_once_with(1, 2)
         instance._extruder_move.assert_called_once_with(5, 2, wait_for_move_end=True)
         instance._stop_feed.assert_called_once_with(1)
-        self.assertEqual(instance.wait_ready.call_count, 2)
+        # wait_ready is called once: after _stop_feed to confirm the stop was processed.
+        # The second call that used to follow _enable_feed_assist was redundant
+        # (_enable_feed_assist has its own internal post-send wait) and caused a
+        # deadlock on ACE2 where feed assist transitions the device to 'busy'.
+        self.assertEqual(instance.wait_ready.call_count, 1)
         instance._enable_feed_assist.assert_called_once_with(1)
 
     @patch('ace.instance.AceSerialManager')

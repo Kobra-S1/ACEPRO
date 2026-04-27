@@ -231,6 +231,14 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
             topology_validation=False,
         )
 
+    def feed_assist_causes_busy(self) -> bool:
+        """ACE2 transitions to status='busy' when feed assist is active.
+
+        The device stays in this state until STOP_FEED_ASSIST is acknowledged.
+        wait_ready() must not be called while feed assist is active on ACE2.
+        """
+        return True
+
     def handle_bound_shared_bus_unsolicited(self, instance, response) -> bool:
         """Route one bound shared-bus response without leaking ACE2 commands upward."""
         command = response.get("command")

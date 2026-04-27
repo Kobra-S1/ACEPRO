@@ -213,6 +213,17 @@ class AceProtocolAdapter:
         """Build a request to disable feed assist for a slot."""
         raise NotImplementedError()
 
+    def feed_assist_causes_busy(self) -> bool:
+        """Return True if activating feed assist transitions the device to a non-ready status.
+
+        On ACE1 the device stays 'ready' while feed assist is active, so wait_ready()
+        works normally before and after feed assist commands.
+        On ACE2 the device transitions to 'busy' the moment feed assist starts and only
+        returns to 'ready' when STOP_FEED_ASSIST is explicitly acknowledged.  Any
+        wait_ready() issued while feed assist is active on ACE2 will therefore time out.
+        """
+        return False
+
     def build_feed_filament_request(
         self,
         slot: int,

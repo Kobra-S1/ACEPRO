@@ -473,7 +473,12 @@ class AceInstance:
         self.wait_ready()
         request = self.protocol.build_start_feed_assist_request(slot_index)
         self.send_request(request, callback)
-        self.wait_ready()
+        # ACE1: stays 'ready' during feed assist, so wait confirms the command was processed.
+        # ACE2: transitions to 'busy' the moment feed assist starts and never returns to
+        # 'ready' until STOP_FEED_ASSIST is received.  Calling wait_ready() here on ACE2
+        # would block forever.
+        if not self.protocol.feed_assist_causes_busy():
+            self.wait_ready()
 
     def _disable_feed_assist(self, slot_index):
         """Disable feed assist."""
@@ -501,7 +506,12 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Feed assist disable failed: {msg}"
                 )
 
-        self.wait_ready()
+        # ACE1: stays 'ready' during feed assist, so this pre-send wait guards against
+        # sending STOP while the device is processing something else.
+        # ACE2: is 'busy' *because* feed assist is active.  The only way to make it ready
+        # again is to send STOP_FEED_ASSIST, so waiting for 'ready' first is a deadlock.
+        if not self.protocol.feed_assist_causes_busy():
+            self.wait_ready()
         request = self.protocol.build_stop_feed_assist_request(slot_index)
         self.send_request(request, callback)
         self.dwell(1.0)
@@ -857,7 +867,9 @@ class AceInstance:
             f"ACE[{self.instance_num}]: Switching from feeding to feed_assist mode"
         )
         self._enable_feed_assist(local_slot)
-        self.wait_ready()
+        # _enable_feed_assist already contains its own post-send wait_ready() (guarded by
+        # feed_assist_causes_busy), so a second wait here is redundant for ACE1 and would
+        # deadlock on ACE2.
 
         return self.extruder_feeding_length
 
