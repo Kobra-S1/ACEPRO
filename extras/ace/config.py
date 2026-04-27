@@ -211,11 +211,6 @@ def read_ace_config(config):
     if ace_config["persistence_mode"] not in ("deferred", "immediate"):
         ace_config["persistence_mode"] = "deferred"
     ace_config["protocol"] = config.get("protocol", "auto")
-    # Optional ACE2 fallback mode for single direct connection without shared-bus discovery.
-    # Supports per-instance overrides via parse_instance_choice_config.
-    ace_config["ace2_single_direct_mode"] = config.get(
-        "ace2_single_direct_mode", "false"
-    )
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"
     ace_config["feed_speed"] = config.get("feed_speed", "60")
@@ -536,5 +531,4 @@ OVERRIDABLE_PARAMS = [
 
 CHOICE_OVERRIDABLE_PARAMS = [
     "protocol",
-    "ace2_single_direct_mode",
 ]

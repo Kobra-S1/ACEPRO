@@ -492,25 +492,6 @@ protocol: ace2
 # Bus discovery and device-id assignment happen automatically
 ```
 
-**ACE2 single-device direct fallback (per-instance):**
-Use this only when ACE2 shared-bus discovery times out, but direct framing works
-for one ACE2 device (PoC-style). This bypasses ACE2 discovery/device-id targeting
-for that instance only.
-
-```ini
-[ace]
-ace_count: 2
-protocol: auto
-# instance 0 -> ACE1 (auto)
-# instance 1 -> ACE2 direct fallback (no shared-bus discovery)
-ace2_single_direct_mode: false,1:true
-```
-
-Notes:
-- `ace2_single_direct_mode` supports per-instance overrides like other choice settings.
-- Leave this `false` for normal ACE2 shared-bus setups.
-- This is intended as a compatibility fallback for one ACE2 on direct transport.
-
 **Protocol aliases:**
 | Config value | Resolves to | Description |
 |---|---|---|

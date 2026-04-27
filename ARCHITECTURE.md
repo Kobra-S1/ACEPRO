@@ -473,11 +473,11 @@ WINDOW_SIZE = 4                          # Max concurrent in-flight requests
 QUEUE_MAXSIZE = 1024                     # Request queue size
 ```
 
-Each instance now resolves its own active `protocol` and `baud` before startup
-connection. Explicit config overrides still win, while `protocol=auto` now uses
+Each instance resolves its own active `protocol` and `baud` before startup
+connection. Explicit config overrides still win, while `protocol=auto` uses
 visible serial-port signatures to prefer dedicated ACE1 ports for lower
-instance numbers and then fall back to ACE2 shared-bus transport when an
-ACE2 USB-RS485 adapter is present. If one port description is blank, manager
+instance numbers and then falls back to ACE2 shared-bus transport when a
+"USB Single Serial" adapter is present. If one port description is blank, manager
 falls back to other visible metadata such as product/interface/hwid before
 giving up on detection. This keeps default baud selection protocol-aware in
 mixed ACE1/ACE2 chains without forcing per-instance overrides.

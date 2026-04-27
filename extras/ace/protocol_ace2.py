@@ -222,15 +222,12 @@ def _pb_first(fields: dict[int, list[tuple[int, Any]]], field: int, default: Any
 class AceProtoProtocolAdapter(AceProtocolAdapter):
     """ACE2 adapter scaffold using command/payload requests for shared-bus transport."""
 
-    def __init__(self, single_device_direct_mode: bool = False) -> None:
-        self.single_device_direct_mode = bool(single_device_direct_mode)
-
     def get_transport_spec(self) -> AceTransportSpec:
-        """ACE2 reaches logical devices via shared bus or direct single-device mode."""
+        """ACE2 reaches logical devices via shared RS-485 bus."""
         return AceTransportSpec(
             mode="rs485-bus",
-            port_description="ACE2-USB-RS485",
-            shared_bus=not self.single_device_direct_mode,
+            port_description="USB Single Serial",
+            shared_bus=True,
             topology_validation=False,
         )
 
@@ -491,9 +488,6 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
 
     def _build_frame_flags(self, request: Mapping[str, Any]) -> int:
         """Encode ACE2 bus targeting into frame flags for addressed commands."""
-        if self.single_device_direct_mode:
-            return 0
-
         command_name = request["command"]
         if command_name in {"DISCOVER_DEVICE", "ASSIGN_DEVICE_ID"}:
             return 0

@@ -252,6 +252,24 @@ class TestFindComPort:
         result = self.manager.find_com_port("ACE", instance=0)
         assert result == "/dev/ttyUSB2"
 
+    def test_find_com_port_detects_ace2_usb_single_serial_real_hwid(self):
+        # Simulates the exact PySerial portinfo for a QinHeng CH343 adapter
+        # as reported by the kernel: VID=1A86 PID=55D3, description="USB Single Serial"
+        # Serial number anonymised; location 1-1.4 is the real USB topology.
+        ports = [
+            SimpleNamespace(
+                device="/dev/ttyACM0",
+                description="USB Single Serial",
+                hwid="USB VID:PID=1A86:55D3 SER=AABBCCDD01 LOCATION=1-1.4:1.0",
+            )
+        ]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        result = self.manager.find_com_port("USB Single Serial", instance=0)
+
+        assert result == "/dev/ttyACM0"
+        assert self.manager._expected_topology_positions == [(1, 1, 4)]
+
     def test_handles_more_aces_than_configured_instances(self):
         # With two ACEs on the bus but only instance 0 requested, it should still pick the matching expected topo
         self.manager._expected_topology_positions = [(2, 2, 4, 3)]
@@ -1012,6 +1030,7 @@ class TestConnectionLifecycle:
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=True)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
+        self.manager._get_port_description_for_port = Mock(return_value="ACE")
         self.manager._validate_topology_position = Mock(return_value=False)
         self.manager.disconnect = Mock()
 
@@ -1025,6 +1044,7 @@ class TestConnectionLifecycle:
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=True)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
+        self.manager._get_port_description_for_port = Mock(return_value="ACE")
         self.manager._validate_topology_position = Mock(return_value=True)
         self.manager.send_request = Mock()
 
@@ -1045,7 +1065,7 @@ class TestConnectionLifecycle:
         protocol = Mock()
         protocol.get_transport_spec.return_value = AceTransportSpec(
             mode="rs485-bus",
-            port_description="ACE2 USB-RS485",
+            port_description="USB Single Serial",
             shared_bus=True,
             topology_validation=False,
         )
@@ -1054,18 +1074,19 @@ class TestConnectionLifecycle:
         port = self.manager.find_connection_port(instance=3)
 
         assert port == "/dev/ttyUSB-bus"
-        self.manager.find_com_port.assert_called_once_with("ACE2 USB-RS485", 0)
+        self.manager.find_com_port.assert_called_once_with("USB Single Serial", 0)
 
     def test_auto_connect_shared_bus_skips_topology_validation(self):
         self.manager.find_connection_port = Mock(return_value="/dev/ttyUSB-bus")
         self.manager.connect = Mock(return_value=True)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.5")
+        self.manager._get_port_description_for_port = Mock(return_value="USB Single Serial")
         self.manager._validate_topology_position = Mock(return_value=False)
         self.manager.send_request = Mock()
         protocol = Mock()
         protocol.get_transport_spec.return_value = AceTransportSpec(
             mode="rs485-bus",
-            port_description="ACE2 USB-RS485",
+            port_description="USB Single Serial",
             shared_bus=True,
             topology_validation=False,
         )
@@ -1084,6 +1105,7 @@ class TestConnectionLifecycle:
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=False)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
+        self.manager._get_port_description_for_port = Mock(return_value="ACE")
 
         ok = self.manager.auto_connect(0, 115200)
 

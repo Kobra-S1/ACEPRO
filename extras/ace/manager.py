@@ -2174,14 +2174,6 @@ class AceManager:
             available_port_descriptions=self._get_available_port_descriptions(),
         )
 
-        direct_mode_raw = resolved.get("ace2_single_direct_mode", "false")
-        resolved["ace2_single_direct_mode"] = str(direct_mode_raw).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-
         if "baud" in self.ace_config:
             resolved["baud"] = parse_instance_baud_config(
                 self.ace_config["baud"],
@@ -2192,16 +2184,8 @@ class AceManager:
         return resolved
 
     def _create_instance_protocol(self, instance_config):
-        """Create protocol adapter, including ACE2 single-device direct fallback mode."""
-        active_protocol_name = instance_config["active_protocol_name"]
-        if (
-            active_protocol_name == "ace2_proto"
-            and bool(instance_config.get("ace2_single_direct_mode", False))
-        ):
-            from .protocol_ace2 import AceProtoProtocolAdapter
-
-            return AceProtoProtocolAdapter(single_device_direct_mode=True)
-        return create_protocol_adapter(active_protocol_name)
+        """Create protocol adapter for this instance."""
+        return create_protocol_adapter(instance_config["active_protocol_name"])
 
     def _get_available_port_descriptions(self):
         """List visible serial-port signatures for protocol auto-selection."""

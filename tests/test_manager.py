@@ -743,19 +743,6 @@ class TestSharedAce2Transport(unittest.TestCase):
         manager._start_shared_bus_runtime.assert_not_called()
         self.assertIn(id(bus_session), manager._shared_bus_retry_timers)
 
-    @patch("ace.protocol_ace2.AceProtoProtocolAdapter")
-    def test_create_instance_protocol_uses_ace2_direct_mode_when_enabled(self, mock_proto_adapter):
-        manager = self._build_manager()
-        instance_config = {
-            "active_protocol_name": "ace2_proto",
-            "ace2_single_direct_mode": True,
-        }
-
-        manager._create_instance_protocol(instance_config)
-
-        mock_proto_adapter.assert_any_call(single_device_direct_mode=True)
-
-
 class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
     """Coverage for prepare_toolhead_for_filament_retraction."""
 

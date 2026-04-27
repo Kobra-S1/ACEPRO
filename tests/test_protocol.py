@@ -58,15 +58,6 @@ class TestAceProtoProtocolAdapter:
         assert transport.topology_validation is False
         assert transport.mode == "rs485-bus"
 
-    def test_transport_spec_direct_mode_disables_shared_bus(self):
-        adapter = AceProtoProtocolAdapter(single_device_direct_mode=True)
-
-        transport = adapter.get_transport_spec()
-
-        assert transport.shared_bus is False
-        assert transport.topology_validation is False
-        assert transport.mode == "rs485-bus"
-
     def test_build_discover_device_request(self):
         request = self.adapter.build_discover_device_request()
 
@@ -136,17 +127,6 @@ class TestAceProtoProtocolAdapter:
 
         with pytest.raises(ValueError, match="target_device_id must be between 1 and"):
             self.adapter.serialize_request_frame(request, _calc_crc)
-
-    def test_serialize_request_frame_allows_unaddressed_runtime_command_in_direct_mode(self):
-        adapter = AceProtoProtocolAdapter(single_device_direct_mode=True)
-        request = adapter.build_get_status_request()
-        request["id"] = 9
-
-        frame = adapter.serialize_request_frame(request, _calc_crc)
-
-        assert frame == b"\xFF\xAA\x00\x09\x00\x06\x00" + struct.pack(
-            "<H", _calc_crc(b"\x00\x09\x00\x06\x00")
-        ) + b"\xFE"
 
     def test_extract_responses_decodes_discover_device_frame(self):
         payload = b"\x08\x0B\x10\x16\x18\x21"
@@ -447,10 +427,21 @@ class TestAce2BusSession:
 class TestTransportDescriptionMatching:
     """Test transport description matching and protocol auto-resolution."""
 
-    def test_ace2_transport_matches_usb_single_serial_alias(self):
-        assert transport_description_matches("ACE2-USB-RS485", "USB Single Serial") is True
+    def test_ace2_transport_matches_usb_single_serial(self):
+        assert transport_description_matches("USB Single Serial", "USB Single Serial") is True
 
     def test_auto_protocol_resolves_to_ace2_for_usb_single_serial(self):
+        resolved = resolve_protocol_name(
+            "auto",
+            instance_num=0,
+            available_port_descriptions=["USB Single Serial"],
+        )
+
+        assert resolved == "ace2_proto"
+
+    def test_auto_protocol_resolves_to_ace2_for_real_device_description(self):
+        # Real-world PySerial description for QinHeng CH343 USB-RS485 adapter
+        # as enumerated on Linux: lsusb shows "USB Single Serial" (VID=1A86:PID=55D3)
         resolved = resolve_protocol_name(
             "auto",
             instance_num=0,
