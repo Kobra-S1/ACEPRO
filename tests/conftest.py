@@ -60,6 +60,9 @@ def mock_config():
         'pre_cut_retract_length': 2,
         'max_dryer_temperature': 60,
         'rfid_inventory_sync_enabled': True,
+        # Disable Moonraker lane sync in tests to avoid hitting live Moonraker
+        # and to prevent MagicMocks from leaking into lane keys.
+        'moonraker_lane_sync_enabled': False,
     }
     
     # Mock config methods

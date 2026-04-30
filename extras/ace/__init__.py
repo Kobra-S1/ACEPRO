@@ -48,6 +48,39 @@ def load_config(config):
     # Create ONE manager for ALL instances
     ace_manager = AceManager(config)
 
+    # Register optional ACE temperature sensor type (if available)
+    try:
+        from temperature_ace import register_sensor_factory  # type: ignore
+    except Exception:
+        # Fallback: load temperature_ace.py from sibling extras directory
+        import importlib.util
+        import pathlib
+        ace_root = pathlib.Path(__file__).resolve().parent.parent  # extras/
+        temp_path = ace_root / "temperature_ace.py"
+        register_sensor_factory = None
+        if temp_path.is_file():
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "temperature_ace", temp_path
+                )
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)  # type: ignore
+                    register_sensor_factory = getattr(
+                        module, "register_sensor_factory", None
+                    )
+            except Exception as e:
+                logging.info(f"ACE: temperature_ace fallback import failed: {e}")
+
+    try:
+        if register_sensor_factory:
+            register_sensor_factory(config)
+            logging.info("ACE: Registered temperature_ace sensor factory")
+        else:
+            logging.info("ACE: temperature_ace sensor registration skipped: module not found")
+    except Exception as e:
+        logging.info(f"ACE: temperature_ace sensor registration skipped: {e}")
+
     # Register all commands (done once in manager)
     printer = config.get_printer()
     register_all_commands(printer)

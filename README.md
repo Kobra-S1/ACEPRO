@@ -10,6 +10,7 @@
 
 Based on the great work of utkabobr ([DuckACE](https://github.com/utkabobr/DuckACE)) and szkrisz ([ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)).
 This is a fork of szkrisz' ACEPRO Klipper driver.
+ACE temperature sensor integration adapted from [agrloki/ValgACE](https://github.com/agrloki/ValgACE).
 
 This Anycubic-centric fork has structurally diverged from the original and focuses on:
 - Supporting multiple ACE units, assigns ACE instance IDs based on USB topology
@@ -22,8 +23,11 @@ This Anycubic-centric fork has structurally diverged from the original and focus
 - Adding many console commands for experimentation ;)
 - Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5)
 - Expanding controls/panels in the ACE KlipperScreen panel
+- Standalone browser dashboard (ValgACE-inspired) served by Moonraker at `/ace.html`
 
 The provided configurations are tailored for use with Kobra-S1 and Kobra-3 printers (I have only those, so it's also only tested with those printers).
+
+For Kobra-3 MAX there is a BETA test configuration available, but its not fully tested yet.
 
 In general other (non-)Anycubic printers are possible to use, but adaptations of the feed/retract lengths and cut tip and wipe macros, etc. will be necessary.
 If your printer has only one filament-sensor at the toolhead, use Kobra-3 config files as reference/starting point.
@@ -48,11 +52,27 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Multi-ACE Pro Support**: Multiple ACE units support (tested with 3 ACEPRO units for 12-color printing, but more should be possible)
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
-- ✅ **Runout Detection**: Real-time state-change detection
+- ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
+- ✅ **Tangle Detection (optional)**: Extruder vs encoder monitoring to catch stuck spools mid-print
+- ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
+- ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
+- ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
+- ✅ **Spoolman Integration**: Automatic spool selection via RFID-to-ID mapping or manual slot assignment
+- 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can by synced automatically the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
+
+### Standalone Web Dashboard
+
+The browser-based dashboard (adapted from ValgACE) gives you a full ACE view without opening KlipperScreen:
+- Device status, firmware, USB path, RFID state, and temperature at a glance.
+- Dryer controls and per-slot actions (load/unload/assist), with RFID badges when tag data drives the slot metadata.
+- Multi-instance support on one page, mirroring the KlipperScreen panel layout.
+- Served by Moonraker at `http://<moonraker-host>:7125/ace.html` (or `https://...` if using TLS) after symlinking the assets in `ace_status_integration/web` as described in `ace_status_integration/README.md`.
+
+![ACE Dashboard](img/ace-dashboard.png)
 
 ## 📖 Documentation
 
@@ -84,7 +104,12 @@ config/
 ├── printer_KS1.cfg       # Kobra S1 printer macros
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
 └── ace_macros_generic.cfg # Shared ACE helper macros
+└── spoolman_logic.cfg          # Logic for Spoolman ID mapping and tool hooks
 
+extras/
+├── ace/                  # ACE core module (multi-instance manager)
+├── temperature_ace.py    # Optional ACE temperature sensor for Klipper
+└── virtual_pins.py       # Helper for ACE macros
 
 ├── ARCHITECTURE.md       
 ├── example_cmds.txt
@@ -167,6 +192,9 @@ ln -sf ~/ACEPRO/extras/ace ~/klipper/klippy/extras/ace
 
 # Link the virtual_pins helper used by ACE
 ln -sf ~/ACEPRO/extras/virtual_pins.py ~/klipper/klippy/extras/virtual_pins.py
+
+# (Optional) Link ACE temperature sensor
+ln -sf ~/ACEPRO/extras/temperature_ace.py ~/klipper/klippy/extras/temperature_ace.py
 ```
 
 #### Step 2: Backup and Install Printer Configuration
@@ -255,15 +283,20 @@ sudo systemctl restart KlipperScreen
 ```
 
 
-#### Add KlipperScreen Panel to main screen to make it visible (required)
-Add the panel to your KlipperScreen configuration, e.g. add:
+#### Add KlipperScreen Panel to menus (required)
+Add the panel to your KlipperScreen configuration so it shows both while idle and while printing:
 ```
 [menu __main acepro]
 name: ACE Pro
 icon: settings
 panel: acepro
+
+[menu __print acepro]
+name: ACE Pro
+icon: settings
+panel: acepro
 ```
-to your config/main_menu.conf
+Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry makes the panel visible during an active print.
 ## ⚙️ Configuration
 
 ### Configuration File Structure
@@ -382,6 +415,8 @@ retract_speed: 50
 
 ### Sensor Configuration
 
+ACE supports both `filament_switch_sensor <name>` and `filament_tracker <name>` sections; the manager wraps trackers so they behave like standard runout helpers.
+
 **Filament Runout Sensors:**
 `filament_runout_sensor_name_nozzle` is required.
 `filament_runout_sensor_name_rdm` is optional and helps verify the filament has fully retracted to the hub.
@@ -427,6 +462,80 @@ The filament runout sensors in Mainsail/Fluidd show different states depending o
 ```gcode
 ACE_DEBUG_SENSORS  # Shows current state of all sensors
 ```
+
+#### ACE Temperature Sensor (optional)
+
+You can expose the ACE device temperature as a standard `temperature_sensor`:
+
+```ini
+[temperature_sensor ace_temp]
+sensor_type: temperature_ace
+ace_instance: 0   # Which ACE instance to read (default 0)
+min_temp: 0
+max_temp: 70
+# Place these after your [ace] section so the ACE module registers the sensor factory first.
+
+# Optional block to paste into your ACE configs (ace_K3.cfg / ace_KS1.cfg):
+# [temperature_sensor ace_temp]
+# sensor_type: temperature_ace
+# ace_instance: 0
+# min_temp: 0
+# max_temp: 70
+```
+
+Link `extras/temperature_ace.py` into Klipper extras (see installation) and restart. Each sensor reads one ACE instance’s reported `temp` field.
+
+### Other `[ace]` options worth knowing
+
+- `tangle_detection` / `tangle_detection_length`: Enable encoder-vs-extruder tangle checks (default off; length default 15mm).
+- `persistence_mode`: `deferred` (default) makes `set_and_save` defer disk writes until a safe `flush`; `immediate` writes to disk right away.
+- `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings).
+
+### OrcaSlicer Filament Sync (Moonraker Lane Data)
+
+> **Requires the latest OrcaSlicer Beta build** with Moonraker `lane_data` support.
+
+This driver continuously publishes per-slot inventory (filament type and color) to Moonraker’s `lane_data` namespace. OrcaSlicer reads this data and **automatically pre-fills filament type and color** for each tool — you no longer need to manually select spools in the slicer before slicing.
+
+**What syncs:**
+- ✅ Filament material/type (e.g. PLA, PETG, ABS)
+- ✅ Filament color (RGB)
+- ❌ Manufacturer name — not yet supported by OrcaSlicer
+
+The sync is enabled by default and requires no extra configuration. To control how slots with unknown/unset materials appear in Orca, use the following options in your `[ace]` config section:
+
+```ini
+[ace]
+# How to publish slots whose material is unknown/unset:
+#   passthrough  → publish the raw value as-is (default)
+#   empty        → publish as empty slot (Orca treats it as unassigned)
+#   map          → replace with a configured fallback material name
+moonraker_lane_sync_unknown_material_mode: empty
+
+# Comma-separated list of values considered "unknown" (case-insensitive)
+moonraker_lane_sync_unknown_material_markers: ???,unknown,n/a,none
+
+# Only used when mode=map: the material name to substitute
+moonraker_lane_sync_unknown_material_map_to: PLA
+```
+
+**Typical setup (recommended):**
+1. Enable RFID or manually label your spools with `ACE_SET_SLOT T=0 MATERIAL="PLA" COLOR=RED`
+2. Open OrcaSlicer (latest Beta), connect to your printer via Moonraker
+3. Filament type and color will auto-populate in the tool list
+
+### Smart Bed Mesh Management
+
+The provided printer configurations (`printer_K3.cfg` `printer_K3M.cfg` `printer_KS1.cfg`) include an optional option in the start macro (`G9111`) that features selective bed mesh handling to save time before every print.
+
+
+**How it works:**
+1. **Profile Lookup:** The macro reads the target bed temperature (e.g., 60°C) and looks for a saved bed mesh profile named exactly `BED_60`.
+2. **Auto-Load:** If a profile matching the temperature exists, it loads it immediately, skipping the lengthy probing process.
+3. **Adaptive Fallback:** If no matching profile exists, it automatically performs a fast Adaptive Bed Mesh (`BED_MESH_CALIBRATE PROFILE=adaptive ADAPTIVE=1`) covering only the actual print area.
+
+**No Slicer Changes Required:** You do **not** need to modify your start G-code in your slicer to use this feature. Just create and save a bed mesh with the correct name, and the macro will handle the rest automatically.
+
 
 ### Per-Instance Configuration Overrides
 
@@ -600,6 +709,29 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 | `ACE_QUERY_SLOTS` | Query all slots across instances | `[INSTANCE=<0-3>]` omit for all |
 | `ACE_SAVE_INVENTORY` | Persist inventory to saved_variables.cfg | `[INSTANCE=<0-3>]` |
 | `ACE_RESET_PERSISTENT_INVENTORY` | Clear all slot metadata | `INSTANCE=<0-3>` |
+
+## 🧵 Spoolman Integration
+
+This driver supports integration with [Spoolman](https://github.com/Donkie/Spoolman) to automatically track filament usage and metadata based on ACE RFID tags or manual assignments.
+
+### Prerequisites
+1. Spoolman must be installed and configured in your `moonraker.conf`.
+2. `[save_variables]` must be defined in your printer configuration (standard in this repo).
+3. Include the logic in your `printer.cfg` **before** the ACE config:
+   `[include spoolman_logic.cfg]`
+
+### How to use
+The integration handles three ways of identifying spools:
+
+* **Custom RFID Tags**: Write your Spoolman ID (integer) directly to a rewritable tag. The driver will load it automatically.
+* **Original Anycubic Tags**: Since these are locked, use the UI to map the SKU to a Spoolman ID.
+    * Use the macro: `MAP_SKU SKU="HPL17-103" ID=15`.
+    * Mappings are saved permanently in `variables.cfg`.
+* **Manual Assignment**: For spools without any RFID, lock a specific slot to an ID.
+    * Use the macro: `SPOOLMAN_MANUAL_SLOT SLOT=1 ID=5`.
+    * This lock remains active until the spool is removed from the slot.
+
+*Note: The included T-macros (T0-T7) are pre-configured to trigger these Spoolman lookups automatically during tool changes.*
 
 ### RFID Inventory Sync (3 commands)
 
@@ -1188,7 +1320,21 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
    ln -sf ~/ACEPRO/KlipperScreen/acepro.py ~/KlipperScreen/panels/acepro.py
    ```
 
-3. **Restart KlipperScreen service:**
+3. **Add the panel to KlipperScreen menus (idle + printing):**
+   ```ini
+   [menu __main acepro]
+   name: ACE Pro
+   icon: settings
+   panel: acepro
+
+   [menu __print acepro]
+   name: ACE Pro
+   icon: settings
+   panel: acepro
+   ```
+   Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry keeps the panel visible during a job.
+
+4. **Restart KlipperScreen service:**
    ```bash
    # Restart the KlipperScreen service
    sudo systemctl restart KlipperScreen
@@ -1197,7 +1343,7 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
    sudo supervisorctl restart klipperscreen
    ```
 
-4. **Verify installation:**
+5. **Verify installation:**
    - Open KlipperScreen
    - Look for "ACE Pro" panel in the menu
    - Panel should appear with inventory slots and controls
@@ -1264,10 +1410,3 @@ Special thanks to the Klipper community and all contributors!
 This project is licensed under the same terms as the original projects it's based on.
 
 ---
-
-
-
-
-
-
-

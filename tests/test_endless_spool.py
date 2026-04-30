@@ -425,6 +425,8 @@ class TestGetMatchMode:
         self.gcode = Mock()
         self.manager = Mock()
         self.manager.variables = {}
+        self.manager.state = Mock()
+        self.manager.state.get = Mock(return_value=None)
         
         # Create reactor mock
         reactor = Mock()
@@ -438,8 +440,8 @@ class TestGetMatchMode:
         )
 
     def test_get_match_mode_defaults_to_exact(self):
-        """Test get_match_mode returns 'exact' when no save_variables."""
-        self.printer.lookup_object = Mock(return_value=None)
+        """Test get_match_mode returns 'exact' when variable not set."""
+        self.manager.state.get = Mock(return_value="exact")
         
         result = self.endless_spool.get_match_mode()
         
@@ -447,9 +449,7 @@ class TestGetMatchMode:
 
     def test_get_match_mode_returns_exact_from_variables(self):
         """Test get_match_mode returns 'exact' from saved variables."""
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {"ace_endless_spool_match_mode": "exact"}
-        self.printer.lookup_object = Mock(return_value=mock_save_vars)
+        self.manager.state.get = Mock(return_value="exact")
         
         result = self.endless_spool.get_match_mode()
         
@@ -457,9 +457,7 @@ class TestGetMatchMode:
 
     def test_get_match_mode_returns_material_from_variables(self):
         """Test get_match_mode returns 'material' from saved variables."""
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {"ace_endless_spool_match_mode": "material"}
-        self.printer.lookup_object = Mock(return_value=mock_save_vars)
+        self.manager.state.get = Mock(return_value="material")
         
         result = self.endless_spool.get_match_mode()
         
@@ -467,9 +465,7 @@ class TestGetMatchMode:
 
     def test_get_match_mode_defaults_when_variable_missing(self):
         """Test get_match_mode defaults to 'exact' when variable not set."""
-        mock_save_vars = Mock()
-        mock_save_vars.allVariables = {}
-        self.printer.lookup_object = Mock(return_value=mock_save_vars)
+        self.manager.state.get = Mock(return_value="exact")
         
         result = self.endless_spool.get_match_mode()
         
@@ -704,7 +700,7 @@ class TestExecuteSwap:
         # Should resume print
         self.gcode.run_script_from_command.assert_called_with("RESUME PURGE=0")
         # Should sync inventory
-        self.manager._sync_inventory_to_persistent.assert_called_once_with(0)
+        self.manager._sync_inventory_to_persistent.assert_called_once_with(0, flush=False)
 
     def test_execute_swap_retry_after_first_failure(self):
         """Swap fails first attempt, succeeds on retry with different tool."""

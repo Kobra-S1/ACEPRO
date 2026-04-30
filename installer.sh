@@ -23,6 +23,13 @@ NC='\033[0m' # No Color
 # Script directory (where this script is located)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# Resolve installation user/home for defaults (works when run via sudo).
+INSTALL_USER="${SUDO_USER:-$(id -un)}"
+INSTALL_HOME="$(getent passwd "$INSTALL_USER" 2>/dev/null | cut -d: -f6 || true)"
+if [ -z "$INSTALL_HOME" ]; then
+    INSTALL_HOME="$HOME"
+fi
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -102,6 +109,133 @@ is_symlink() {
     [ -L "$1" ]
 }
 
+# Add a KlipperScreen menu entry (handles user-editable section vs auto-generated marker)
+ensure_menu_entry() {
+    local conf="$1"
+    local header="$2"
+    local block="$3"
+    local label="$4"
+
+    # Extract user-editable section (lines before the #~# auto-generated marker)
+    local user_section
+    user_section=$(sed '/^#~# --- Do not edit/,$d' "$conf" 2>/dev/null || cat "$conf" 2>/dev/null || true)
+
+    if echo "$user_section" | grep -qF "$header"; then
+        print_success "KlipperScreen.conf: $label entry already present"
+        return 0
+    fi
+
+    print_info "Adding $label entry to $conf"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    if grep -q '^#~# --- Do not edit' "$conf" 2>/dev/null; then
+        # Insert the block just before the auto-generated marker
+        awk -v block="$block" '
+            /^#~# --- Do not edit/ && !done {
+                print block; print ""; done=1
+            }
+            { print }
+        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+    else
+        # No marker — append at end of file
+        printf '\n%s\n' "$block" >> "$conf"
+    fi
+    print_success "KlipperScreen.conf: added $label entry"
+}
+
+# Ensure the ACE Pro menu entry exists in main and print menus
+ensure_klipperscreen_acepro_menu() {
+    local conf="$1"
+    local entry_block_main='[menu __main acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
+    local entry_block_print='[menu __print acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
+
+    ensure_menu_entry "$conf" "[menu __main acepro]" "$entry_block_main" "ACE Pro (main menu)"
+    ensure_menu_entry "$conf" "[menu __print acepro]" "$entry_block_print" "ACE Pro (print menu)"
+}
+
+# Ensure [ace_status] section exists in moonraker.conf (create file if missing)
+ensure_moonraker_ace_status() {
+    local conf="$1"
+
+    if [ -f "$conf" ] && grep -qi '^[[:space:]]*\[ace_status\]' "$conf"; then
+        print_success "moonraker.conf: [ace_status] already present"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$conf")"
+    if [ ! -f "$conf" ]; then
+        printf '# Moonraker configuration\n\n' > "$conf"
+        print_warning "Created new moonraker.conf at $conf"
+    fi
+
+    printf '\n# ACE status extension\n[ace_status]\n' >> "$conf"
+    print_success "Added [ace_status] to $conf"
+}
+
+# Ensure font_size = small is set in the user-editable section of KlipperScreen.conf
+# Handles missing file, missing [main] section, wrong value, and #~# auto-generated block.
+ensure_klipperscreen_font_size() {
+    local conf="$1"
+
+    if [ ! -f "$conf" ]; then
+        printf '[main]\nfont_size = small\n' > "$conf"
+        print_success "Created $conf with font_size = small"
+        return 0
+    fi
+
+    # Extract user-editable section (lines before the #~# auto-generated marker)
+    local user_section
+    user_section=$(sed '/^#~# --- Do not edit/,$d' "$conf")
+
+    # Already correct?
+    if echo "$user_section" | grep -qiE '^[[:space:]]*font_size[[:space:]]*=[[:space:]]*small[[:space:]]*$'; then
+        print_success "KlipperScreen.conf: font_size = small is already configured"
+        return 0
+    fi
+
+    print_info "Configuring font_size = small in $conf"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    if echo "$user_section" | grep -qiE '^[[:space:]]*font_size[[:space:]]*='; then
+        # font_size exists with a different value — update first occurrence before #~# block
+        awk '
+            /^#~# --- Do not edit/ { in_auto=1 }
+            !in_auto && /^[[:space:]]*font_size[[:space:]]*=/ && !replaced {
+                print "font_size = small"; replaced=1; next
+            }
+            { print }
+        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+        print_success "KlipperScreen.conf: updated font_size to small"
+
+    elif echo "$user_section" | grep -q '^\[main\]'; then
+        # [main] exists in user section but no font_size — insert after first [main]
+        awk '
+            /^#~# --- Do not edit/ { in_auto=1 }
+            !in_auto && /^\[main\]$/ && !done {
+                print; print "font_size = small"; done=1; next
+            }
+            { print }
+        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+        print_success "KlipperScreen.conf: added font_size = small under [main]"
+
+    else
+        # No [main] in user section — insert block before #~# marker or prepend
+        if grep -q '^#~# --- Do not edit' "$conf"; then
+            awk '
+                /^#~# --- Do not edit/ && !done {
+                    print "[main]"; print "font_size = small"; print ""; done=1
+                }
+                { print }
+            ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
+        else
+            { printf '[main]\nfont_size = small\n\n'; cat "$conf"; } > "$tmpfile" && mv "$tmpfile" "$conf"
+        fi
+        print_success "KlipperScreen.conf: added [main] section with font_size = small"
+    fi
+}
+
 # Create or replace symlink
 create_or_replace_symlink() {
     local source="$1"
@@ -152,15 +286,18 @@ main() {
     PRINTER_GENERIC_MACROS_BACKUP=""
     ACE_CONFIG_BACKUP=""
     ACE_MACROS_BACKUP=""
+    MOONRAKER_RESTART_NEEDED=0
     
     # ========================================================================
     # Step 1: Gather user input
     # ========================================================================
     
     print_info "Gathering installation parameters...\n"
+    print_info "Installer source directory: $SCRIPT_DIR"
+    print_info "Default target user/home: $INSTALL_USER ($INSTALL_HOME)"
     
     # 1.1 - Klipper installation directory
-    DEFAULT_KLIPPER_DIR="$HOME/klipper"
+    DEFAULT_KLIPPER_DIR="$INSTALL_HOME/klipper"
     KLIPPER_DIR=$(prompt_input "Klipper installation directory (press ENTER to use default)" "$DEFAULT_KLIPPER_DIR")
     
     if [ ! -d "$KLIPPER_DIR" ]; then
@@ -174,7 +311,8 @@ main() {
     echo "Which printer model?"
     echo "  1) Kobra 3"
     echo "  2) Kobra KS1"
-    read -p "$(echo -e ${BLUE}Select [1 or 2]${NC}: )" printer_choice
+    echo "  3) Kobra K3M (BETA testing)"
+    read -p "$(echo -e ${BLUE}Select [1, 2 or 3]${NC}: )" printer_choice
     
     case "$printer_choice" in
         1)
@@ -185,6 +323,10 @@ main() {
             PRINTER_MODEL="KS1"
             PRINTER_NAME="Kobra S1"
             ;;
+        3)
+            PRINTER_MODEL="K3M"
+            PRINTER_NAME="Kobra K3M (BETA testing)"
+            ;;
         *)
             print_error "Invalid choice"
             exit 1
@@ -193,7 +335,7 @@ main() {
     print_success "Selected printer: $PRINTER_NAME"
     
     # 1.3 - Config directory
-    DEFAULT_CONFIG_DIR="$HOME/printer_data/config"
+    DEFAULT_CONFIG_DIR="$INSTALL_HOME/printer_data/config"
     CONFIG_DIR=$(prompt_input "\nKlipper config directory" "$DEFAULT_CONFIG_DIR")
     
     if [ ! -d "$CONFIG_DIR" ]; then
@@ -217,12 +359,14 @@ Config directory:        $CONFIG_DIR
 
 Installation steps:
 1. Link ace module to Klipper extras
+1b. (Optional) Install ACE status Moonraker component + dashboard symlinks
 2. Backup and install printer.cfg for $PRINTER_NAME
 3. Copy printer_generic_macros.cfg (backup if exists)
 4. Copy ACE configuration file
 5. Copy ACE macro file
-6. Link KlipperScreen panel (if available)
-7. Optionally restart services
+6. Link optional ACE temperature sensor
+7. Link KlipperScreen panel (if available)
+8. Optionally restart services
 EOF
     
     if ! prompt_yes_no "Continue with installation?"; then
@@ -255,6 +399,78 @@ EOF
     fi
     
     create_or_replace_symlink "$VP_SOURCE" "$VP_TARGET" "virtual_pins module"
+
+    # Optional ACE temperature sensor (safe to link even if unused)
+    TEMP_SOURCE="$SCRIPT_DIR/extras/temperature_ace.py"
+    TEMP_TARGET="$KLIPPER_DIR/klippy/extras/temperature_ace.py"
+
+    if [ -f "$TEMP_SOURCE" ]; then
+        print_info "Linking optional ACE temperature sensor (temperature_ace.py)..."
+        create_or_replace_symlink "$TEMP_SOURCE" "$TEMP_TARGET" "temperature_ace sensor"
+    else
+        print_warning "temperature_ace.py not found; skipping sensor symlink"
+    fi
+
+    # ========================================================================
+    # Step 1b: ACE Status Integration (Optional)
+    # ========================================================================
+
+    ACE_STATUS_DIR="$SCRIPT_DIR/ace_status_integration"
+    if [ -d "$ACE_STATUS_DIR" ]; then
+        print_header "Step 1b: ACE Status Integration (Optional)"
+
+        if prompt_yes_no "Install ACE status Moonraker component + dashboard symlinks?"; then
+            ACE_MOONRAKER_DEFAULT="$INSTALL_HOME/moonraker"
+            ACE_MAINSAIL_DEFAULT="$INSTALL_HOME/mainsail"
+            ACE_FLUIDD_DEFAULT="$INSTALL_HOME/fluidd"
+            ACE_MOONRAKER_CONF_DEFAULT="$INSTALL_HOME/printer_data/config/moonraker.conf"
+
+            # Moonraker component
+            ACE_MOONRAKER_DIR=$(prompt_input "Moonraker directory (press ENTER to use default)" "$ACE_MOONRAKER_DEFAULT")
+            ACE_MOONRAKER_COMPONENTS="$ACE_MOONRAKER_DIR/moonraker/components"
+            if [ -d "$ACE_MOONRAKER_COMPONENTS" ]; then
+                ACE_STATUS_SOURCE="$ACE_STATUS_DIR/moonraker/ace_status.py"
+                ACE_STATUS_TARGET="$ACE_MOONRAKER_COMPONENTS/ace_status.py"
+                create_or_replace_symlink "$ACE_STATUS_SOURCE" "$ACE_STATUS_TARGET" "ACE status Moonraker component"
+                MOONRAKER_RESTART_NEEDED=1
+
+                # Ensure moonraker.conf has [ace_status]
+                ACE_MOONRAKER_CONF=$(prompt_input "moonraker.conf path (press ENTER to use default)" "$ACE_MOONRAKER_CONF_DEFAULT")
+                ensure_moonraker_ace_status "$ACE_MOONRAKER_CONF"
+            else
+                print_warning "Moonraker components directory not found: $ACE_MOONRAKER_COMPONENTS"
+                print_info "Skipping Moonraker ACE status symlink"
+            fi
+
+            # Mainsail dashboard files
+            if prompt_yes_no "Link dashboard files into Mainsail?"; then
+                ACE_MAINSAIL_DIR=$(prompt_input "Mainsail install directory" "$ACE_MAINSAIL_DEFAULT")
+                if [ -d "$ACE_MAINSAIL_DIR" ]; then
+                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js favicon.svg; do
+                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_MAINSAIL_DIR/$ace_file" "Mainsail $ace_file"
+                    done
+                else
+                    print_warning "Mainsail directory not found: $ACE_MAINSAIL_DIR"
+                    print_info "Skipped Mainsail dashboard links"
+                fi
+            fi
+
+            # Fluidd dashboard files
+            if prompt_yes_no "Link dashboard files into Fluidd?"; then
+                ACE_FLUIDD_DIR=$(prompt_input "Fluidd install directory" "$ACE_FLUIDD_DEFAULT")
+                if [ -d "$ACE_FLUIDD_DIR" ]; then
+                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js favicon.svg; do
+                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_FLUIDD_DIR/$ace_file" "Fluidd $ace_file"
+                    done
+                else
+                    print_warning "Fluidd directory not found: $ACE_FLUIDD_DIR"
+                    print_info "Skipped Fluidd dashboard links"
+                fi
+            fi
+        else
+            print_info "ACE status integration skipped"
+        fi
+    fi
     
     # ========================================================================
     # Step 2: Backup and copy printer configuration
@@ -451,7 +667,7 @@ EOF
 
     print_header "Step 6: KlipperScreen Integration (Optional)"
     
-    KLIPPERSCREEN_ROOT_DIR="$HOME/KlipperScreen"
+    KLIPPERSCREEN_ROOT_DIR="$INSTALL_HOME/KlipperScreen"
     KLIPPERSCREEN_PANELS_DIR="$KLIPPERSCREEN_ROOT_DIR/panels"
     KLIPPERSCREEN_PANEL_SOURCE="$SCRIPT_DIR/KlipperScreen/acepro.py"
     KLIPPERSCREEN_PANEL_TARGET="$KLIPPERSCREEN_PANELS_DIR/acepro.py"
@@ -491,6 +707,16 @@ EOF
     elif [ ! -f "$KLIPPERSCREEN_PATCH" ]; then
         print_warning "KlipperScreen patch file not found: $KLIPPERSCREEN_PATCH"
     fi
+
+    # Ensure KlipperScreen.conf has font_size = small and ACE Pro menu entry
+    if [ -d "$KLIPPERSCREEN_ROOT_DIR" ]; then
+        KLIPPERSCREEN_CONF="$CONFIG_DIR/KlipperScreen.conf"
+        echo ""
+        print_info "Checking KlipperScreen.conf for font_size setting..."
+        ensure_klipperscreen_font_size "$KLIPPERSCREEN_CONF"
+        print_info "Checking KlipperScreen.conf for ACE Pro menu entries (main + print menus)..."
+        ensure_klipperscreen_acepro_menu "$KLIPPERSCREEN_CONF"
+    fi
     
     # ========================================================================
     # Step 7: Service restart
@@ -498,9 +724,25 @@ EOF
 
     print_header "Step 7: Service Restart"
     
-    echo "Klipper and KlipperScreen need to be restarted for changes to take effect."
+    echo "Moonraker (if ACE status was linked), Klipper and KlipperScreen need to be restarted for changes to take effect."
     echo ""
-    
+
+    if [ "$MOONRAKER_RESTART_NEEDED" -eq 1 ]; then
+        if prompt_yes_no "Restart Moonraker service now?"; then
+            print_info "Restarting Moonraker..."
+            sudo systemctl restart moonraker
+            if [ $? -eq 0 ]; then
+                print_success "Moonraker restarted"
+            else
+                print_error "Failed to restart Moonraker"
+            fi
+        else
+            print_warning "Moonraker not restarted. You can restart manually:"
+            echo "  sudo systemctl restart moonraker"
+        fi
+        echo ""
+    fi
+
     if prompt_yes_no "Restart Klipper service now?"; then
         print_info "Restarting Klipper..."
         sudo systemctl restart klipper

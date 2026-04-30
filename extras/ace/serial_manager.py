@@ -95,6 +95,10 @@ class AceSerialManager:
         self._ace_pro_enabled = ace_enabled
         self._status_debug_logging = bool(status_debug_logging)
         self._supervision_enabled = bool(supervision_enabled)
+        # Human-readable connection state for KlipperScreen UI
+        self.connection_state = "disabled" if not ace_enabled else "initializing"
+        # Latest device info response (model/firmware/etc.)
+        self.device_info = {}
 
         # Connection stability tracking
         # Rate-based detection: unstable if too many reconnects in short window
@@ -132,6 +136,7 @@ class AceSerialManager:
         self._ace_pro_enabled = True
 
         if was_disabled:
+            self.connection_state = "connecting"
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: ACE Pro enabled - reconnecting"
             )
@@ -144,6 +149,7 @@ class AceSerialManager:
     def disable_ace_pro(self):
         """Disable ACE Pro and disconnect immediately."""
         self._ace_pro_enabled = False
+        self.connection_state = "disabled"
         self.gcode.respond_info(
             f"ACE[{self.instance_num}]: ACE Pro disabled - disconnecting"
         )
@@ -450,6 +456,7 @@ class AceSerialManager:
             f'ACE[{self.instance_num}]: (Re)connecting '
             f'({recent_count} reconnects in last {int(self.INSTABILITY_WINDOW)}s)'
         )
+        self.connection_state = "reconnecting"
         self.disconnect()
 
         # Use provided delay parameter, or default to current backoff
@@ -562,6 +569,12 @@ class AceSerialManager:
         self.gcode.respond_info(
             f"ACE[{self.instance_num}]: {response} (port={port}, usb={topo})"
         )
+        try:
+            result = response.get("result", {})
+            if isinstance(result, dict):
+                self.device_info = result
+        except Exception:
+            self.device_info = {}
 
     def connect(self, port, baud):
         """
@@ -583,6 +596,7 @@ class AceSerialManager:
             )
             if self._serial.is_open:
                 self._connected = True
+                self.connection_state = "connected"
                 logging.info(f'ACE[{self.instance_num}]: Serial port {port} opened')
                 # DON'T reset _request_id on reconnect - old responses may still arrive
                 # Resetting to 0 would cause ID collisions with stale ACE responses
@@ -871,6 +885,11 @@ class AceSerialManager:
             request: Dict with JSON-serializable request
             callback: Callable(response=dict) or Callable(response=None) on timeout
         """
+        if not self._ace_pro_enabled:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Dropping request — ACE Pro is disabled"
+            )
+            return
         try:
             self._queue.put([request, callback], timeout=1)
         except queue.Full:
@@ -884,6 +903,11 @@ class AceSerialManager:
             request: Dict with JSON-serializable request
             callback: Callable as in send_request
         """
+        if not self._ace_pro_enabled:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Dropping high-priority request — ACE Pro is disabled"
+            )
+            return
         try:
             self._hp_queue.put([request, callback], timeout=1)
         except queue.Full:

@@ -19,6 +19,8 @@ class TestRunoutMonitorInitialization:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         self.monitor = RunoutMonitor(
@@ -37,6 +39,8 @@ class TestRunoutMonitorInitialization:
         assert self.monitor.runout_detection_active is False
         assert self.monitor.runout_handling_in_progress is False
         assert self.monitor._monitoring_timer is None
+        assert self.monitor.runout_debounce_count == 1
+        assert self.monitor._runout_false_count == 0
 
     def test_init_stores_dependencies(self):
         """Test initialization stores all dependencies."""
@@ -45,6 +49,16 @@ class TestRunoutMonitorInitialization:
         assert self.monitor.reactor is self.reactor
         assert self.monitor.endless_spool is self.endless_spool
         assert self.monitor.manager is self.manager
+
+    def test_init_custom_debounce_count(self):
+        """Test initialization with custom debounce count."""
+        monitor = RunoutMonitor(
+            self.printer, self.gcode, self.reactor,
+            self.endless_spool, self.manager,
+            runout_debounce_count=7
+        )
+        assert monitor.runout_debounce_count == 7
+        assert monitor._runout_false_count == 0
 
 
 class TestStartStopMonitoring:
@@ -57,6 +71,8 @@ class TestStartStopMonitoring:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         self.monitor = RunoutMonitor(
@@ -122,6 +138,8 @@ class TestSetDetectionActive:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         self.monitor = RunoutMonitor(
@@ -179,6 +197,8 @@ class TestToolchangeGuard:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         
         # Mock print_stats
         self.print_stats = Mock()
@@ -250,6 +270,8 @@ class TestPrintStateTracking:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=False)
         
@@ -332,6 +354,8 @@ class TestBaselineInitialization:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats - printing with active tool
@@ -408,6 +432,8 @@ class TestPrintStartDetection:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -486,6 +512,8 @@ class TestPrintStopDetection:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -559,6 +587,8 @@ class TestRunoutDetection:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats - printing with active tool
@@ -593,7 +623,8 @@ class TestRunoutDetection:
             self.gcode,
             self.reactor,
             self.endless_spool,
-            self.manager
+            self.manager,
+            runout_debounce_count=1  # Immediate trigger for transition tests
         )
         self.monitor.runout_detection_active = True
         self.monitor.prev_toolhead_sensor_state = True  # Baseline: filament present
@@ -649,9 +680,15 @@ class TestRunoutDetection:
     def test_updates_baseline_after_runout(self):
         """Test baseline updated after runout detected."""
         self.monitor.prev_toolhead_sensor_state = True
+        self.monitor.last_printing_active = True
+        self.monitor.last_print_state = 'printing'
         self.manager.get_switch_state = Mock(return_value=False)
         
-        self.monitor._monitor_runout(0.0)
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0):
+            with patch('ace.runout_monitor.get_local_slot', return_value=0):
+                with patch('ace.runout_monitor.ACE_INSTANCES') as mock_instances:
+                    mock_instances.get = Mock(return_value=None)
+                    self.monitor._monitor_runout(0.0)
         
         # Baseline should be updated to absent
         assert self.monitor.prev_toolhead_sensor_state is False
@@ -668,6 +705,8 @@ class TestRunoutSuppression:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats
@@ -701,7 +740,8 @@ class TestRunoutSuppression:
             self.gcode,
             self.reactor,
             self.endless_spool,
-            self.manager
+            self.manager,
+            runout_debounce_count=1  # Immediate trigger for suppression tests
         )
         self.monitor.runout_detection_active = True
     
@@ -741,6 +781,8 @@ class TestRunoutHandling:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats
@@ -880,6 +922,8 @@ class TestNoActiveToolHandling:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=False)
         
@@ -936,6 +980,8 @@ class TestPausedStateHandling:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -992,6 +1038,8 @@ class TestMonitorReturnInterval:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.get_switch_state = Mock(return_value=True)
         
@@ -1065,6 +1113,8 @@ class TestToolchangeRunoutInteraction:
         self.reactor.monotonic = Mock(return_value=0.0)
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         
         # Mock print_stats - printing state
@@ -1158,19 +1208,29 @@ class TestToolchangeRunoutInteraction:
         log_messages = [call[0][0] for call in self.gcode.respond_info.call_args_list]
         assert not any('runout detected' in msg.lower() for msg in log_messages)
 
-    def test_sensor_glitch_after_toolchange_triggers_runout(self):
+    def test_sensor_glitch_after_toolchange_blocked_by_debounce(self):
         """
-        CURRENT BEHAVIOR: A sensor glitch right after toolchange WILL trigger runout.
+        DEBOUNCE FIX: A single sensor glitch after toolchange should NOT
+        trigger runout when debounce is enabled (count=3), because the
+        debounce counter requires multiple consecutive absent readings.
         
-        This test documents the current (potentially problematic) behavior where:
+        Flow:
         1. Toolchange sets prev_toolhead_sensor_state = True
         2. Toolchange completes
-        3. Sensor momentarily reads False (glitch/bounce)
-        4. Runout IS detected (this might be a phantom runout)
-        
-        This test will PASS with current code, demonstrating the issue exists.
-        If we add protection (grace period, etc.), this test should be updated.
+        3. Sensor momentarily reads False (glitch!) - 1 reading
+        4. Debounce counter increments but threshold (3) not reached
+        5. Runout is NOT detected
         """
+        # Re-create monitor with debounce enabled
+        self.monitor = RunoutMonitor(
+            self.printer, self.gcode, self.reactor,
+            self.endless_spool, self.manager,
+            runout_debounce_count=3
+        )
+        self.monitor.runout_detection_active = True
+        self.monitor.last_printing_active = True
+        self.monitor.last_print_state = 'printing'
+
         # Simulate toolchange just completed
         self.manager.toolchange_in_progress = False
         
@@ -1180,25 +1240,20 @@ class TestToolchangeRunoutInteraction:
         # Sensor momentarily reads False (glitch!)
         self.manager.get_switch_state = Mock(return_value=False)
         
-        # Mock for _handle_runout_detected
-        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0):
-            with patch('ace.runout_monitor.get_local_slot', return_value=0):
-                with patch('ace.runout_monitor.ACE_INSTANCES') as mock_instances:
-                    ace_inst = Mock()
-                    ace_inst.inventory = [{'material': 'PLA', 'color': [255, 0, 0]}]
-                    mock_instances.get = Mock(return_value=ace_inst)
-                    
-                    self.monitor._monitor_runout(0.0)
+        self.gcode.respond_info.reset_mock()
+        self.monitor._monitor_runout(0.0)
         
-        # With current code, runout WILL be detected (this documents the vulnerability)
+        # With debounce count=3, a single glitch should NOT trigger runout
         log_messages = [call[0][0] for call in self.gcode.respond_info.call_args_list]
         runout_detected = any('runout detected' in msg.lower() for msg in log_messages)
         
-        # This assertion documents current behavior
-        # If we want to FIX the phantom runout, change this to assertFalse
-        assert runout_detected, \
-            "Current code detects runout on sensor glitch after toolchange. " \
-            "This test documents this vulnerability. To fix, add grace period."
+        assert not runout_detected, \
+            "Debounce should prevent phantom runout from a single sensor glitch."
+        
+        # Debounce counter should have incremented
+        assert self.monitor._runout_false_count == 1
+        # prev should still be True (not updated yet)
+        assert self.monitor.prev_toolhead_sensor_state is True
 
     def test_paused_state_resets_baseline(self):
         """When print is paused, baseline should be reset to None."""
@@ -1236,6 +1291,8 @@ class TestMonitorErrorHandling:
         self.reactor.NEVER = float('inf')
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.print_stats = Mock()
         self.save_vars = Mock()
         
@@ -1338,6 +1395,8 @@ class TestAutoRecoveryLogic:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.print_stats = Mock()
         self.save_vars = Mock()
         
@@ -1406,6 +1465,8 @@ class TestRunoutHandlingEdgeCases:
         self.reactor = Mock()
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.print_stats = Mock()
         self.save_vars = Mock()
         
@@ -1501,13 +1562,16 @@ class TestRunoutHandlingEdgeCases:
 class TestMonitorRunoutEdgeCases:
     """Edge cases and error handling paths for _monitor_runout."""
 
-    def _build_monitor(self, print_state='printing', tool_index=0, sensor_state=True):
+    def _build_monitor(self, print_state='printing', tool_index=0, sensor_state=True,
+                       runout_debounce_count=1):
         self.printer = Mock()
         self.gcode = Mock()
         self.reactor = Mock()
         self.reactor.NEVER = 999
         self.endless_spool = Mock()
         self.manager = Mock()
+        self.manager.state = Mock()
+        self.manager.state.get = lambda key, default=None: self.save_vars.allVariables.get(key, default)
         self.manager.toolchange_in_progress = False
         self.manager.runout_handling_in_progress = False
         self.manager.get_switch_state = Mock(return_value=sensor_state)
@@ -1535,6 +1599,7 @@ class TestMonitorRunoutEdgeCases:
             self.reactor,
             self.endless_spool,
             self.manager,
+            runout_debounce_count=runout_debounce_count,
         )
         return monitor
 
@@ -1680,6 +1745,289 @@ class TestMonitorRunoutEdgeCases:
         assert result == 6.0
         log_messages = [c[0][0] for c in self.gcode.respond_info.call_args_list]
         assert any("monitor error" in msg.lower() for msg in log_messages)
+
+
+class TestRunoutDebounce:
+    """
+    Test debounce logic for runout detection.
+
+    The debounce requires N consecutive sensor-absent readings before
+    confirming a runout event, filtering out transient glitches.
+    """
+
+    def _make_monitor(self, debounce_count=3):
+        """Create a RunoutMonitor wired for active printing with debounce."""
+        printer = Mock()
+        gcode = Mock()
+        reactor = Mock()
+        reactor.monotonic = Mock(return_value=0.0)
+        endless_spool = Mock()
+        manager = Mock()
+        manager.toolchange_in_progress = False
+        manager.state = Mock()
+        manager.state.get = lambda key, default=None: save_vars.allVariables.get(key, default)
+
+        print_stats = Mock()
+        print_stats.get_status = Mock(return_value={
+            'state': 'printing',
+            'filename': 'test.gcode'
+        })
+
+        save_vars = Mock()
+        save_vars.allVariables = {
+            'ace_current_index': 0,
+            'ace_filament_pos': 'nozzle',
+            'ace_endless_spool_enabled': False,
+        }
+
+        def lookup(name, default=None):
+            if name == 'print_stats':
+                return print_stats
+            if name == 'save_variables':
+                return save_vars
+            return default
+
+        printer.lookup_object = Mock(side_effect=lookup)
+        manager.get_switch_state = Mock(return_value=True)
+
+        monitor = RunoutMonitor(
+            printer, gcode, reactor, endless_spool, manager,
+            runout_debounce_count=debounce_count,
+        )
+        monitor.runout_detection_active = True
+        monitor.prev_toolhead_sensor_state = True
+        monitor.last_printing_active = True
+        monitor.last_print_state = 'printing'
+
+        return monitor, manager, gcode
+
+    # --- constructor validation ---
+
+    def test_debounce_count_stored(self):
+        """Constructor stores configurable debounce count."""
+        mon, _, _ = self._make_monitor(debounce_count=5)
+        assert mon.runout_debounce_count == 5
+        assert mon._runout_false_count == 0
+
+    def test_debounce_count_minimum_clamped_to_1(self):
+        """Debounce count below 1 is clamped to 1 (no-debounce)."""
+        mon, _, _ = self._make_monitor(debounce_count=0)
+        assert mon.runout_debounce_count == 1
+
+    def test_debounce_count_negative_clamped_to_1(self):
+        """Negative debounce count is clamped to 1."""
+        mon, _, _ = self._make_monitor(debounce_count=-5)
+        assert mon.runout_debounce_count == 1
+
+    # --- counter accumulation ---
+
+    def test_single_false_does_not_trigger_with_debounce_3(self):
+        """One absent reading should NOT trigger runout with debounce=3."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+        mgr.get_switch_state.return_value = False
+
+        mon._monitor_runout(0.0)
+
+        assert mon._runout_false_count == 1
+        assert mon.prev_toolhead_sensor_state is True  # unchanged
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert not any('runout detected' in m.lower() for m in log_messages)
+
+    def test_two_false_does_not_trigger_with_debounce_3(self):
+        """Two consecutive absent readings should NOT trigger with debounce=3."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+        mgr.get_switch_state.return_value = False
+
+        mon._monitor_runout(0.0)
+        mon._monitor_runout(0.05)
+
+        assert mon._runout_false_count == 2
+        assert mon.prev_toolhead_sensor_state is True
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert not any('runout detected' in m.lower() for m in log_messages)
+
+    def test_three_false_triggers_with_debounce_3(self):
+        """Three consecutive absent readings SHOULD trigger with debounce=3."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+        mgr.get_switch_state.return_value = False
+
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0), \
+             patch('ace.runout_monitor.get_local_slot', return_value=0), \
+             patch('ace.runout_monitor.ACE_INSTANCES') as mock_inst:
+            mock_inst.get = Mock(return_value=None)
+
+            mon._monitor_runout(0.0)
+            mon._monitor_runout(0.05)
+            mon._monitor_runout(0.10)
+
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert any('runout detected' in m.lower() for m in log_messages)
+        # Counter should be reset after triggering
+        assert mon._runout_false_count == 0
+        assert mon.prev_toolhead_sensor_state is False
+
+    # --- counter reset on sensor recovery ---
+
+    def test_counter_resets_when_sensor_returns_to_present(self):
+        """If sensor goes True again mid-debounce, counter resets to 0."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+
+        # Two absent readings
+        mgr.get_switch_state.return_value = False
+        mon._monitor_runout(0.0)
+        mon._monitor_runout(0.05)
+        assert mon._runout_false_count == 2
+
+        # Sensor recovers (glitch over)
+        mgr.get_switch_state.return_value = True
+        mon._monitor_runout(0.10)
+
+        assert mon._runout_false_count == 0
+        assert mon.prev_toolhead_sensor_state is True
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert not any('runout detected' in m.lower() for m in log_messages)
+
+    def test_counter_resets_on_baseline_none(self):
+        """Counter resets when baseline is set to None (pause/stop)."""
+        mon, mgr, _ = self._make_monitor(debounce_count=3)
+        mon._runout_false_count = 2
+
+        # Simulate pause resetting baseline
+        mon.prev_toolhead_sensor_state = None
+        mon._runout_false_count = 0  # As production code does
+
+        assert mon._runout_false_count == 0
+
+    # --- debounce_count=1 is immediate ---
+
+    def test_debounce_1_triggers_immediately(self):
+        """With debounce_count=1, a single absent reading triggers runout."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=1)
+        mgr.get_switch_state.return_value = False
+
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0), \
+             patch('ace.runout_monitor.get_local_slot', return_value=0), \
+             patch('ace.runout_monitor.ACE_INSTANCES') as mock_inst:
+            mock_inst.get = Mock(return_value=None)
+            mon._monitor_runout(0.0)
+
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert any('runout detected' in m.lower() for m in log_messages)
+
+    # --- higher debounce values ---
+
+    def test_debounce_5_requires_5_readings(self):
+        """With debounce_count=5, exactly 5 absent readings needed."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=5)
+        mgr.get_switch_state.return_value = False
+
+        # 4 readings - should not trigger
+        for i in range(4):
+            mon._monitor_runout(i * 0.05)
+        assert mon._runout_false_count == 4
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert not any('runout detected' in m.lower() for m in log_messages)
+
+        # 5th reading - should trigger
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0), \
+             patch('ace.runout_monitor.get_local_slot', return_value=0), \
+             patch('ace.runout_monitor.ACE_INSTANCES') as mock_inst:
+            mock_inst.get = Mock(return_value=None)
+            mon._monitor_runout(0.20)
+
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert any('runout detected' in m.lower() for m in log_messages)
+
+    # --- glitch patterns ---
+
+    def test_intermittent_glitch_never_triggers(self):
+        """Alternating True/False (noisy sensor) should never trigger."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+
+        for i in range(20):
+            # Alternate: False, True, False, True, ...
+            mgr.get_switch_state.return_value = (i % 2 == 1)
+            mon._monitor_runout(i * 0.05)
+
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert not any('runout detected' in m.lower() for m in log_messages)
+
+    def test_brief_glitch_then_real_runout(self):
+        """Brief glitch (1 absent) then filament returns, then real runout."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+
+        # Brief glitch: 1 absent
+        mgr.get_switch_state.return_value = False
+        mon._monitor_runout(0.0)
+        assert mon._runout_false_count == 1
+
+        # Recovers
+        mgr.get_switch_state.return_value = True
+        mon._monitor_runout(0.05)
+        assert mon._runout_false_count == 0
+
+        # Stable present for a while
+        mon._monitor_runout(0.10)
+        mon._monitor_runout(0.15)
+
+        # Real runout - 3 consecutive absent
+        mgr.get_switch_state.return_value = False
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0), \
+             patch('ace.runout_monitor.get_local_slot', return_value=0), \
+             patch('ace.runout_monitor.ACE_INSTANCES') as mock_inst:
+            mock_inst.get = Mock(return_value=None)
+            mon._monitor_runout(0.20)
+            mon._monitor_runout(0.25)
+            mon._monitor_runout(0.30)
+
+        log_messages = [c[0][0] for c in gcode.respond_info.call_args_list]
+        assert any('runout detected' in m.lower() for m in log_messages)
+
+    def test_debounce_counter_reset_on_print_stop(self):
+        """Debounce counter should reset when print stops."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+
+        # Start accumulating absent readings
+        mgr.get_switch_state.return_value = False
+        mon._monitor_runout(0.0)
+        mon._monitor_runout(0.05)
+        assert mon._runout_false_count == 2
+
+        # Now print stops
+        mon.printer.lookup_object.side_effect = lambda name, default=None: {
+            'print_stats': Mock(get_status=Mock(return_value={'state': 'complete'})),
+            'save_variables': Mock(allVariables={
+                'ace_current_index': 0,
+                'ace_filament_pos': 'nozzle',
+            }),
+        }.get(name, default)
+
+        mon._monitor_runout(0.10)
+
+        assert mon._runout_false_count == 0
+        assert mon.prev_toolhead_sensor_state is None
+
+    def test_debounce_counter_reset_on_pause(self):
+        """Debounce counter should reset when print pauses."""
+        mon, mgr, gcode = self._make_monitor(debounce_count=3)
+
+        # Start accumulating
+        mgr.get_switch_state.return_value = False
+        mon._monitor_runout(0.0)
+        assert mon._runout_false_count == 1
+
+        # Print pauses
+        mon.printer.lookup_object.side_effect = lambda name, default=None: {
+            'print_stats': Mock(get_status=Mock(return_value={'state': 'paused'})),
+            'save_variables': Mock(allVariables={
+                'ace_current_index': 0,
+                'ace_filament_pos': 'nozzle',
+            }),
+        }.get(name, default)
+
+        mon._monitor_runout(0.05)
+
+        assert mon._runout_false_count == 0
 
 
 if __name__ == '__main__':

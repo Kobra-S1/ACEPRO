@@ -1474,6 +1474,8 @@ class TestQueueManagement:
                 instance_num=0,
                 ace_enabled=False
             )
+            # Enable so queue tests can actually enqueue requests
+            self.manager._ace_pro_enabled = True
 
     def test_high_priority_dequeued_first(self):
         """High priority requests should be processed before normal."""

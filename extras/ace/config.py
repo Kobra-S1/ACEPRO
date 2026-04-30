@@ -6,6 +6,7 @@ that don't depend on specific instances.
 """
 
 import re
+from enum import Enum
 
 
 # ========== ACE Instance Constants ==========
@@ -41,6 +42,51 @@ RFID_STATE_IDENTIFYING = 3     # Currently identifying tag
 # When enabled, ACE hardware status updates (from RFID or manual changes)
 # automatically sync material/color data to Klipper inventory
 RFID_INVENTORY_SYNC_ENABLED = True  # Default: enabled
+
+
+class AceSlotStateMachineState(str, Enum):
+    """ACE hardware per-slot state machine states (from get_status slot.status)."""
+
+    EMPTY = "empty"
+    READY = "ready"
+    FEEDING = "feeding"
+    UNWINDING = "unwinding"
+    SHIFTING = "shifting"
+    GEAR_ERR = "gear_err"
+    PRELOAD = "preload"
+    IDENTIFYING = "identifying"
+    TMC_ERR = "tmc_err"
+
+
+ACE_SLOT_STATE_MACHINE_STATE_BY_CODE = {
+    0: AceSlotStateMachineState.EMPTY,
+    1: AceSlotStateMachineState.READY,
+    2: AceSlotStateMachineState.FEEDING,
+    3: AceSlotStateMachineState.UNWINDING,
+    4: AceSlotStateMachineState.SHIFTING,
+    5: AceSlotStateMachineState.GEAR_ERR,
+    6: AceSlotStateMachineState.PRELOAD,
+    7: AceSlotStateMachineState.IDENTIFYING,
+    8: AceSlotStateMachineState.TMC_ERR,
+}
+
+
+def normalize_ace_slot_state(raw_state, default=AceSlotStateMachineState.EMPTY.value):
+    """
+    Normalize ACE slot state-machine state from numeric code or string to a lowercase string.
+
+    Returns:
+        str: normalized state name (e.g. "ready"), or a best-effort lowercase string.
+    """
+    if raw_state is None:
+        return default
+    if isinstance(raw_state, AceSlotStateMachineState):
+        return raw_state.value
+    if isinstance(raw_state, int):
+        state = ACE_SLOT_STATE_MACHINE_STATE_BY_CODE.get(raw_state)
+        return state.value if state else str(raw_state)
+    return str(raw_state).strip().lower()
+
 
 # Global registry for instances (populated at load time)
 ACE_INSTANCES = {}
@@ -95,9 +141,64 @@ def read_ace_config(config):
     ace_config["purge_multiplier"] = config.getfloat("purge_multiplier", "1.0")
     ace_config["pre_cut_retract_length"] = config.getint("pre_cut_retract_length", "2")
     ace_config["status_debug_logging"] = config.getboolean("status_debug_logging", False)
+    ace_config["runout_debounce_count"] = config.getint("runout_debounce_count", 1)
     ace_config["ace_connection_supervision"] = config.getboolean(
         "ace_connection_supervision", True
     )
+    # Orca filament sync via Moonraker database namespace "lane_data"
+    # Enabled by default to keep Orca lane data up to date. Set to False to opt-out
+    # of Moonraker writes.
+    ace_config["moonraker_lane_sync_enabled"] = config.getboolean(
+        "moonraker_lane_sync_enabled", True
+    )
+    ace_config["moonraker_lane_sync_url"] = config.get(
+        "moonraker_lane_sync_url", "http://127.0.0.1:7125"
+    )
+    ace_config["moonraker_lane_sync_namespace"] = config.get(
+        "moonraker_lane_sync_namespace", "lane_data"
+    )
+    ace_config["moonraker_lane_sync_api_key"] = config.get(
+        "moonraker_lane_sync_api_key", None
+    )
+    ace_config["moonraker_lane_sync_timeout"] = config.getfloat(
+        "moonraker_lane_sync_timeout", 2.0
+    )
+    # Handling for placeholder/unknown material labels when publishing to lane_data.
+    # - passthrough: publish value as-is
+    # - empty:       publish as empty material
+    # - map:         publish moonraker_lane_sync_unknown_material_map_to
+    ace_config["moonraker_lane_sync_unknown_material_mode"] = config.get(
+        "moonraker_lane_sync_unknown_material_mode", "empty"
+    ).strip().lower()
+    if ace_config["moonraker_lane_sync_unknown_material_mode"] not in (
+        "passthrough",
+        "empty",
+        "map",
+    ):
+        ace_config["moonraker_lane_sync_unknown_material_mode"] = "empty"
+    ace_config["moonraker_lane_sync_unknown_material_markers"] = config.get(
+        "moonraker_lane_sync_unknown_material_markers", "???,unknown,n/a,none"
+    )
+    ace_config["moonraker_lane_sync_unknown_material_map_to"] = config.get(
+        "moonraker_lane_sync_unknown_material_map_to", ""
+    )
+    ace_config["tangle_detection"] = config.getboolean(
+        "tangle_detection", False
+    )
+    ace_config["tangle_detection_length"] = config.getfloat(
+        "tangle_detection_length", 15.0
+    )
+    # Persistence mode controls when set_and_save() actually writes to disk.
+    # - deferred:  set_and_save() behaves like set() — RAM + dirty mark only;
+    #              disk write is deferred until flush() (print end / disconnect).
+    #              Safest option: never blocks the Klipper reactor mid-print.
+    # - immediate: set_and_save() writes to disk right away (legacy behaviour).
+    #              Suitable if you want key state persisted even without a clean shutdown.
+    ace_config["persistence_mode"] = config.get(
+        "persistence_mode", "deferred"
+    ).strip().lower()
+    if ace_config["persistence_mode"] not in ("deferred", "immediate"):
+        ace_config["persistence_mode"] = "deferred"
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"
     ace_config["feed_speed"] = config.get("feed_speed", "60")
@@ -258,51 +359,6 @@ def create_status_dict(slot_count=SLOTS_PER_ACE):
             } for i in range(slot_count)
         ]
     }
-
-
-def set_and_save_variable(printer, gcode, varname, value):
-    """
-    Set and persist a save_variable to Klipper's save_variables.
-
-    Converts Python types to Klipper-compatible format:
-    - Booleans: True/False (uppercase, Python literals)
-    - Strings: Wrapped in single quotes + double quotes for proper escaping
-    - Dicts/Lists: JSON serialized
-    - Numbers: String representation
-
-    Args:
-        printer: Klipper printer object
-        gcode: Klipper gcode object
-        varname: Variable name (string)
-        value: Value to save (any JSON-serializable type)
-    """
-    import json
-
-    save_vars = printer.lookup_object("save_variables")
-    variables = save_vars.allVariables
-
-    variables[varname] = value
-
-    if isinstance(value, bool):
-        formatted_value = "True" if value else "False"
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE={formatted_value}"
-        )
-    elif isinstance(value, str):
-        # Match working manager.py version: wrap in single quotes + double quotes
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE='\"{value}\"'"
-        )
-    elif isinstance(value, (dict, list)):
-        # Dicts/Lists: JSON serialized
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE={json.dumps(value)}"
-        )
-    else:
-        # Numbers and other types
-        gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={varname} VALUE={value}"
-        )
 
 
 def parse_instance_config(config_value, instance_num, param_name):

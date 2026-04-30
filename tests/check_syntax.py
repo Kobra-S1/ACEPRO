@@ -57,10 +57,12 @@ def main():
     
     # Find all Python files
     extras_files = sorted(glob.glob('extras/**/*.py', recursive=True))
+    klipperscreen_files = sorted(glob.glob('KlipperScreen/**/*.py', recursive=True))
     test_files = sorted(glob.glob('tests/**/*.py', recursive=True))
-    all_files = extras_files + test_files
+    all_files = extras_files + klipperscreen_files + test_files
     
     print(f"{BLUE}Checking {len(extras_files)} files in extras/{NC}")
+    print(f"{BLUE}Checking {len(klipperscreen_files)} files in KlipperScreen/{NC}")
     print(f"{BLUE}Checking {len(test_files)} files in tests/{NC}")
     print(f"{BLUE}Total: {len(all_files)} Python files{NC}")
     print()
