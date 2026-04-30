@@ -1,6 +1,6 @@
 <div align="center">
 
-# ACE Pro - A Klipper driver for the Anycubic Color Engine Pro
+# ACE Pro / ACE2 Pro - A Klipper driver for the Anycubic Color Engine Pro (1+2)
 
 </div>
 
@@ -13,6 +13,8 @@ This is a fork of szkrisz' ACEPRO Klipper driver.
 ACE temperature sensor integration adapted from [agrloki/ValgACE](https://github.com/agrloki/ValgACE).
 
 This Anycubic-centric fork has structurally diverged from the original and focuses on:
+- Supports classic ACEPRO as also the new ACE2 PRO 
+- Supports mixed ACE + ACE2 PRO support
 - Supporting multiple ACE units, assigns ACE instance IDs based on USB topology
 - Adds RFID support (to automatically populate inventory)
 - Adds more Endless-Spool matching modes (exact, material only or just use the next available spool)
@@ -50,6 +52,8 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 
 ### Core Functionality
 - ✅ **Multi-ACE Pro Support**: Multiple ACE units support (tested with 3 ACEPRO units for 12-color printing, but more should be possible)
+- ✅ **ACE and ACE 2 Support**: Classic ACE PRO (Gen1) as also new ACE2 PRO are supported
+- ✅ **Mixed ACE1 and ACE 2 Support**: Both generations (ACE and ACE2) can be used together
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
 - ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
@@ -139,6 +143,9 @@ extras/
 ### ACE Pro USB Pin Configuration / Adapter
 ![Connector Pinout](/img/connector.png)
 Connect the ACE Pro to a regular USB port and configure the sensor pins according to your board layout.
+If using a ACE2 PRO, you need the KS1/K3 Adapter cable which comes with the KS1/K3 ACE2 kit.
+The ACE2PRO is using RS-485 nativly, for connecting it to a KS1 or K3 (and RPi), a converter to USB is required, which Anycubic provides as part of the ACE2 KS1/K3 kit.
+IMPORTANT: If you have a Kobra-X or Anycubic KS1-MAX ACE2 PRO cable, that wont work! You need then to buy first a KS1/K3 ACE2 conversion cable / RS485-2-USB Adapter
 ![USB Adapter ((c) Gwebster)](/img/Ace2USB_gwebster.png)
 
 Other variations to get a standard USB connection to the ACE can be found on printables.com:
@@ -1476,7 +1483,6 @@ Use an N-in-1 splitter matching your total tool count:
 - 1 ACE (4 tools) → 4-in-1 splitter
 - 2 ACE (8 tools) → 8-in-1 splitter
 - 3 ACE (12 tools) → 12-in-1 splitter
-- 4 ACE (16 tools) → 16-in-1 splitter
 
 
 

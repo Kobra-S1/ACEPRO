@@ -104,7 +104,7 @@
                             </div>
                             <div class="control-group inline" v-if="dryerStatus.status === 'drying'">
                                 <span class="label">{{ t('dryer.remainingTime') || 'Remaining' }}:</span>
-                                <span class="value" style="color: #4CAF50;">{{ Math.floor((dryerStatus.remain_time || 0) / 60) }} Min</span>
+                                <span class="value" style="color: #4CAF50;">{{ formatTime(Math.round(dryerStatus.remain_time || 0)) }}</span>
                             </div>
                             <div class="button-group tight">
                                 <button @click="startDrying" :disabled="dryerStatus.status === 'drying'" class="btn btn-primary">
