@@ -482,6 +482,12 @@ class AceInstance:
 
     def _disable_feed_assist(self, slot_index):
         """Disable feed assist."""
+        if slot_index < 0:
+            # Feed assist is never active on a negative slot index; nothing to disable.
+            # This guards against callers that pass _feed_assist_index directly when
+            # feed assist was already off (-1), which would otherwise bypass the check
+            # below and send a spurious STOP_FEED_OR_ROLLBACK command.
+            return
         if self._feed_assist_index != slot_index:
             logging.warning(
                 f"ACE[{self.instance_num}]: Feed assist not active on slot {slot_index}"
