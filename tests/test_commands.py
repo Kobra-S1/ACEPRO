@@ -6,8 +6,9 @@ without critical errors. Uses mocks for hardware dependencies.
 """
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, MagicMock, patch, ANY
 import ace.commands
+from ace.protocol_ace2 import ACE2_COMMANDS_BY_NAME
 from ace.config import ACE_INSTANCES, INSTANCE_MANAGERS
 
 
@@ -62,6 +63,10 @@ def mock_ace_instance():
         for _ in range(4)
     ]
     instance.send_request = Mock()
+    instance.protocol = Mock()
+    instance.protocol.build_debug_request = Mock(
+        side_effect=lambda method, params: {"method": method, "params": params}
+    )
     instance.serial_mgr = Mock()
     instance.serial_mgr.reconnect = Mock()
     instance._feed = Mock()
@@ -73,6 +78,23 @@ def mock_ace_instance():
     instance._dryer_active = False
     instance._dryer_temperature = 0
     instance._dryer_duration = 0
+
+    def start_drying(temp, duration, callback=None):
+        instance._dryer_active = True
+        instance._dryer_temperature = temp
+        instance._dryer_duration = duration
+        request = {"method": "drying", "params": {"temp": temp, "duration": duration}}
+        instance.send_request(request, callback)
+
+    def stop_drying(callback=None):
+        instance._dryer_active = False
+        instance._dryer_temperature = 0
+        instance._dryer_duration = 0
+        request = {"method": "drying_stop"}
+        instance.send_request(request, callback)
+
+    instance.start_drying = Mock(side_effect=start_drying)
+    instance.stop_drying = Mock(side_effect=stop_drying)
     instance.reset_persistent_inventory = Mock()
     instance.reset_feed_assist_state = Mock()
     return instance
@@ -879,25 +901,25 @@ class TestCommandSmoke:
         """Test ACE_START_DRYING for single instance."""
         mock_gcmd.get_int = Mock(side_effect=[0, 50, 240])
         ace.commands.cmd_ACE_START_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].start_drying.called
 
     def test_cmd_ACE_START_DRYING_all(self, mock_gcmd, setup_mocks):
         """Test ACE_START_DRYING for all instances."""
         mock_gcmd.get_int = Mock(side_effect=[None, 50, 240])
         ace.commands.cmd_ACE_START_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].start_drying.called
 
     def test_cmd_ACE_STOP_DRYING_single(self, mock_gcmd, setup_mocks):
         """Test ACE_STOP_DRYING for single instance."""
         mock_gcmd.get_int = Mock(return_value=0)
         ace.commands.cmd_ACE_STOP_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].stop_drying.called
 
     def test_cmd_ACE_STOP_DRYING_all(self, mock_gcmd, setup_mocks):
         """Test ACE_STOP_DRYING for all instances."""
         mock_gcmd.get_int = Mock(return_value=None)
         ace.commands.cmd_ACE_STOP_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].stop_drying.called
 
 
 class TestDryingCommands:
@@ -1122,36 +1144,20 @@ class TestDryingCommands:
         assert ACE_INSTANCES[0]._dryer_start_logged is False
 
     def test_start_drying_sends_correct_request(self, mock_gcmd, setup_mocks):
-        """Test START_DRYING sends properly formatted request."""
+        """Test START_DRYING delegates temperature and duration to the instance."""
         mock_gcmd.get_int = Mock(side_effect=[0, 60, 300])
-        
-        captured_request = None
-        def capture_request(request, callback):
-            nonlocal captured_request
-            captured_request = request
-        
-        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_request)
+
         ace.commands.cmd_ACE_START_DRYING(mock_gcmd)
-        
-        assert captured_request is not None
-        assert captured_request["method"] == "drying"
-        assert captured_request["params"]["temp"] == 60
-        assert captured_request["params"]["duration"] == 300
+
+        ACE_INSTANCES[0].start_drying.assert_called_once_with(60, 300, ANY)
 
     def test_stop_drying_sends_correct_request(self, mock_gcmd, setup_mocks):
-        """Test STOP_DRYING sends properly formatted request."""
+        """Test STOP_DRYING delegates to the instance stop method."""
         mock_gcmd.get_int = Mock(return_value=0)
-        
-        captured_request = None
-        def capture_request(request, callback):
-            nonlocal captured_request
-            captured_request = request
-        
-        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_request)
+
         ace.commands.cmd_ACE_STOP_DRYING(mock_gcmd)
-        
-        assert captured_request is not None
-        assert captured_request["method"] == "drying_stop"
+
+        ACE_INSTANCES[0].stop_drying.assert_called_once_with(ANY)
 
 
     def test_cmd_ACE_ENABLE_FEED_ASSIST(self, mock_gcmd, setup_mocks):
@@ -1216,7 +1222,39 @@ class TestDryingCommands:
         mock_gcmd.get = Mock(side_effect=["get_status", "{}"])
         
         ace.commands.cmd_ACE_DEBUG(mock_gcmd)
+        ACE_INSTANCES[0].protocol.build_debug_request.assert_called_once_with(
+            "get_status", {}
+        )
         assert ACE_INSTANCES[0].send_request.called
+
+    def test_cmd_ACE_DEBUG_bytes_response(self, mock_gcmd, setup_mocks):
+        """Test ACE_DEBUG callback safely serializes bytes in response."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})
+        mock_gcmd.get = Mock(side_effect=["get_status", "{}"])
+
+        captured_callback = None
+
+        def capture_callback(_request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+
+        ace.commands.cmd_ACE_DEBUG(mock_gcmd)
+        assert captured_callback is not None
+
+        captured_callback({"raw_fields": {1: [(2, b"V1.1.24")]}})
+
+        assert mock_gcmd.respond_info.called
+        assert "Debug response:" in mock_gcmd.respond_info.call_args[0][0]
+
+    def test_protocol_catalog_contains_ace2_status_command(self, setup_mocks):
+        """Test the proto-derived ACE2 catalog exposes key operational commands."""
+        status_spec = ACE2_COMMANDS_BY_NAME["GET_STATUS"]
+
+        assert status_spec.code == 6
+        assert status_spec.tier == "operational"
+        assert status_spec.response_type == "StatusResponse"
 
     def test_cmd_ACE_SMART_UNLOAD(self, mock_gcmd, setup_mocks):
         """Test ACE_SMART_UNLOAD."""

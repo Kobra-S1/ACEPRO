@@ -11,7 +11,6 @@ Responsibilities:
 
 import serial
 import json
-import struct
 import threading
 import queue
 import logging
@@ -19,6 +18,9 @@ import traceback
 import re
 from serial import SerialException
 import serial.tools.list_ports
+
+from .protocol import transport_description_matches
+from .protocol_ace1 import AceJsonProtocolAdapter
 
 
 class AceSerialManager:
@@ -35,7 +37,8 @@ class AceSerialManager:
             instance_num=0,
             ace_enabled=True,
             status_debug_logging=False,
-            supervision_enabled=True):
+            supervision_enabled=True,
+            protocol=None):
         """
         Initialize serial manager.
 
@@ -49,11 +52,14 @@ class AceSerialManager:
         """
         self._port = None
         self._usb_location = None
+        self._port_description = None
         self._baud = None
+        self.serial_name = None
 
         self.gcode = gcode
         self.reactor = reactor
         self.instance_num = instance_num
+        self.protocol = protocol or AceJsonProtocolAdapter()
 
         self._serial = None
         self._connected = False
@@ -79,6 +85,8 @@ class AceSerialManager:
         self.heartbeat_interval = 1.0
         self.heartbeat_callback = None
         self.on_connect_callback = None
+        self.on_connect_callbacks = []
+        self.unsolicited_response_callback = None
 
         self.timeout_s = self.DEFAULT_TIMEOUT_S
         self.timeout_multiplier = 2
@@ -211,7 +219,7 @@ class AceSerialManager:
         matches = []
 
         for portinfo in serial.tools.list_ports.comports():
-            if device_name not in portinfo.description:
+            if not transport_description_matches(device_name, portinfo.description):
                 continue
 
             # Extract USB location from hwid
@@ -284,6 +292,12 @@ class AceSerialManager:
             return matches[instance][2]
         return None
 
+    def find_connection_port(self, instance=0):
+        """Find the physical serial port for this logical ACE instance."""
+        transport = self.protocol.get_transport_spec()
+        port_index = 0 if transport.shared_bus else instance
+        return self.find_com_port(transport.port_description, port_index)
+
     def _get_usb_location_for_port(self, port):
         """Get USB location string for a specific port."""
         for portinfo in serial.tools.list_ports.comports():
@@ -296,6 +310,13 @@ class AceSerialManager:
                 if m2:
                     return f"acm.{m2.group(1)}"
                 return portinfo.device
+        return None
+
+    def _get_port_description_for_port(self, port):
+        """Get human-readable USB port description for a specific port."""
+        for portinfo in serial.tools.list_ports.comports():
+            if portinfo.device == port:
+                return str(portinfo.description or "")
         return None
 
     def get_usb_location(self):
@@ -522,7 +543,8 @@ class AceSerialManager:
 
     def auto_connect(self, instance, baud):
         """Attempt to connect to ACE device."""
-        port = self.find_com_port('ACE', instance)
+        transport = self.protocol.get_transport_spec()
+        port = self.find_connection_port(instance)
         if port is None:
             self.gcode.respond_info(f'ACE[{instance}]: No ACE device found')
             return False
@@ -530,6 +552,7 @@ class AceSerialManager:
         self._port = port
         self._baud = baud
         self._usb_location = self._get_usb_location_for_port(port)
+        self._port_description = self._get_port_description_for_port(port)
 
         logging.info('Try connecting to ' + str(port))
         connected = self.connect(port, baud)
@@ -546,17 +569,19 @@ class AceSerialManager:
         )
 
         # Validate we're connected to the correct physical ACE
-        if not self._validate_topology_position(instance):
+        if transport.topology_validation and not self._validate_topology_position(instance):
             self.gcode.respond_info(
                 f'ACE[{instance}]: Topology validation failed - disconnecting and retrying'
             )
             self.disconnect()
             return False
 
-        self.send_request(
-            request={"method": "get_info"},
-            callback=lambda response: self._log_info_response(response)
-        )
+        # Shared-bus transports defer info queries to the bus session
+        if not transport.shared_bus:
+            self.send_request(
+                request=self.protocol.build_get_info_request(),
+                callback=lambda response: self._log_info_response(response)
+            )
 
         return True
 
@@ -564,27 +589,69 @@ class AceSerialManager:
         """
         Log get_info response with port and USB topology context.
         """
-        port = self.serial_name or self._port or "unknown"
+        port = getattr(self, "serial_name", None) or self._port or "unknown"
         topo = self._usb_location or "unknown"
+        raw_info = json.dumps(response, sort_keys=True, default=str)
         self.gcode.respond_info(
-            f"ACE[{self.instance_num}]: {response} (port={port}, usb={topo})"
+            f"ACE[{self.instance_num}]: GET_INFO raw_info: {raw_info} (port={port}, usb={topo})"
         )
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        if not isinstance(result, dict):
+            result = {}
+
+        raw_fields = result.get("raw_fields")
+        if raw_fields is not None:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: GET_INFO raw_fields: {raw_fields}"
+            )
+
+        # Normalize keys across ACE1/ACE2 payload variants.
+        model = result.get("model") or "n/a"
+        firmware = result.get("firmware") or result.get("version") or "n/a"
+        boot_firmware = result.get("boot_firmware") or result.get("boot_version") or "n/a"
+        code = response.get("code", "n/a") if isinstance(response, dict) else "n/a"
+        msg = response.get("msg", "n/a") if isinstance(response, dict) else "n/a"
+
+        self.gcode.respond_info(
+            "ACE[%s]: GET_INFO summary: model=%s fw=%s boot=%s code=%s msg=%s (port=%s usb=%s)"
+            % (
+                self.instance_num,
+                model,
+                firmware,
+                boot_firmware,
+                code,
+                msg,
+                port,
+                topo,
+            )
+        )
+
         try:
-            result = response.get("result", {})
-            if isinstance(result, dict):
-                self.device_info = result
+            self.device_info = result if isinstance(result, dict) else {}
         except Exception:
             self.device_info = {}
 
+    def handle_info_response(self, response):
+        """Handle one get_info response and store normalized device metadata."""
+        self._log_info_response(response)
+
     def connect(self, port, baud):
         """
-        Connect to serial device.
-
-        Args:
             port: Serial port path (e.g., "/dev/ttyACM0")
             baud: Baud rate
 
         Returns:
+
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: GET_INFO raw_info: {response} (port={port}, usb={topo})"
+        )
+
+        raw_fields = result.get("raw_fields")
+        if raw_fields is not None:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: GET_INFO raw_fields: {raw_fields}"
+            )
             bool: True if successfully connected
         """
         try:
@@ -624,12 +691,21 @@ class AceSerialManager:
                 self._comm_unsolicited_timestamps = []
 
                 # Call on_connect callback if registered
-                if self.on_connect_callback:
+                callbacks = []
+                if self.on_connect_callback is not None:
+                    callbacks.append(self.on_connect_callback)
+                for callback in self.on_connect_callbacks:
+                    if callback not in callbacks:
+                        callbacks.append(callback)
+
+                for callback in callbacks:
                     try:
-                        self.on_connect_callback()
+                        callback()
                     except Exception as e:
                         logging.warning(
-                            f"ACE[{self.instance_num}]: on_connect callback error: {e}"
+                            "ACE[%s]: on_connect callback error: %s",
+                            self.instance_num,
+                            e,
                         )
 
                 return True
@@ -891,7 +967,8 @@ class AceSerialManager:
             )
             return
         try:
-            self._queue.put([request, callback], timeout=1)
+            normalized_request = self.protocol.normalize_request(request)
+            self._queue.put([normalized_request, callback], timeout=1)
         except queue.Full:
             self.gcode.respond_info(f"ACE[{self.instance_num}]: Request queue full!")
 
@@ -909,7 +986,8 @@ class AceSerialManager:
             )
             return
         try:
-            self._hp_queue.put([request, callback], timeout=1)
+            normalized_request = self.protocol.normalize_request(request)
+            self._hp_queue.put([normalized_request, callback], timeout=1)
         except queue.Full:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: High-priority queue full!"
@@ -946,12 +1024,7 @@ class AceSerialManager:
                 request['id'] = self._request_id
                 self._request_id += 1
 
-        payload = json.dumps(request).encode('utf-8')
-        data = bytearray([0xFF, 0xAA])
-        data += struct.pack('<H', len(payload))
-        data += payload
-        data += struct.pack('<H', self._calc_crc(payload))
-        data += b'\xFE'
+        data = self.protocol.serialize_request_frame(request, self._calc_crc)
 
         try:
             with self._serial_lock:
@@ -1055,6 +1128,12 @@ class AceSerialManager:
             callback: Function() called after ACE connects
         """
         self.on_connect_callback = callback
+        if callback and callback not in self.on_connect_callbacks:
+            self.on_connect_callbacks.append(callback)
+
+    def set_unsolicited_response_callback(self, callback):
+        """Set callback for handling unsolicited responses."""
+        self.unsolicited_response_callback = callback
 
     def start_heartbeat(self):
         """
@@ -1062,6 +1141,12 @@ class AceSerialManager:
 
         First request sent immediately, then repeated at heartbeat_interval.
         """
+        if self.protocol.get_transport_spec().shared_bus:
+            logging.info(
+                "ACE[%s]: Heartbeat deferred for shared-bus transport until response demultiplexing exists",
+                self.instance_num,
+            )
+            return
         if self.heartbeat_timer is None:
             # Send first status request immediately
             self._send_heartbeat_request()
@@ -1105,7 +1190,7 @@ class AceSerialManager:
 
     def _send_heartbeat_request(self):
         """Send a status request to the ACE device via the queue."""
-        request = {"method": "get_status"}
+        request = self.protocol.build_get_status_request()
 
         def _heartbeat_response(response):
             if self.heartbeat_callback:
@@ -1206,69 +1291,29 @@ class AceSerialManager:
         else:
             return eventtime + 0.05
 
-        while True:
-            buf = self.read_buffer
-            if len(buf) < 7:
-                break
+        responses, remaining_buffer, notices = self.protocol.extract_responses(
+            self.read_buffer,
+            self._calc_crc,
+        )
+        self.read_buffer = remaining_buffer
 
-            if not (buf[0] == 0xFF and buf[1] == 0xAA):
-                hdr = buf.find(bytes([0xFF, 0xAA]))
-                if hdr == -1:
-                    self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: Resync: dropped junk ({len(buf)} bytes)"
-                    )
-                    self.read_buffer = bytearray()
-                    break
-                else:
-                    self.gcode.respond_info(f"ACE[{self.instance_num}]: Resync: skipping {hdr} bytes")
-                    self.read_buffer = buf[hdr:]
-                    buf = self.read_buffer
-                    if len(buf) < 7:
-                        break
+        for notice in notices:
+            self.gcode.respond_info(f"ACE[{self.instance_num}]: {notice}")
 
-            payload_len = struct.unpack('<H', buf[2:4])[0]
-            frame_len = 2 + 2 + payload_len + 2 + 1
-
-            if len(buf) < frame_len:
-                break
-
-            terminator_idx = 4 + payload_len + 2
-            if buf[terminator_idx] != 0xFE:
-                next_hdr = buf.find(bytes([0xFF, 0xAA]), 1)
-                if next_hdr == -1:
-                    self.read_buffer = bytearray()
-                else:
-                    self.read_buffer = buf[next_hdr:]
-                self.gcode.respond_info(f"ACE[{self.instance_num}]: Invalid frame tail, resyncing")
-                continue
-
-            frame = bytes(buf[:frame_len])
-            self.read_buffer = bytearray(buf[frame_len:])
-
-            payload = frame[4:4 + payload_len]
-            crc_rx = frame[4 + payload_len:4 + payload_len + 2]
-            crc_calc = struct.pack('<H', self._calc_crc(payload))
-
-            if crc_rx != crc_calc:
-                self.gcode.respond_info(f"ACE[{self.instance_num}]: Invalid CRC")
-                continue
-
-            try:
-                ret = json.loads(payload.decode('utf-8'))
-            except Exception as e:
-                self.gcode.respond_info(f"ACE[{self.instance_num}]: JSON decode error: {e}")
-                continue
-
+        for ret in responses:
             if self._status_debug_logging:
                 self._status_update_callback(ret)
 
-            cb, was_solicited = self.dispatch_response(ret)
+            cb, _ = self.dispatch_response(ret)
             if cb:
                 try:
                     cb(response=ret)
                 except Exception as e:
                     self.gcode.respond_info(f"ACE[{self.instance_num}]: Callback error: {e}")
             else:
+                # Try unsolicited callback first
+                if self.unsolicited_response_callback and self.unsolicited_response_callback(ret):
+                    continue
                 # Log unsolicited messages (no matching callback found)
                 response_id = ret.get('id', 'no-id')
                 response_str = json.dumps(ret)
@@ -1303,10 +1348,16 @@ class AceSerialManager:
         dryer_status = result.get("dryer_status", {})
         feed_assist_count = result.get("feed_assist_count")
         cont_assist_time = result.get("cont_assist_time")
+        raw_fields = result.get("raw_fields")
         slots = result.get("slots", [])
 
         if current_status is None:
             return
+
+        if raw_fields is not None:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: GET_STATUS raw_fields: {raw_fields}"
+            )
 
         # Detect overall status/action change
         status_changed = (current_status != self.last_status or

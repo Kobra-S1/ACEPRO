@@ -7,7 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="stylesheet" href="ace-dashboard.css?v=20260308a">
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="ace-dashboard-config.js?v=20260308a"></script>
+    <script src="ace-dashboard-config.js?v=20260308b"></script>
 </head>
 <body>
     <div id="app">
@@ -67,6 +67,13 @@
                                 <span class="value">{{ deviceStatus.temp || 0 }}°C</span>
                             </div>
                             <div class="info-row">
+                                <span class="label">Humidity:</span>
+                                <span class="value" v-if="deviceStatus.humidity !== null" :style="deviceStatus.humidity > 40 ? 'color: #ff4444; font-weight: bold;' : ''">
+                                    {{ deviceStatus.humidity }}% RH
+                                </span>
+                                <span class="value" v-else style="color: #888;">N/A</span>
+                            </div>
+                            <div class="info-row">
                                 <span class="label">{{ t('deviceInfo.rfid') }}:</span>
                                 <span class="value">{{ deviceStatus.enable_rfid ? t('deviceInfo.rfidOn') : t('deviceInfo.rfidOff') }}</span>
                             </div>
@@ -94,6 +101,10 @@
                                 <span class="value status-badge" :class="dryerStatus.status">
                                     {{ getDryerStatusText(dryerStatus.status) }}
                                 </span>
+                            </div>
+                            <div class="control-group inline" v-if="dryerStatus.status === 'drying'">
+                                <span class="label">{{ t('dryer.remainingTime') || 'Remaining' }}:</span>
+                                <span class="value" style="color: #4CAF50;">{{ formatTime(Math.round(dryerStatus.remain_time || 0)) }}</span>
                             </div>
                             <div class="button-group tight">
                                 <button @click="startDrying" :disabled="dryerStatus.status === 'drying'" class="btn btn-primary">
@@ -293,6 +304,6 @@
         </div>
     </div>
 
-    <script src="ace-dashboard.js?v=20260308a"></script>
+    <script src="ace-dashboard.js?v=20260308b"></script>
 </body>
 </html>

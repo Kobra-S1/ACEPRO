@@ -14,6 +14,8 @@ import struct
 import json
 from unittest.mock import Mock, patch
 
+from ace.protocol import AceTransportSpec
+
 
 class TestParseUsbLocation:
     """Test USB location string parsing for device sorting."""
@@ -200,6 +202,14 @@ class TestFindComPort:
         result = self.manager.find_com_port("ACE", instance=0)
         assert result is None
 
+    def test_does_not_match_ace2_transport_when_looking_for_ace1(self):
+        ports = [SimpleNamespace(device="/dev/ttyUSB9", description="ACE2 USB-RS485", hwid="LOCATION=1-1.1")]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        result = self.manager.find_com_port("ACE", instance=0)
+
+        assert result is None
+
     def test_mixed_ports_continue_on_non_match_then_selects_match(self):
         ports = [
             SimpleNamespace(device="/dev/ttyIGNORE", description="OTHER", hwid="LOCATION=1-1.1"),
@@ -241,6 +251,47 @@ class TestFindComPort:
 
         result = self.manager.find_com_port("ACE", instance=0)
         assert result == "/dev/ttyUSB2"
+
+    def test_find_com_port_detects_ace2_usb_single_serial_real_hwid(self):
+        # Simulates the exact PySerial portinfo for a QinHeng CH343 adapter
+        # as reported by the kernel: VID=1A86 PID=55D3, description="USB Single Serial"
+        # Serial number anonymised; location 1-1.4 is the real USB topology.
+        ports = [
+            SimpleNamespace(
+                device="/dev/ttyACM0",
+                description="USB Single Serial",
+                hwid="USB VID:PID=1A86:55D3 SER=ANONACE2SN LOCATION=1-1.4:1.0",
+            )
+        ]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        result = self.manager.find_com_port("USB Single Serial", instance=0)
+
+        assert result == "/dev/ttyACM0"
+        assert self.manager._expected_topology_positions == [(1, 1, 4)]
+
+    def test_find_com_port_detects_mixed_ace1_ace2_real_topology(self):
+        """Mixed enumeration should keep ACE1 and ACE2 transports distinct."""
+        ports = [
+            SimpleNamespace(
+                device="/dev/ttyACM0",
+                description="ACE",
+                hwid="USB VID:PID=28E9:018A SER=ANONACE1SN LOCATION=1-1.4.3:1.0",
+            ),
+            SimpleNamespace(
+                device="/dev/ttyACM1",
+                description="USB Single Serial",
+                hwid="USB VID:PID=1A86:55D3 SER=ANONACE2SN2 LOCATION=1-1.4.4:1.0",
+            ),
+        ]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        ace1_port = self.manager.find_com_port("ACE", instance=0)
+        self.manager._expected_topology_positions = None
+        ace2_port = self.manager.find_com_port("USB Single Serial", instance=0)
+
+        assert ace1_port == "/dev/ttyACM0"
+        assert ace2_port == "/dev/ttyACM1"
 
     def test_handles_more_aces_than_configured_instances(self):
         # With two ACEs on the bus but only instance 0 requested, it should still pick the matching expected topo
@@ -630,6 +681,19 @@ class TestReader:
         assert any("UNSOLICITED" in args[0] and "ID=99" in args[0] 
                   for args, _ in self.mock_gcode.respond_info.call_args_list)
 
+    def test_unsolicited_callback_handles_response_without_logging(self):
+        frame = self._make_frame({"id": 77, "result": "ok"})
+        self.manager._serial.read.return_value = frame
+        self.manager.dispatch_response.return_value = (None, False)
+        self.manager.unsolicited_response_callback = Mock(return_value=True)
+        self.manager._track_comm_unsolicited = Mock()
+
+        self.manager._reader(eventtime=6.0)
+
+        self.manager.unsolicited_response_callback.assert_called_once_with({"id": 77, "result": "ok"})
+        self.manager._track_comm_unsolicited.assert_not_called()
+        assert not any("UNSOLICITED" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
+
     def test_new_response_after_disconnect_logs_warning(self):
         """Responses without callback should be logged as unsolicited."""
         # Response with ID 55 arrives (no callback)
@@ -864,6 +928,23 @@ class TestConnectionLifecycle:
         self.manager.send_request({"m": 1}, lambda r: None)
         assert any("Request queue full" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
 
+    def test_send_request_normalizes_via_protocol(self):
+        protocol = Mock()
+        protocol.get_transport_spec.return_value = AceTransportSpec(
+            mode="usb-topology",
+            port_description="ACE",
+        )
+        protocol.normalize_request.return_value = {"method": "normalized"}
+        self.manager.protocol = protocol
+
+        callback = Mock()
+        self.manager.send_request({"method": "original"}, callback)
+
+        protocol.normalize_request.assert_called_once_with({"method": "original"})
+        request, queued_callback = self.manager.get_pending_request()
+        assert request == {"method": "normalized"}
+        assert queued_callback is callback
+
     def test_send_frame_not_connected(self):
         self.manager._connected = False
         self.manager._send_frame({"method": "ping"})
@@ -972,6 +1053,7 @@ class TestConnectionLifecycle:
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=True)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
+        self.manager._get_port_description_for_port = Mock(return_value="ACE")
         self.manager._validate_topology_position = Mock(return_value=False)
         self.manager.disconnect = Mock()
 
@@ -985,6 +1067,7 @@ class TestConnectionLifecycle:
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=True)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
+        self.manager._get_port_description_for_port = Mock(return_value="ACE")
         self.manager._validate_topology_position = Mock(return_value=True)
         self.manager.send_request = Mock()
 
@@ -1000,11 +1083,52 @@ class TestConnectionLifecycle:
         assert call_args[1]['request'] == {"method": "get_info"}
         assert callable(call_args[1]['callback'])
 
+    def test_find_connection_port_uses_shared_bus_index_zero(self):
+        self.manager.find_com_port = Mock(return_value="/dev/ttyUSB-bus")
+        protocol = Mock()
+        protocol.get_transport_spec.return_value = AceTransportSpec(
+            mode="rs485-bus",
+            port_description="USB Single Serial",
+            shared_bus=True,
+            topology_validation=False,
+        )
+        self.manager.protocol = protocol
+
+        port = self.manager.find_connection_port(instance=3)
+
+        assert port == "/dev/ttyUSB-bus"
+        self.manager.find_com_port.assert_called_once_with("USB Single Serial", 0)
+
+    def test_auto_connect_shared_bus_skips_topology_validation(self):
+        self.manager.find_connection_port = Mock(return_value="/dev/ttyUSB-bus")
+        self.manager.connect = Mock(return_value=True)
+        self.manager._get_usb_location_for_port = Mock(return_value="2-2.5")
+        self.manager._get_port_description_for_port = Mock(return_value="USB Single Serial")
+        self.manager._validate_topology_position = Mock(return_value=False)
+        self.manager.send_request = Mock()
+        protocol = Mock()
+        protocol.get_transport_spec.return_value = AceTransportSpec(
+            mode="rs485-bus",
+            port_description="USB Single Serial",
+            shared_bus=True,
+            topology_validation=False,
+        )
+        protocol.build_get_info_request.return_value = {"method": "get_info"}
+        self.manager.protocol = protocol
+
+        ok = self.manager.auto_connect(2, 230400)
+
+        assert ok is True
+        self.manager._validate_topology_position.assert_not_called()
+        self.manager.connect.assert_called_once_with("/dev/ttyUSB-bus", 230400)
+        self.manager.send_request.assert_not_called()
+
     def test_auto_connect_connect_failure_returns_false(self):
         """Test auto_connect when connect() fails."""
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=False)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
+        self.manager._get_port_description_for_port = Mock(return_value="ACE")
 
         ok = self.manager.auto_connect(0, 115200)
 
@@ -1334,6 +1458,23 @@ class TestStatusUpdateChangeDetection:
         log_calls = [call[0][0] for call in self.mock_gcode.respond_info.call_args_list]
         assert any("STATUS CHANGE" in msg for msg in log_calls)
 
+    def test_logs_get_status_raw_fields_when_present(self):
+        """GET_STATUS raw_fields should be logged for ACE2 debugging."""
+        response = {
+            "result": {
+                "status": "ready",
+                "action": "none",
+                "temp": 25,
+                "raw_fields": {3: [(0, 25)], 4: [(0, 40)]},
+                "slots": [],
+            }
+        }
+
+        self.manager._status_update_callback(response)
+
+        log_calls = [call[0][0] for call in self.mock_gcode.respond_info.call_args_list]
+        assert any("GET_STATUS raw_fields" in msg for msg in log_calls)
+
     def test_no_log_when_status_unchanged(self):
         """No logging when status hasn't changed."""
         self.manager.last_status = "ready"
@@ -1612,6 +1753,12 @@ class TestOnConnectCallback:
         mock_callback = Mock()
         self.manager.set_on_connect_callback(mock_callback)
         assert self.manager.on_connect_callback == mock_callback
+
+    def test_set_unsolicited_response_callback(self):
+        """set_unsolicited_response_callback should store callback."""
+        mock_callback = Mock()
+        self.manager.set_unsolicited_response_callback(mock_callback)
+        assert self.manager.unsolicited_response_callback == mock_callback
 
     @patch('ace.serial_manager.serial')
     def test_on_connect_callback_called_on_successful_connect(self, mock_serial_module):
@@ -2299,6 +2446,19 @@ class TestHeartbeat:
         request = call_args[0][0]
         
         assert request == {"method": "get_status"}
+
+    def test_send_heartbeat_request_uses_protocol_builder(self):
+        """Heartbeat requests should come from the protocol adapter."""
+        protocol = Mock()
+        protocol.build_get_status_request.return_value = {"method": "status_via_protocol"}
+        self.manager.protocol = protocol
+        self.manager.send_high_prio_request = Mock()
+
+        self.manager._send_heartbeat_request()
+
+        protocol.build_get_status_request.assert_called_once_with()
+        request = self.manager.send_high_prio_request.call_args[0][0]
+        assert request == {"method": "status_via_protocol"}
     
     def test_send_heartbeat_request_calls_callback(self):
         """Test send heartbeat request invokes callback on response."""
@@ -2365,6 +2525,55 @@ class TestHeartbeat:
         # Should use high-priority, not normal
         self.manager.send_high_prio_request.assert_called_once()
         self.manager.send_request.assert_not_called()
+
+
+class TestHandleInfoResponse:
+    """Tests for get_info callback handling through public helper."""
+
+    def setup_method(self):
+        from ace.serial_manager import AceSerialManager
+
+        self.mock_gcode = Mock()
+        self.mock_reactor = Mock()
+        self.manager = AceSerialManager(
+            gcode=self.mock_gcode,
+            reactor=self.mock_reactor,
+            instance_num=0,
+            ace_enabled=False,
+        )
+
+    def test_handle_info_response_updates_device_info(self):
+        self.manager.handle_info_response(
+            {
+                "result": {
+                    "version": "1.2.3",
+                    "boot_version": "0.9.1",
+                    "raw_fields": {1: [(2, b"1.2.3")]},
+                }
+            }
+        )
+
+        assert self.manager.device_info == {
+            "version": "1.2.3",
+            "boot_version": "0.9.1",
+            "raw_fields": {1: [(2, b"1.2.3")]},
+        }
+        assert self.mock_gcode.respond_info.call_count == 3
+        logged_lines = [call.args[0] for call in self.mock_gcode.respond_info.call_args_list]
+        assert any("GET_INFO raw_info:" in line for line in logged_lines)
+        assert any("GET_INFO raw_fields:" in line for line in logged_lines)
+        assert any("GET_INFO summary:" in line for line in logged_lines)
+
+    def test_handle_info_response_handles_malformed_response(self):
+        self.manager.device_info = {"version": "stale"}
+
+        self.manager.handle_info_response(None)
+
+        assert self.manager.device_info == {}
+        assert self.mock_gcode.respond_info.call_count == 2
+        logged_lines = [call.args[0] for call in self.mock_gcode.respond_info.call_args_list]
+        assert any("GET_INFO raw_info:" in line for line in logged_lines)
+        assert any("GET_INFO summary:" in line for line in logged_lines)
 
 
 if __name__ == '__main__':

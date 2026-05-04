@@ -342,12 +342,13 @@ class TestHandleReady(unittest.TestCase):
         self.mock_config.get.side_effect = get
         self.mock_config.getboolean.side_effect = getboolean
 
-    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled):
+    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled, **kwargs):
         inst = Mock()
         inst.instance_num = instance_num
         inst.SLOT_COUNT = SLOTS_PER_ACE
         inst.tool_offset = instance_num * SLOTS_PER_ACE
-        inst.serial_mgr = Mock(connect_to_ace=Mock(), disconnect=Mock())
+        inst.baud = instance_config["baud"]
+        inst.serial_mgr = kwargs.get("serial_mgr", Mock(connect_to_ace=Mock(), disconnect=Mock()))
         inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
         inst.filament_runout_sensor_name_rdm = "return_module"
         return inst
@@ -371,6 +372,16 @@ class TestHandleReady(unittest.TestCase):
         manager._setup_sensors.assert_called_once()
         manager._start_monitoring.assert_called_once()
 
+    def test_enabled_path_uses_instance_specific_baud(self):
+        manager = self._build_manager()
+        manager.instances[0].baud = 230400
+        manager._setup_sensors = Mock()
+        manager._start_monitoring = Mock()
+
+        manager._handle_ready()
+
+        manager.instances[0].serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
+
     def test_disabled_path_skips_connections(self):
         self.variables["ace_global_enabled"] = False
         manager = self._build_manager()
@@ -384,6 +395,353 @@ class TestHandleReady(unittest.TestCase):
         manager._setup_sensors.assert_not_called()
         manager._start_monitoring.assert_called_once()
 
+
+class TestSharedAce2Transport(unittest.TestCase):
+    """Coverage for ACE2 shared-bus transport ownership in AceManager."""
+
+    def setUp(self):
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+
+        self.mock_config = Mock()
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+        self.mock_toolhead = Mock()
+        self.created_serial_managers = []
+
+        self.mock_config.get_printer.return_value = self.mock_printer
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_reactor.monotonic.return_value = 0.0
+        self.mock_reactor.register_timer = Mock(return_value=None)
+        self.mock_reactor.pause = Mock()
+
+        self.variables = {
+            "ace_global_enabled": True,
+            "ace_current_index": -1,
+            "ace_filament_pos": FILAMENT_STATE_BOWDEN,
+        }
+        self.mock_save_vars.allVariables = self.variables
+
+        def lookup(name, default=None):
+            if name == "gcode":
+                return self.mock_gcode
+            if name == "save_variables":
+                return self.mock_save_vars
+            if name == "toolhead":
+                return self.mock_toolhead
+            if name == "output_pin ACE_Pro":
+                pin = Mock()
+                pin.get_status = Mock(return_value={"value": 1})
+                return pin
+            return default
+
+        self.mock_printer.lookup_object.side_effect = lookup
+
+        def getint(key, default=None):
+            vals = {"ace_count": 2}
+            val = vals.get(key, default)
+            return int(val) if val is not None else default
+
+        def getfloat(key, default=None):
+            val = {"purge_multiplier": "1.0"}.get(key, default)
+            return float(val) if val is not None else default
+
+        def get(key, default=None):
+            return {
+                "filament_runout_sensor_name_rdm": "return_module",
+                "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+                "protocol": "ace2",
+                "baud": "auto",
+            }.get(key, default)
+
+        def getboolean(key, default=None):
+            return {
+                "feed_assist_active_after_ace_connect": True,
+                "rfid_inventory_sync_enabled": True,
+                "ace_connection_supervision": True,
+                "moonraker_lane_sync_enabled": False,
+            }.get(key, default if default is not None else False)
+
+        self.mock_config.getint.side_effect = getint
+        self.mock_config.getfloat.side_effect = getfloat
+        self.mock_config.get.side_effect = get
+        self.mock_config.getboolean.side_effect = getboolean
+
+    def _serial_manager_factory(self, *args, **kwargs):
+        serial_mgr = Mock(connect_to_ace=Mock(), disconnect=Mock(), send_high_prio_request=Mock())
+        serial_mgr._port = "/dev/ttyUSB0"
+        serial_mgr.protocol = kwargs.get("protocol")
+        serial_mgr.ensure_connect_timer = Mock()
+        serial_mgr.is_connected = Mock(return_value=False)
+        serial_mgr.get_connection_status = Mock(return_value={"last_connected_time": 0.0})
+        self.created_serial_managers.append(serial_mgr)
+        return serial_mgr
+
+    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled, **kwargs):
+        inst = Mock()
+        inst.instance_num = instance_num
+        inst.SLOT_COUNT = SLOTS_PER_ACE
+        inst.tool_offset = instance_num * SLOTS_PER_ACE
+        inst.baud = instance_config["baud"]
+        inst.serial_mgr = kwargs.get("serial_mgr")
+        inst.bus_session = kwargs.get("bus_session")
+        inst.protocol = kwargs.get("protocol")
+        inst.rfid_inventory_sync_enabled = True
+        inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        inst.filament_runout_sensor_name_rdm = "return_module"
+        return inst
+
+    def _build_manager(self):
+        with patch("ace.manager.AceInstance", side_effect=self._instance_factory), \
+             patch("ace.manager.AceSerialManager", side_effect=self._serial_manager_factory), \
+             patch("ace.manager.EndlessSpool"), \
+             patch("ace.manager.RunoutMonitor"):
+            return AceManager(self.mock_config, dummy_ace_count=2)
+
+    def test_manager_reuses_shared_transport_for_ace2_instances(self):
+        manager = self._build_manager()
+
+        self.assertEqual(len(self.created_serial_managers), 1)
+        self.assertIs(manager.instances[0].serial_mgr, manager.instances[1].serial_mgr)
+        self.assertIs(manager.instances[0].bus_session, manager.instances[1].bus_session)
+        self.assertEqual(manager.instances[0].baud, 230400)
+        self.assertEqual(manager.instances[1].baud, 230400)
+
+    def test_handle_ready_connects_shared_transport_once(self):
+        manager = self._build_manager()
+        manager._setup_sensors = Mock()
+        manager._start_monitoring = Mock()
+        manager._initialize_shared_bus_transport = Mock()
+        manager._queue_shared_bus_instance_setup = Mock()
+        manager._start_shared_bus_runtime = Mock()
+
+        manager._handle_ready()
+
+        shared_serial_mgr = manager.instances[0].serial_mgr
+        shared_serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
+        self.assertEqual(manager.instances[0].bus_session.port, "/dev/ttyUSB0")
+        manager._initialize_shared_bus_transport.assert_not_called()
+        manager._queue_shared_bus_instance_setup.assert_not_called()
+        manager._start_shared_bus_runtime.assert_not_called()
+        manager._setup_sensors.assert_called_once()
+        manager._start_monitoring.assert_called_once()
+
+    def test_initialize_shared_bus_transport_discovers_and_assigns_devices(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"code": 0, "msg": "SUCCESS"},
+            {"code": 0, "msg": "SUCCESS"},
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        manager._initialize_shared_bus_transport(manager.instances[0])
+
+        requests = [call_args[0][0] for call_args in shared_serial_mgr.send_high_prio_request.call_args_list]
+        assert requests == [
+            {"command": "DISCOVER_DEVICE", "params": {}},
+            {"command": "DISCOVER_DEVICE", "params": {}},
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 11, "uid2": 22, "uid3": 33, "device_id": 1},
+            },
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 44, "uid2": 55, "uid3": 66, "device_id": 2},
+            },
+        ]
+
+        device0 = manager.instances[0].bus_session.get_device_for_instance(0)
+        device1 = manager.instances[0].bus_session.get_device_for_instance(1)
+        assert device0.identity.uid_tuple == (11, 22, 33)
+        assert device0.device_id == 1
+        assert device1.identity.uid_tuple == (44, 55, 66)
+        assert device1.device_id == 2
+        assert self.variables["ace2_bus_bindings_0_1"] == {
+            0: (11, 22, 33),
+            1: (44, 55, 66),
+        }
+
+    def test_initialize_shared_bus_transport_restores_persisted_binding_order(self):
+        self.variables["ace2_bus_bindings_0_1"] = {
+            "0": [44, 55, 66],
+            "1": [11, 22, 33],
+        }
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"code": 0, "msg": "SUCCESS"},
+            {"code": 0, "msg": "SUCCESS"},
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        manager._initialize_shared_bus_transport(manager.instances[0])
+
+        requests = [call_args[0][0] for call_args in shared_serial_mgr.send_high_prio_request.call_args_list]
+        assert requests[2:] == [
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 44, "uid2": 55, "uid3": 66, "device_id": 1},
+            },
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 11, "uid2": 22, "uid3": 33, "device_id": 2},
+            },
+        ]
+
+        device0 = manager.instances[0].bus_session.get_device_for_instance(0)
+        device1 = manager.instances[0].bus_session.get_device_for_instance(1)
+        assert device0.identity.uid_tuple == (44, 55, 66)
+        assert device1.identity.uid_tuple == (11, 22, 33)
+
+    def test_initialize_shared_bus_transport_logs_when_discovery_finds_no_devices(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        shared_serial_mgr.send_high_prio_request.side_effect = (
+            lambda request, callback: callback(None)
+        )
+
+        ready_count = manager._initialize_shared_bus_transport(manager.instances[0])
+
+        self.mock_gcode.respond_info.assert_any_call(
+            "ACE[0]: ACE2 discovery returned no devices on shared bus"
+        )
+        self.assertEqual(ready_count, 0)
+
+    def test_send_shared_bus_request_times_out_when_callback_never_fires(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+        shared_serial_mgr.send_high_prio_request.side_effect = lambda request, callback: None
+
+        response = manager._send_shared_bus_request(
+            manager.instances[0],
+            {"command": "DISCOVER_DEVICE", "params": {}},
+            timeout_s=0.01,
+        )
+
+        assert response is None
+        assert self.mock_reactor.pause.called
+
+    def test_initialize_shared_bus_transport_discards_stale_runtime_devices_before_restore(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+        bus_session.bind_logical_instance(0, 99, 99, 99)
+        self.variables["ace2_bus_bindings_0_1"] = {
+            0: (11, 22, 33),
+            1: (44, 55, 66),
+        }
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"code": 0, "msg": "SUCCESS"},
+            {"code": 0, "msg": "SUCCESS"},
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        manager._initialize_shared_bus_transport(manager.instances[0])
+
+        discovered = [device.identity.uid_tuple for device in bus_session.iter_discovered_devices()]
+        assert discovered == [(11, 22, 33), (44, 55, 66)]
+
+    def test_monitor_transport_reconnects_calls_ensure_connect_timer_once_per_transport(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        manager._monitor_transport_reconnects()
+
+        shared_serial_mgr.ensure_connect_timer.assert_called_once_with()
+
+    def test_monitor_transport_reconnects_reinitializes_once_per_connection_generation(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+        bus_session = manager.instances[0].bus_session
+        manager._on_shared_bus_connected = Mock()
+
+        shared_serial_mgr.is_connected.return_value = True
+        shared_serial_mgr.get_connection_status.return_value = {"last_connected_time": 12.0}
+
+        manager._monitor_transport_reconnects()
+        manager._monitor_transport_reconnects()
+
+        manager._on_shared_bus_connected.assert_called_once_with(bus_session)
+
+        shared_serial_mgr.get_connection_status.return_value = {"last_connected_time": 13.0}
+        manager._monitor_transport_reconnects()
+
+        self.assertEqual(manager._on_shared_bus_connected.call_count, 2)
+
+    def test_queue_shared_bus_instance_setup_enqueues_expected_requests(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 1)
+        bus_session.bind_logical_instance(1, 44, 55, 66)
+        bus_session.assign_device_id(44, 55, 66, 2)
+
+        manager._queue_shared_bus_instance_setup(bus_session)
+
+        instance0_calls = manager.instances[0].send_high_prio_request.call_args_list
+        instance1_calls = manager.instances[1].send_high_prio_request.call_args_list
+        self.assertEqual(len(instance0_calls), 3)
+        self.assertEqual(len(instance1_calls), 3)
+
+        for calls in (instance0_calls, instance1_calls):
+            request0 = calls[0][0][0]
+            request1 = calls[1][0][0]
+            request2 = calls[2][0][0]
+            self.assertEqual(
+                request0,
+                {"command": "SET_RFID_ENABLE", "params": {"index": 0, "enable": True}},
+            )
+            self.assertEqual(
+                request1,
+                {"command": "SET_RFID_ENABLE", "params": {"index": 2, "enable": True}},
+            )
+            self.assertEqual(
+                request2,
+                {
+                    "command": "SET_FEED_CHECK",
+                    "params": {"check_length": 110, "error_length": 100},
+                },
+            )
+
+    def test_on_shared_bus_connected_schedules_retry_when_no_devices_discovered(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+
+        manager._initialize_shared_bus_transport = Mock(return_value=0)
+        manager._queue_shared_bus_instance_setup = Mock()
+        manager._start_shared_bus_runtime = Mock()
+
+        manager._on_shared_bus_connected(bus_session)
+
+        manager._queue_shared_bus_instance_setup.assert_not_called()
+        manager._start_shared_bus_runtime.assert_not_called()
+        self.assertIn(id(bus_session), manager._shared_bus_retry_timers)
 
 class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
     """Coverage for prepare_toolhead_for_filament_retraction."""
@@ -456,7 +814,7 @@ class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
         self.mock_config.get.side_effect = get
         self.mock_config.getboolean.side_effect = getboolean
 
-    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled):
+    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled, **kwargs):
         inst = Mock()
         inst.instance_num = instance_num
         inst.SLOT_COUNT = SLOTS_PER_ACE
@@ -800,8 +1158,25 @@ class TestConfigResolution(unittest.TestCase):
         self.assertIsInstance(resolved_inst0['retract_speed'], (int, float))
         self.assertIsInstance(resolved_inst1['retract_speed'], (int, float))
         
-        # Non-overridable params should be same
+        # Default baud stays identical when no per-instance override is configured
         self.assertEqual(resolved_inst0['baud'], resolved_inst1['baud'])
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_resolve_instance_config_auto_baud_defaults_for_mixed_protocols(self, mock_endless_spool, mock_ace_instance):
+        """Omitted baud should use protocol-aware defaults in mixed ACE1+ACE2 mode."""
+        manager = AceManager(self.mock_config)
+        manager._get_available_port_descriptions = Mock(
+            return_value=["ACE", "USB Single Serial"]
+        )
+
+        resolved_inst0 = manager._resolve_instance_config(0)
+        resolved_inst1 = manager._resolve_instance_config(1)
+
+        self.assertEqual(resolved_inst0['active_protocol_name'], 'ace1_json')
+        self.assertEqual(resolved_inst1['active_protocol_name'], 'ace2_proto')
+        self.assertEqual(resolved_inst0['baud'], 115200)
+        self.assertEqual(resolved_inst1['baud'], 230400)
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -813,8 +1188,7 @@ class TestConfigResolution(unittest.TestCase):
         resolved_inst1 = manager._resolve_instance_config(1)
         
         # Singleton params should be identical (not instance-specific)
-        # Note: baud is stored as int, ace_count as int, others might be strings or numbers
-        singleton_params = ['baud', 'ace_count', 'parkposition_to_toolhead_length']
+        singleton_params = ['ace_count', 'parkposition_to_toolhead_length']
         for param in singleton_params:
             if param in resolved_inst0 and param in resolved_inst1:
                 self.assertEqual(resolved_inst0[param], resolved_inst1[param],
@@ -840,7 +1214,7 @@ class TestConfigResolution(unittest.TestCase):
             # Set different values for each overridable param
             overrides = {
                 'serial': '/dev/ttyACM0,/dev/ttyACM1',
-                'baud': '115200',
+                'baud': '115200,1:230400',
                 'feed_speed': '60,1:80',  # Instance 1 faster
                 'retract_speed': '50,1:45',  # Instance 1 slower
                 'total_max_feeding_length': '1000,1:1200',
@@ -870,6 +1244,7 @@ class TestConfigResolution(unittest.TestCase):
         
         # Verify all overridable params were resolved
         expected_inst0 = {
+            'baud': 115200,
             'feed_speed': 60,
             'retract_speed': 50,
             'total_max_feeding_length': 1000,
@@ -881,6 +1256,7 @@ class TestConfigResolution(unittest.TestCase):
         }
         
         expected_inst1 = {
+            'baud': 230400,
             'feed_speed': 80,
             'retract_speed': 45,
             'total_max_feeding_length': 1200,
@@ -1703,7 +2079,8 @@ class TestPerformToolChange(unittest.TestCase):
             
             # Should have loaded new tool
             mock_instance._feed_filament_into_toolhead.assert_called_once()
-            mock_instance._enable_feed_assist.assert_called_once_with(2)
+            # _enable_feed_assist is now called inside _feed_filament_into_toolhead, not in manager.py
+            mock_instance._enable_feed_assist.assert_not_called()
             self.assertEqual(self.variables['ace_current_index'], 2)
             # Should have passed purged amount to POST macro (note: values are floats with .0)
             self.mock_gcode.run_script_from_command.assert_any_call(
@@ -3506,11 +3883,13 @@ class TestMonitorAceState(unittest.TestCase):
         manager._ace_pro_enabled = True
         manager._connection_supervision_enabled = True
         manager.update_ace_support_active_state = Mock()
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(5.0)
 
         manager.update_ace_support_active_state.assert_called_once()
+        manager._monitor_transport_reconnects.assert_called_once_with()
         manager._check_connection_health.assert_called_once_with(5.0)
         self.assertEqual(next_time, 7.0)
 
@@ -3519,21 +3898,25 @@ class TestMonitorAceState(unittest.TestCase):
         manager._ace_pro_enabled = False
         manager._connection_supervision_enabled = True
         manager.update_ace_support_active_state = Mock()
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(10.0)
 
         manager.update_ace_support_active_state.assert_called_once()
+        manager._monitor_transport_reconnects.assert_called_once_with()
         manager._check_connection_health.assert_not_called()
         self.assertEqual(next_time, 12.0)
 
     def test_exception_logged_and_returns_next_interval(self):
         manager = self._build_manager()
         manager.update_ace_support_active_state = Mock(side_effect=RuntimeError("boom"))
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(2.5)
 
+        manager._monitor_transport_reconnects.assert_not_called()
         manager._check_connection_health.assert_not_called()
         self.assertEqual(next_time, 4.5)
 

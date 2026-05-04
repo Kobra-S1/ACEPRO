@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import Mock, patch, PropertyMock, call, ANY
 import time
 
+from ace.ace2_bus import Ace2BusSession
 from ace.instance import AceInstance
 from ace.config import (
     ACE_INSTANCES,
@@ -92,6 +93,8 @@ class TestAceInstance(unittest.TestCase):
         self.assertEqual(instance.feed_speed, 100.0)
         self.assertEqual(instance.retract_speed, 100.0)
         self.assertEqual(instance.tool_offset, 0)
+        self.assertEqual(instance.configured_protocol_name, 'auto')
+        self.assertEqual(instance.protocol_name, 'ace1_json')
         
         # Verify serial manager was created
         mock_serial_mgr_class.assert_called_once()
@@ -100,6 +103,17 @@ class TestAceInstance(unittest.TestCase):
         self.assertEqual(len(instance.inventory), SLOTS_PER_ACE)
         for slot in instance.inventory:
             self.assertEqual(slot['status'], 'empty')
+
+    @patch('ace.instance.AceSerialManager')
+    def test_instance_protocol_override_normalizes_alias(self, mock_serial_mgr_class):
+        """Protocol override aliases should normalize to stable internal names."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'json'
+
+        instance = AceInstance(0, ace_config, self.mock_printer, ace_enabled=True)
+
+        self.assertEqual(instance.configured_protocol_name, 'ace1_json')
+        self.assertEqual(instance.protocol_name, 'ace1_json')
 
     @patch('ace.instance.AceSerialManager')
     def test_instance_second_unit(self, mock_serial_mgr_class):
@@ -134,6 +148,217 @@ class TestAceInstance(unittest.TestCase):
         instance.send_high_prio_request(request, callback)
         
         mock_serial.send_high_prio_request.assert_called_once_with(request, callback)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_get_status_uses_protocol_aware_model_fallback_for_ace2(self, mock_serial_mgr_class):
+        """ACE2 should expose a protocol-aware model label when model metadata is missing."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+
+        instance = AceInstance(0, ace_config, self.mock_printer)
+        instance.serial_mgr.device_info = {}
+        instance.serial_mgr._port_description = 'USB Single Serial'
+
+        status = instance.get_status()
+
+        self.assertEqual(status.get('protocol'), 'ace2_proto')
+        self.assertEqual(status.get('model'), 'ACE2 (USB Single Serial)')
+
+    @patch('ace.instance.AceSerialManager')
+    def test_get_status_maps_ace2_version_fields_to_firmware(self, mock_serial_mgr_class):
+        """ACE2 version keys should map to dashboard firmware fields."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+
+        instance = AceInstance(0, ace_config, self.mock_printer)
+        instance.serial_mgr.device_info = {
+            'version': '2.3.4',
+            'boot_version': '1.0.0',
+        }
+
+        status = instance.get_status()
+
+        self.assertEqual(status.get('firmware'), '2.3.4')
+        self.assertEqual(status.get('boot_firmware'), '1.0.0')
+
+    @patch('ace.instance.AceSerialManager')
+    def test_send_request_targets_shared_bus_device(self, mock_serial_mgr_class):
+        """ACE2 shared-bus requests should carry the assigned device ID."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 7)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        mock_serial = instance.serial_mgr
+
+        request = {'command': 'GET_STATUS', 'params': {}}
+        callback = Mock()
+
+        instance.send_request(request, callback)
+
+        mock_serial.send_request.assert_called_once_with(
+            {'command': 'GET_STATUS', 'params': {}, 'target_device_id': 7},
+            callback,
+        )
+
+    @patch('ace.instance.AceSerialManager')
+    def test_send_high_prio_request_targets_shared_bus_device(self, mock_serial_mgr_class):
+        """ACE2 high-priority requests should carry the assigned device ID."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 7)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        mock_serial = instance.serial_mgr
+
+        request = {'command': 'GET_INFO', 'params': {}}
+        callback = Mock()
+
+        instance.send_high_prio_request(request, callback)
+
+        mock_serial.send_high_prio_request.assert_called_once_with(
+            {'command': 'GET_INFO', 'params': {}, 'target_device_id': 7},
+            callback,
+        )
+
+    @patch('ace.instance.AceSerialManager')
+    def test_send_request_requires_shared_bus_target_assignment(self, mock_serial_mgr_class):
+        """Shared-bus runtime requests must fail fast until a device ID is assigned."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+
+        with self.assertRaisesRegex(RuntimeError, "requires an assigned target device_id"):
+            instance.send_request({'command': 'GET_STATUS', 'params': {}}, Mock())
+
+        instance.serial_mgr.send_request.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_send_request_allows_shared_bus_discovery_without_target(self, mock_serial_mgr_class):
+        """Manager-scope shared-bus commands must remain untargeted."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        callback = Mock()
+
+        instance.send_request({'command': 'DISCOVER_DEVICE', 'params': {}}, callback)
+
+        instance.serial_mgr.send_request.assert_called_once_with(
+            {'command': 'DISCOVER_DEVICE', 'params': {}},
+            callback,
+        )
+
+    @patch('ace.instance.AceSerialManager')
+    def test_start_shared_bus_heartbeat_sends_targeted_status_poll(self, mock_serial_mgr_class):
+        """Shared-bus heartbeat should poll through per-instance targeted requests."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        self.mock_reactor.register_timer = Mock(return_value='heartbeat-timer')
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 7)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        instance.serial_mgr.is_connected.return_value = True
+
+        instance.start_shared_bus_heartbeat()
+
+        instance.serial_mgr.send_high_prio_request.assert_called_once_with(
+            {'command': 'GET_STATUS', 'params': {}, 'target_device_id': 7},
+            instance._on_heartbeat_response,
+        )
+        self.mock_reactor.register_timer.assert_called_once()
+        self.assertEqual(instance._shared_bus_heartbeat_timer, 'heartbeat-timer')
+
+    @patch('ace.instance.AceSerialManager')
+    def test_request_shared_bus_info_refresh_uses_targeted_get_info(self, mock_serial_mgr_class):
+        """Shared-bus info refresh should use targeted get_info after assignment."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 7)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        instance.serial_mgr.is_connected.return_value = True
+
+        instance.request_shared_bus_info_refresh()
+
+        instance.serial_mgr.send_high_prio_request.assert_called_once_with(
+            {'command': 'GET_INFO', 'params': {}, 'target_device_id': 7},
+            instance.serial_mgr.handle_info_response,
+        )
+
+    @patch('ace.instance.AceSerialManager')
+    def test_start_drying_uses_protocol_builder(self, mock_serial_mgr_class):
+        """Dryer start should be built through the protocol adapter."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        protocol = Mock()
+        protocol.build_start_drying_request.return_value = {
+            'method': 'drying',
+            'params': {'temp': 55, 'duration': 180},
+        }
+        instance.protocol = protocol
+        instance.send_request = Mock()
+        callback = Mock()
+
+        instance.start_drying(55, 180, callback)
+
+        protocol.build_start_drying_request.assert_called_once_with(55, 180)
+        instance.send_request.assert_called_once_with(
+            {'method': 'drying', 'params': {'temp': 55, 'duration': 180}},
+            callback,
+        )
+        self.assertTrue(instance._dryer_active)
+        self.assertEqual(instance._dryer_temperature, 55)
+        self.assertEqual(instance._dryer_duration, 180)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_stop_drying_uses_protocol_builder(self, mock_serial_mgr_class):
+        """Dryer stop should be built through the protocol adapter."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        protocol = Mock()
+        protocol.build_stop_drying_request.return_value = {'method': 'drying_stop'}
+        instance.protocol = protocol
+        instance.send_request = Mock()
+        instance._dryer_active = True
+        instance._dryer_temperature = 50
+        instance._dryer_duration = 240
+        callback = Mock()
+
+        instance.stop_drying(callback)
+
+        protocol.build_stop_drying_request.assert_called_once_with()
+        instance.send_request.assert_called_once_with({'method': 'drying_stop'}, callback)
+        self.assertFalse(instance._dryer_active)
+        self.assertEqual(instance._dryer_temperature, 0)
+        self.assertEqual(instance._dryer_duration, 0)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_enable_feed_assist_uses_protocol_builder(self, mock_serial_mgr_class):
+        """Feed assist enable should build requests through the protocol adapter."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        protocol = Mock()
+        protocol.build_start_feed_assist_request.return_value = {
+            'method': 'start_feed_assist',
+            'params': {'index': 2},
+        }
+        instance.protocol = protocol
+        instance.wait_ready = Mock()
+        instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 0}))
+        instance.serial_mgr.get_usb_topology_position = Mock(return_value=4)
+        INSTANCE_MANAGERS[0] = Mock()
+
+        instance._enable_feed_assist(2)
+
+        protocol.build_start_feed_assist_request.assert_called_once_with(2)
+        instance.send_request.assert_called_once_with(
+            {'method': 'start_feed_assist', 'params': {'index': 2}},
+            ANY,
+        )
 
 
 class TestRegisterToolMacros(unittest.TestCase):
@@ -284,6 +509,30 @@ class TestWaitReady(unittest.TestCase):
         self.assertGreaterEqual(call_counter['count'], 60)
         # Should have asked for status once when waited >= 25s
         instance.send_high_prio_request.assert_called()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_wait_ready_uses_protocol_status_request(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance._info['status'] = 'not_ready'
+        protocol = Mock()
+        protocol.build_get_status_request.return_value = {'method': 'status_from_protocol'}
+        instance.protocol = protocol
+        instance.send_high_prio_request = Mock()
+
+        call_counter = {'count': 0}
+
+        def on_wait():
+            call_counter['count'] += 1
+            if call_counter['count'] >= 60:
+                instance._info['status'] = 'ready'
+
+        instance.wait_ready(on_wait_cycle=on_wait, timeout_s=60.0)
+
+        protocol.build_get_status_request.assert_called_once_with()
+        instance.send_high_prio_request.assert_called_with(
+            request={'method': 'status_from_protocol'},
+            callback=instance._status_update_callback,
+        )
 
 
 class TestIsSlotEmpty(unittest.TestCase):
@@ -471,6 +720,29 @@ class TestRetract(unittest.TestCase):
         self.assertEqual(result, {"code": 0, "msg": "Retract stopped early: slot empty"})
         instance._stop_retract.assert_called_once_with(0)
         self.assertTrue(instance.wait_ready.call_count >= 2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_retract_targets_shared_bus_device(self, mock_serial_mgr_class):
+        """ACE2 retract must route through _prepare_request to attach device_id."""
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 7)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        instance._info['slots'] = [{'index': 0, 'status': 'ready'}]
+        instance.wait_ready = Mock()
+        instance.reactor.pause = Mock()
+        instance.serial_mgr.send_request = Mock(
+            side_effect=lambda req, cb: cb({"code": 0, "msg": "ok"})
+        )
+
+        times = self._time_generator(step=1.0)
+        with patch('ace.instance.time.time', side_effect=lambda: next(times)):
+            instance._retract(0, length=2, speed=1)
+
+        sent_request = instance.serial_mgr.send_request.call_args[0][0]
+        self.assertEqual(sent_request.get("target_device_id"), 7)
 
 
 class TestFeedFilamentIntoToolhead(unittest.TestCase):
@@ -1515,6 +1787,45 @@ class TestStatusCallbacks(unittest.TestCase):
         self.assertEqual(instance._info['temp'], 25)
 
     @patch('ace.instance.AceSerialManager')
+    def test_heartbeat_failures_trigger_reconnect_after_threshold(self, mock_serial_mgr_class):
+        """Repeated heartbeat failures should trigger reconnect once threshold is hit."""
+        ace_config = dict(self.ace_config)
+        ace_config['status_failure_threshold'] = 2
+        instance = AceInstance(0, ace_config, self.mock_printer)
+
+        instance._on_heartbeat_response(None)
+        instance._on_heartbeat_response(None)
+        instance._on_heartbeat_response(None)
+
+        instance.serial_mgr.reconnect.assert_called_once_with()
+        self.assertEqual(instance._status_failure_streak, 3)
+        self.assertTrue(instance._status_recovery_in_progress)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_heartbeat_success_resets_failure_tracking(self, mock_serial_mgr_class):
+        """Successful heartbeat should clear failure streak and recovery flag."""
+        ace_config = dict(self.ace_config)
+        ace_config['status_failure_threshold'] = 2
+        instance = AceInstance(0, ace_config, self.mock_printer)
+
+        instance._on_heartbeat_response(None)
+        self.assertEqual(instance._status_failure_streak, 1)
+        self.assertFalse(instance._status_recovery_in_progress)
+
+        success_response = {
+            'code': 0,
+            'result': {
+                'status': 'ready',
+                'slots': [],
+            }
+        }
+        instance._on_heartbeat_response(success_response)
+
+        self.assertEqual(instance._status_failure_streak, 0)
+        self.assertFalse(instance._status_recovery_in_progress)
+        instance.serial_mgr.reconnect.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
     def test_is_ready_true(self, mock_serial_mgr_class):
         """Test is_ready returns True when status is ready."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
@@ -2521,6 +2832,32 @@ class TestStatusUpdateCallback(unittest.TestCase):
         # Feed assist restore is attempted when filament loaded and feed assist was active
         # We can't assert internal _enable_feed_assist call easily without patching, but ensure feed_assist_index unchanged
         self.assertEqual(instance._feed_assist_index, 2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_handle_shared_bus_filament_info_response_requires_pending_slot(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance.transport_spec = Mock(shared_bus=True)
+        instance._handle_rfid_info_response = Mock()
+
+        handled = instance.handle_shared_bus_filament_info_response(
+            {"command": "GET_FILAMENT_INFO", "result": {"index": 1, "rfid": 2}}
+        )
+
+        self.assertFalse(handled)
+        instance._handle_rfid_info_response.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_handle_shared_bus_filament_info_response_replays_pending_slot(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance.transport_spec = Mock(shared_bus=True)
+        instance._pending_rfid_queries.add(1)
+        instance._handle_rfid_info_response = Mock()
+        response = {"command": "GET_FILAMENT_INFO", "result": {"index": 1, "rfid": 2}}
+
+        handled = instance.handle_shared_bus_filament_info_response(response)
+
+        self.assertTrue(handled)
+        instance._handle_rfid_info_response.assert_called_once_with(1, response)
 
 
 class TestWaitForCondition(unittest.TestCase):
@@ -3785,7 +4122,11 @@ class TestFeedToToolheadWithExtruderAssist(unittest.TestCase):
         instance._change_feed_speed.assert_called_once_with(1, 2)
         instance._extruder_move.assert_called_once_with(5, 2, wait_for_move_end=True)
         instance._stop_feed.assert_called_once_with(1)
-        self.assertEqual(instance.wait_ready.call_count, 2)
+        # wait_ready is called once: after _stop_feed to confirm the stop was processed.
+        # The second call that used to follow _enable_feed_assist was redundant
+        # (_enable_feed_assist has its own internal post-send wait) and caused a
+        # deadlock on ACE2 where feed assist transitions the device to 'busy'.
+        self.assertEqual(instance.wait_ready.call_count, 1)
         instance._enable_feed_assist.assert_called_once_with(1)
 
     @patch('ace.instance.AceSerialManager')
