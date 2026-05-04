@@ -13,8 +13,8 @@ This is a fork of szkrisz' ACEPRO Klipper driver.
 ACE temperature sensor integration adapted from [agrloki/ValgACE](https://github.com/agrloki/ValgACE).
 
 This Anycubic-centric fork has structurally diverged from the original and focuses on:
-- Supports classic ACEPRO as also the new ACE2 PRO 
-- Supports mixed ACE + ACE2 PRO support
+- Supports classic ACEPRO as well as the new ACE2 PRO
+- Supports mixed ACE + ACE2 PRO setups
 - Supporting multiple ACE units, assigns ACE instance IDs based on USB topology
 - Adds RFID support (to automatically populate inventory)
 - Adds more Endless-Spool matching modes (exact, material only or just use the next available spool)
@@ -66,7 +66,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 - ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
 - ✅ **Spoolman Integration**: Automatic spool selection via RFID-to-ID mapping or manual slot assignment
-- 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can by synced automatically the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
+- 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can be synced automatically from the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
 
 ### Standalone Web Dashboard
 
@@ -114,7 +114,7 @@ config/
 ├── printer_K3.cfg        # Kobra 3 printer macros
 ├── printer_KS1.cfg       # Kobra S1 printer macros
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
-└── ace_macros_generic.cfg # Shared ACE helper macros
+├── ace_macros_generic.cfg # Shared ACE helper macros
 └── spoolman_logic.cfg          # Logic for Spoolman ID mapping and tool hooks
 
 extras/
@@ -136,16 +136,16 @@ extras/
 - **Filament Sensors** (required): 
   - Toolhead sensor (close to the hotend) - for runout detection
   - Optional: RMS sensor (return module in Anycubic terms) - for jam detection and path validation
-- **Hotend**: Recommended: Having there a Filament cutter
+- **Hotend**: Recommended: Having a filament cutter
 - **ACE Adapter**: Adapter which converts the Ace-Pro conector to standard USB
 
 
 ### ACE Pro USB Pin Configuration / Adapter
 ![Connector Pinout](/img/connector.png)
 Connect the ACE Pro to a regular USB port and configure the sensor pins according to your board layout.
-If using a ACE2 PRO, you need the KS1/K3 Adapter cable which comes with the KS1/K3 ACE2 kit.
-The ACE2PRO is using RS-485 nativly, for connecting it to a KS1 or K3 (and RPi), a converter to USB is required, which Anycubic provides as part of the ACE2 KS1/K3 kit.
-IMPORTANT: If you have a Kobra-X or Anycubic KS1-MAX ACE2 PRO cable, that wont work! You need then to buy first a KS1/K3 ACE2 conversion cable / RS485-2-USB Adapter
+If using an ACE2 PRO, you need the KS1/K3 adapter cable which comes with the KS1/K3 ACE2 kit.
+The ACE2 PRO uses RS-485 natively; for connecting it to a KS1 or K3 (and RPi), a converter to USB is required, which Anycubic provides as part of the ACE2 KS1/K3 kit.
+IMPORTANT: If you have a Kobra-X or Anycubic KS1-MAX ACE2 PRO cable, that won't work! You need to buy a KS1/K3 ACE2 conversion cable / RS485-2-USB adapter first.
 ![USB Adapter ((c) Gwebster)](/img/Ace2USB_gwebster.png)
 
 Other variations to get a standard USB connection to the ACE can be found on printables.com:
@@ -251,7 +251,7 @@ G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperatur
 - `bedTemp` - Bed temperature
 - `extruderTemp` - Nozzle temperature for the initial tool
 - `tool` - Initial tool index (from `[initial_tool]` Orca variable)
-- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts.Set to `0` to always purge.
+- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts. Set to `0` to always purge.
 
 2. **Update End G-code**
 
@@ -259,7 +259,7 @@ Update your Orca slicer end machine-gcode to call PRINT_END macro:
 ```
 PRINT_END CUT_TIP=1
 ```
-This will ensure that at print end, ACE Pro driver (if available) gets informed of the print end, as also filament is cut and retracted and printhead moves to park position.
+This will ensure that at print end, the ACE Pro driver (if available) is informed of the print end, the filament is cut and retracted, and the printhead moves to the park position.
 If you prefer to NOT get the filament cut at print end, change CUT_TIP argument to zero:
 ```
 PRINT_END CUT_TIP=0
@@ -311,6 +311,7 @@ icon: settings
 panel: acepro
 ```
 Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry makes the panel visible during an active print.
+
 ## ⚙️ Configuration
 
 ### Configuration File Structure
@@ -1030,7 +1031,7 @@ When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver 
 4. Endless spool can now match based on preserved metadata
 ```
 
-## � Connection Supervision
+## 🔗 Connection Supervision
 
 Monitors ACE connection stability and automatically pauses prints if connection becomes unstable.
 
@@ -1120,7 +1121,7 @@ If you see the connection issue dialog during a print, follow these steps:
 5. **Repeat if Necessary**
    - Try steps 1-4 multiple times (2-3 attempts) before canceling print
    - Connection may stabilize after a few minutes
-   - If problem persists after 3 attempts, concider canceling the print and investigate
+   - If problem persists after 3 attempts, consider canceling the print and investigating
 
 6. **Resume or Cancel**
    - Once connection shows `stable`, dismiss the dialog and run: `RESUME`
@@ -1147,7 +1148,7 @@ If you're experiencing **repeated USB disconnections** that you didn't have befo
    - Avoid USB hubs with poor power delivery
    - Try different USB ports on the Raspberry Pi
 
-## �🔄 Endless Spool Feature
+## 🔄 Endless Spool Feature
 
 Automatically switches to a matching spool when filament runs out, enabling continuous multi-day prints.
 
@@ -1336,7 +1337,7 @@ ACE_SHOW_INSTANCE_CONFIG            # Display resolved configuration
 
 ### Sensor Validation
 
-For testing sensor functionality, DON'T use it if you don't know what you are doing:
+For testing sensor functionality — do not use if you don't know what you are doing:
 
 ```gcode
 # Manual sensor state injection (for testing)
@@ -1491,7 +1492,7 @@ Use an N-in-1 splitter matching your total tool count:
 
 This project builds upon excellent prior work:
 
-- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)** - ACEPRO SV08 driver implementation (szkriz)
+- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)** - ACEPRO SV08 driver implementation (szkrisz)
 - **[ACEResearch](https://github.com/printers-for-people/ACEResearch)** - Original ACE Pro research
 - **[DuckACE](https://github.com/utkabobr/DuckACE)** - Base driver implementation
 

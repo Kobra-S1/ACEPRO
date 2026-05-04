@@ -111,9 +111,8 @@ class AceJsonProtocolAdapter(AceProtocolAdapter):
         raise ValueError("ACE1 JSON protocol does not support device ID assignment")
 
     def get_command_catalog(self) -> Tuple[AceCommandSpec, ...]:
-        """Return the proto-derived ACE2 catalog for planning and tooling."""
-        from .protocol_ace2 import ACE2_COMMAND_CATALOG
-        return ACE2_COMMAND_CATALOG
+        """ACE1 uses JSON method names, not binary command codes — no catalog."""
+        return ()
 
     def normalize_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Return a deep copy so transport mutation does not affect callers."""

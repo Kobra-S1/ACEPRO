@@ -791,18 +791,21 @@ class AceInstance:
     def _feed_to_toolhead_with_extruder_assist(self, local_slot, feed_length, feed_speed,
                                                extruder_feeding_length, extruder_feeding_speed):
         """
-        Feed filament to toolhead using feed_sync + extruder assist.
+        Feed filament to toolhead using ACE feed + extruder assist.
 
-        This is the LEGACY implementation that:
-        - Uses _feed_sync (blocking) to start ACE feed
-        - Polls toolhead sensor while pushing extruder in timed chunks
-        - Stops feed when sensor triggers
+        Starts ACE feed, polls toolhead sensor until triggered (or timeout),
+        then slows to extruder_feeding_speed and drives the extruder to seat
+        the filament, finally switches to feed_assist mode.
 
         Args:
             local_slot: Slot index to feed from
+            feed_length: Total length to feed (mm)
+            feed_speed: Initial ACE feed speed (mm/s)
+            extruder_feeding_length: Extruder assist distance (mm)
+            extruder_feeding_speed: Slow speed for final extruder push (mm/s)
 
         Returns:
-            float: Total extruder distance pushed during assist
+            float: Extruder distance pushed during assist
 
         Raises:
             ValueError: If feed command fails or sensor times out
@@ -1009,19 +1012,19 @@ class AceInstance:
 
         return True
 
-    def _change_feed_speed(self, slot, retract_speed):
+    def _change_feed_speed(self, slot, feed_speed):
         """
-        Request to update active feed speed while feeding  is running.
+        Request to update active feed speed while feeding is running.
 
         Returns:
             bool: True if firmware acknowledged, False otherwise
         """
         logging.info(
             f"ACE[{self.instance_num}]: Requesting feed speed change to "
-            f"{retract_speed}mm/s (slot {slot})"
+            f"{feed_speed}mm/s (slot {slot})"
         )
 
-        request = self.protocol.build_update_feeding_speed_request(slot, retract_speed)
+        request = self.protocol.build_update_feeding_speed_request(slot, feed_speed)
         response_container = {"response": None}
 
         def callback(response):
