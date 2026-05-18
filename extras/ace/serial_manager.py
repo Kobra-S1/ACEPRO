@@ -1021,8 +1021,8 @@ class AceSerialManager:
 
         with self._lock:
             if 'id' not in request:
-                request['id'] = self._request_id
-                self._request_id += 1
+                request['id'] = self._request_id & 0xFFFF
+                self._request_id = (self._request_id + 1) & 0xFFFF
 
         data = self.protocol.serialize_request_frame(request, self._calc_crc)
 
@@ -1240,8 +1240,8 @@ class AceSerialManager:
                     break
 
                 with self._lock:
-                    rid = self._request_id
-                    self._request_id += 1
+                    rid = self._request_id & 0xFFFF
+                    self._request_id = (self._request_id + 1) & 0xFFFF
                     req['id'] = rid
                     self._callback_map[rid] = cb
                     self.inflight[rid] = now
