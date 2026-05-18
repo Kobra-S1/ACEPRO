@@ -66,7 +66,7 @@ class AceSerialManager:
         self._lock = threading.RLock()
         self._serial_lock = threading.Lock()
 
-        self._request_id = 0
+        self._request_id = 1
         self._callback_map = {}
         self.inflight = {}
 
@@ -1021,8 +1021,9 @@ class AceSerialManager:
 
         with self._lock:
             if 'id' not in request:
-                request['id'] = self._request_id & 0xFFFF
-                self._request_id = (self._request_id + 1) & 0xFFFF
+                request['id'] = self._request_id
+                next_id = self._request_id + 1
+                self._request_id = next_id if next_id <= 0xFFFF else 1
 
         data = self.protocol.serialize_request_frame(request, self._calc_crc)
 
@@ -1240,8 +1241,9 @@ class AceSerialManager:
                     break
 
                 with self._lock:
-                    rid = self._request_id & 0xFFFF
-                    self._request_id = (self._request_id + 1) & 0xFFFF
+                    rid = self._request_id
+                    next_id = self._request_id + 1
+                    self._request_id = next_id if next_id <= 0xFFFF else 1
                     req['id'] = rid
                     self._callback_map[rid] = cb
                     self.inflight[rid] = now
