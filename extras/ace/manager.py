@@ -921,11 +921,18 @@ class AceManager:
                 # Start extruder retraction (10% faster for slack)
                 self._extruder_move(-abs(retract_length), retract_speed * 1.10, wait_for_move_end=False)
 
-                # Start ACE retraction
-                unload_ok = instance._smart_unload_slot(
-                    local_slot,
-                    length=parkposition_to_toolhead_length + retract_length,
-                )
+                # Start ACE retraction — use RDM sensor for early stop if available
+                if self.has_rdm_sensor():
+                    unload_ok = instance.rmd_triggered_unload_slot(
+                        self, local_slot,
+                        length=parkposition_to_toolhead_length + retract_length,
+                        overshoot_length=50
+                    )
+                else:
+                    unload_ok = instance._smart_unload_slot(
+                        local_slot,
+                        length=parkposition_to_toolhead_length + retract_length,
+                    )
 
                 # Wait for extruder to finish
                 self._wait_toolhead_move_finished()

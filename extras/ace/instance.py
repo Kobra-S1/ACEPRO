@@ -603,7 +603,7 @@ class AceInstance:
 
         return monitor
 
-    def _retract(self, slot, length, speed, on_retract_started=None, on_wait_for_ready=None):
+    def _retract(self, slot, length, speed, on_retract_started=None, on_wait_for_ready=None, early_stop_callback=None):
         """
         Retract filament from slot with automatic retry on FORBIDDEN errors.
 
@@ -721,12 +721,22 @@ class AceInstance:
                     if early_stop_state["triggered"]:
                         self.wait_ready()
                         return {"code": 0, "msg": "Retract stopped early: slot empty"}
+                    if early_stop_callback is not None:
+                        stop_reason = early_stop_callback()
+                        if stop_reason:
+                            self._stop_retract(slot)
+                            self.wait_ready()
+                            return {"code": 0, "msg": f"Retract stopped early: {stop_reason}"}
                     self.reactor.pause(self.reactor.monotonic() + 0.2)
 
                 def wait_cycle():
                     if on_wait_for_ready is not None:
                         on_wait_for_ready()
                     check_slot_empty()
+                    if early_stop_callback is not None:
+                        stop_reason = early_stop_callback()
+                        if stop_reason:
+                            self._stop_retract(slot)
 
                 self.wait_ready(on_wait_cycle=wait_cycle)
 
@@ -1132,48 +1142,108 @@ class AceInstance:
         return None
 
     def rmd_triggered_unload_slot(self, manager, slot, length, overshoot_length):
-        """Unload slot with RDM sensor monitoring and overshoot compensation."""
-        if manager.has_rdm_sensor():
-            f_index = self._get_current_feed_assist_index()
-            self._disable_feed_assist(slot)
+        """Unload slot with RDM sensor monitoring during retraction.
 
-            timeout_seconds = (length / self.retract_speed) * self.timeout_multiplier
-            start_time = time.time()
-            sensor_clear_time = None
-            # Start retraction
-            self._retract(slot, length, self.retract_speed)
+        Monitors the RDM sensor via _retract(early_stop_callback=...) and
+        stops retraction as soon as the filament clears, plus overshoot.
 
-            poll_interval = 0.02
+        Args:
+            manager: AceManager instance (for sensor access)
+            slot: Local slot index (0-3)
+            length: Maximum retract distance (mm) — safety limit
+            overshoot_length: Extra mm to retract after sensor clears
+        Returns:
+            True if sensor cleared and retract stopped, False on timeout
+        """
+        if not manager.has_rdm_sensor():
+            return False
 
-            while (time.time() - start_time) < timeout_seconds:
-                if manager.is_filament_path_free():
-                    if sensor_clear_time is None:
-                        sensor_clear_time = time.time() - start_time
-                        overshoot_time = (overshoot_length / self.retract_speed) * self.timeout_multiplier
+        f_index = self._get_current_feed_assist_index()
+        self._disable_feed_assist(slot)
 
-                        self.gcode.respond_info(
-                            f"ACE[{self.instance_num}]: Sensor cleared "
-                            f"after {sensor_clear_time:.2f}s, "
-                            f"waiting {overshoot_time:.2f}s for overshoot"
-                        )
+        # Shared state for the callback
+        rdm_state = {
+            "cleared": False,
+            "clear_time": None,
+            "start_time": time.time(),
+            "last_log": 0,
+        }
 
-                        self.dwell(overshoot_time)
+        def rdm_early_stop_check():
+            """Called every ~200ms from _retract()'s dwell loop.
+            Returns a truthy string to trigger early stop, or None to continue."""
+            elapsed = time.time() - rdm_state["start_time"]
 
-                    self._stop_retract(slot)
+            rdm_has_filament = manager.get_instant_switch_state(SENSOR_RDM)
 
-                    elapsed = time.time() - start_time
-                    self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: RMD triggered unload slot {slot} "
-                        f"completed in {elapsed:.2f}s"
+            # Log sensor state every 2 seconds
+            if elapsed - rdm_state["last_log"] >= 2.0:
+                state_str = "TRIGGERED" if rdm_has_filament else "CLEAR"
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: [{elapsed:.1f}s] RDM={state_str}"
+                )
+                rdm_state["last_log"] = elapsed
+
+            if not rdm_has_filament and not rdm_state["cleared"]:
+                rdm_state["cleared"] = True
+                rdm_state["clear_time"] = elapsed
+
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: RDM CLEAR after {elapsed:.1f}s — "
+                    f"applying {overshoot_length}mm overshoot"
+                )
+
+                # Overshoot: let the motor run a bit longer before stopping
+                overshoot_time = overshoot_length / self.retract_speed
+                if overshoot_time > 0:
+                    self.reactor.pause(
+                        self.reactor.monotonic() + overshoot_time
                     )
-                    self._update_feed_assist(f_index)
-                    return True
+                return f"RDM clear at {elapsed:.1f}s"
 
-                self.dwell(poll_interval)
+            return None
 
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: RDM-triggered unload — "
+            f"slot {slot}, max {length}mm @ {self.retract_speed}mm/s, "
+            f"overshoot {overshoot_length}mm"
+        )
+
+        try:
+            result = self._retract(
+                slot, length, self.retract_speed,
+                early_stop_callback=rdm_early_stop_check,
+            )
+        except Exception as e:
             self._stop_retract(slot)
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Retract error: {e}"
+            )
             self._update_feed_assist(f_index)
-        return False
+            # If the sensor already cleared, the physical unload succeeded
+            # even if wait_ready timed out afterward
+            return rdm_state["cleared"]
+
+        self._update_feed_assist(f_index)
+
+        # Slot was already empty before retraction started
+        if result and "slot empty" in result.get("msg", ""):
+            return True
+
+        if rdm_state["cleared"]:
+            total = time.time() - rdm_state["start_time"]
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: RMD triggered unload slot {slot} "
+                f"completed in {total:.1f}s "
+                f"(sensor cleared at {rdm_state['clear_time']:.1f}s)"
+            )
+            return True
+        else:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: RDM triggered unload — "
+                f"sensor never cleared during {length}mm retract!"
+            )
+            return False
 
     def _smart_unload_slot(self, slot, length=100, on_retract_started=None):
         """
