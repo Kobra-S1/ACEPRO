@@ -926,7 +926,7 @@ class AceManager:
                     unload_ok = instance.rmd_triggered_unload_slot(
                         self, local_slot,
                         length=parkposition_to_toolhead_length + retract_length,
-                        overshoot_length=50
+                        overshoot_length=instance.rdm_overshoot_length
                     )
                 else:
                     unload_ok = instance._smart_unload_slot(

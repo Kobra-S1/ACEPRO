@@ -139,6 +139,9 @@ def read_ace_config(config):
 
     ace_config["parkposition_to_toolhead_length"] = config.getint("parkposition_to_toolhead_length", 1000)
     ace_config["parkposition_to_rdm_length"] = config.getint("parkposition_to_rdm_length", 150)
+    # Extra retraction (mm) after the RDM sensor clears during unload (safety
+    # margin past the splitter exit). Only used when an RDM sensor is present.
+    ace_config["rdm_overshoot_length"] = config.getfloat("rdm_overshoot_length", 50.0)
     ace_config["toolhead_retraction_speed"] = config.getint("toolhead_retraction_speed", 10)
     ace_config["toolhead_retraction_length"] = config.getint("toolhead_retraction_length", 40)
     ace_config["toolhead_full_purge_length"] = config.getint("toolhead_full_purge_length", 22)
