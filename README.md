@@ -1469,8 +1469,11 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
 ### Sensor Installation (Required)
 
 1. **Toolhead Sensor**: Before hotend entry (runout detection)
-2. **RMS Sensor**: At splitter/return module (jam detection, path validation)
-3. **Wiring**: Connect to configured pins with proper pullup/pulldown
+   Note: K3 and S1 have these sensors close to the entry to the extruder, not after.
+3. **RMS Sensor**: At splitter/return module (jam detection, path validation)
+   Suggest using the "Anycubic ACE Pro for Kobra 3 Upgrade Kit" - this will provide an encoder
+   (filament motion) as well as a "splitter" position for parking.
+5. **Wiring**: Connect to configured pins with proper pullup/pulldown
 
 ### USB Connection
 
