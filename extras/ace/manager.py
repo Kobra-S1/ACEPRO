@@ -675,6 +675,29 @@ class AceManager:
             # RDM not available - check only toolhead
             return not toolhead_blocked
 
+    def _turn_off_heater_if_idle(self):
+        """
+        Turn off extruder heater if the printer is not currently printing.
+
+        Called after successful unload operations to avoid leaving the
+        heater on indefinitely when unloading outside of a print job.
+        During printing, the heater must stay on for the next toolchange.
+        """
+        try:
+            print_stats = self.printer.lookup_object("print_stats", None)
+            if print_stats:
+                stats = print_stats.get_status(self.reactor.monotonic())
+                state = (stats.get("state") or "").lower()
+                if state in ("printing", "paused"):
+                    self.gcode.respond_info(
+                        "ACE: Printer is printing/paused — keeping heater on"
+                    )
+                    return
+            self.gcode.respond_info("ACE: Not printing — turning off extruder heater")
+            self.gcode.run_script_from_command("M104 S0")
+        except Exception as e:
+            self.gcode.respond_info(f"ACE: Warning — could not turn off heater: {e}")
+
     def prepare_toolhead_for_filament_retraction(self, tool_index=-1):
         """
         Prepare toolhead (extruder/nozzle) for filament retraction.
@@ -889,6 +912,7 @@ class AceManager:
                 if self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
+                    self._turn_off_heater_if_idle()
                     return True
                 else:
                     raise Exception(f"Path still blocked after unload of T{tool_index}")
@@ -933,6 +957,7 @@ class AceManager:
                 if unload_ok and self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
+                    self._turn_off_heater_if_idle()
                     return True
                 else:
                     raise Exception(f"Unload failed for T{tool_index}")
