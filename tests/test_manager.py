@@ -4037,31 +4037,62 @@ class TestFullUnloadSlot(unittest.TestCase):
         instance._retract.assert_not_called()
         manager.state.set_and_save.assert_not_called()
 
-    def test_full_unload_rdm_success(self):
+    def test_full_unload_non_active_success(self):
+        """Non-active tool: slot sensor confirms empty during retract."""
         instance = self._make_instance()
+        instance._last_retract_early_stopped = True
         manager = self._build_manager(lambda *a, **k: instance)
-        manager.state.set = Mock()
-        manager.get_switch_state = Mock(side_effect=[False, False])  # both sensors clear after retract
-        manager.has_rdm_sensor = Mock(return_value=True)
 
         result = manager.full_unload_slot(0)
 
         self.assertTrue(result)
-        instance._retract.assert_called_once_with(0, length=instance.total_max_feeding_length, speed=instance.retract_speed)
-        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        instance._retract.assert_called_once_with(
+            0, length=instance.total_max_feeding_length, speed=instance.retract_speed
+        )
 
-    def test_full_unload_toolhead_only_blocked(self):
+    def test_full_unload_non_active_failure(self):
+        """Non-active tool: slot sensor never reports empty."""
         instance = self._make_instance()
+        instance._last_retract_early_stopped = False
         manager = self._build_manager(lambda *a, **k: instance)
-        manager.state.set_and_save = Mock()
-        manager.get_instant_switch_state = Mock(return_value=True)  # toolhead still blocked
-        manager.has_rdm_sensor = Mock(return_value=False)
 
         result = manager.full_unload_slot(0)
 
         self.assertFalse(result)
         instance._retract.assert_called_once()
-        manager.state.set_and_save.assert_not_called()
+
+    def test_full_unload_active_success(self):
+        """Active tool: toolhead prepared, retract succeeds, state reset, heater off."""
+        instance = self._make_instance()
+        instance._last_retract_early_stopped = True
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager._extruder_move = Mock()
+        manager.state.set = Mock()
+        self.variables["ace_current_index"] = 0
+
+        result = manager.full_unload_slot(0)
+
+        self.assertTrue(result)
+        manager.prepare_toolhead_for_filament_retraction.assert_called_once_with(tool_index=0)
+        instance._retract.assert_called_once()
+        manager.state.set.assert_any_call("ace_current_index", -1)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        self.mock_gcode.run_script_from_command.assert_any_call("M104 S0")
+
+    def test_full_unload_active_failure_heater_off(self):
+        """Active tool: retract fails but heater still turned off (finally block)."""
+        instance = self._make_instance()
+        instance._last_retract_early_stopped = False
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager._extruder_move = Mock()
+        self.variables["ace_current_index"] = 0
+
+        result = manager.full_unload_slot(0)
+
+        self.assertFalse(result)
+        self.mock_gcode.run_script_from_command.assert_any_call("M104 S0")
 
     def test_full_unload_invalid_tool(self):
         instance = self._make_instance()
