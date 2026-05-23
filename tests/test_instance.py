@@ -71,6 +71,7 @@ class TestAceInstance(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'status_debug_logging': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -399,6 +400,7 @@ class TestRegisterToolMacros(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'status_debug_logging': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -469,6 +471,7 @@ class TestWaitReady(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'status_debug_logging': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -573,6 +576,7 @@ class TestIsSlotEmpty(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -635,6 +639,7 @@ class TestRetract(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=0.5):
@@ -787,6 +792,7 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -967,6 +973,7 @@ class TestFeedAndStopHelpers(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -1131,6 +1138,7 @@ class TestFeedAssist(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -1408,6 +1416,7 @@ class TestInventoryManagement(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -1488,6 +1497,7 @@ class TestStatusCallbacks(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -2272,6 +2282,7 @@ class TestFeedRetractOperations(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2375,6 +2386,7 @@ class TestHeartbeat(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2431,6 +2443,7 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2634,6 +2647,7 @@ class TestSmartUnloadSlot(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2701,6 +2715,7 @@ class TestStatusUpdateCallback(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2904,6 +2919,7 @@ class TestWaitForCondition(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2973,6 +2989,7 @@ class TestManagerProperty(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3054,6 +3071,7 @@ class TestSensorTriggerMonitor(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def tearDown(self):
@@ -3193,6 +3211,7 @@ class TestGetStatus(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3274,6 +3293,7 @@ class TestInventoryJsonEmission(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rfid_temp_mode': 'average',
             'status_debug_logging': True,
+            'rdm_overshoot_length': 50.0,
         }
     
     def _mock_lookup_object(self, name, default=None):
@@ -3424,6 +3444,7 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
         INSTANCE_MANAGERS.clear()
@@ -3583,6 +3604,7 @@ class TestExtruderMove(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3668,6 +3690,7 @@ class TestSmartUnloadSlot(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _lookup(self, name, default=None):
@@ -3870,6 +3893,7 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=0.5):
@@ -3889,19 +3913,24 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
         self.assertFalse(result)
 
     @patch('ace.instance.AceSerialManager')
-    def test_successful_clear_stops_and_restores_feed_assist(self, mock_serial_mgr_class):
+    def test_successful_clear_via_callback_restores_feed_assist(self, mock_serial_mgr_class):
+        """Callback-driven: _retract invokes early_stop_callback, sensor clears."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
         manager.has_rdm_sensor.return_value = True
-        # Path becomes clear on third poll
-        manager.is_filament_path_free.side_effect = [False, False, True]
+        # Sensor is clear (no filament) — callback should trigger early stop
+        manager.get_instant_switch_state = Mock(return_value=False)
 
         instance._disable_feed_assist = Mock()
         instance._get_current_feed_assist_index = Mock(return_value=2)
-        instance._retract = Mock()
-        instance._stop_retract = Mock()
         instance._update_feed_assist = Mock()
-        instance.dwell = Mock()
+
+        # Mock _retract to invoke the early_stop_callback once (simulates dwell loop)
+        def mock_retract(slot, length, speed, early_stop_callback=None):
+            if early_stop_callback:
+                early_stop_callback()
+            return {'code': 0, 'msg': 'OK'}
+        instance._retract = Mock(side_effect=mock_retract)
 
         times = self._time_generator(step=0.4)
         with patch('ace.instance.time.time', side_effect=lambda: next(times)):
@@ -3909,32 +3938,34 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
 
         self.assertTrue(result)
         instance._disable_feed_assist.assert_called_once_with(1)
-        instance._retract.assert_called_once_with(1, 100, instance.retract_speed)
-        instance._stop_retract.assert_called_once_with(1)
+        # _retract called with early_stop_callback kwarg
+        instance._retract.assert_called_once()
+        call_kwargs = instance._retract.call_args[1]
+        self.assertIn('early_stop_callback', call_kwargs)
+        self.assertIsNotNone(call_kwargs['early_stop_callback'])
         instance._update_feed_assist.assert_called_once_with(2)
-        # Overshoot dwell invoked once when clear detected
-        instance.dwell.assert_called()
 
     @patch('ace.instance.AceSerialManager')
-    def test_timeout_returns_false_and_restores_feed_assist(self, mock_serial_mgr_class):
+    def test_sensor_never_clears_returns_false_restores_feed_assist(self, mock_serial_mgr_class):
+        """Callback-driven: _retract completes full length, sensor never clears."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
         manager.has_rdm_sensor.return_value = True
-        manager.is_filament_path_free.return_value = False  # never clears
+        # Sensor always triggered (filament present) — callback never triggers early stop
+        manager.get_instant_switch_state = Mock(return_value=True)
 
         instance._disable_feed_assist = Mock()
         instance._get_current_feed_assist_index = Mock(return_value=3)
-        instance._retract = Mock()
-        instance._stop_retract = Mock()
         instance._update_feed_assist = Mock()
-        instance.dwell = Mock()
+
+        # _retract completes full length without early stop
+        instance._retract = Mock(return_value={'code': 0, 'msg': 'OK'})
 
         times = self._time_generator(step=1.0)
         with patch('ace.instance.time.time', side_effect=lambda: next(times)):
             result = instance.rmd_triggered_unload_slot(manager, slot=2, length=50, overshoot_length=10)
 
         self.assertFalse(result)
-        instance._stop_retract.assert_called_once_with(2)
         instance._update_feed_assist.assert_called_once_with(3)
 
 
@@ -3980,6 +4011,7 @@ class TestFeedFilamentWithWaitForResponse(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=1.0):
@@ -4083,6 +4115,7 @@ class TestFeedToToolheadWithExtruderAssist(unittest.TestCase):
             'max_dryer_temperature': 70,
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
+            'rdm_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=0.2):
