@@ -845,7 +845,7 @@ class AceManager:
             toolhead.wait_moves()
 
     @toolchange_in_progress_guard
-    def smart_unload(self, tool_index=-1, prepare_toolhead=True):
+    def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False):
         """
         Unload with slot cycling when tool is unknown.
 
@@ -912,7 +912,8 @@ class AceManager:
                 if self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
-                    self._turn_off_heater_if_idle()
+                    if not keep_heater:
+                        self._turn_off_heater_if_idle()
                     return True
                 else:
                     raise Exception(f"Path still blocked after unload of T{tool_index}")
@@ -964,7 +965,8 @@ class AceManager:
                 if unload_ok and self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
-                    self._turn_off_heater_if_idle()
+                    if not keep_heater:
+                        self._turn_off_heater_if_idle()
                     return True
                 else:
                     raise Exception(f"Unload failed for T{tool_index}")
@@ -1855,7 +1857,7 @@ class AceManager:
                 f"but state='{filament_pos}'. Performing smart_unload to clear path. May help or not..."
             )
 
-            success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1)
+            success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1, keep_heater=True)
             if not success:
                 raise Exception("Failed to clear filament path - plausibility check failed")
             current_tool = -1
@@ -1866,7 +1868,7 @@ class AceManager:
                 f"state='{filament_pos}'. Performing smart_unload to clear path."
             )
 
-            success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1)
+            success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1, keep_heater=True)
             if not success:
                 raise Exception("Failed to clear RMS filament path")
             current_tool = -1
@@ -1979,7 +1981,7 @@ class AceManager:
                         f"state is:'{filament_pos} and sensor report path is blocked. "
                         f"Attempting to clear path."
                     )
-                    success = self.smart_unload(tool_index=-1)
+                    success = self.smart_unload(tool_index=-1, keep_heater=True)
                     if not success:
                         raise Exception(
                             f"Cannot proceed with tool {target_tool} - filament path is jammed. "
@@ -2020,7 +2022,7 @@ class AceManager:
                         self.state.set("ace_filament_pos", FILAMENT_STATE_NOZZLE)
 
                     self.gcode.respond_info(f"ACE: Tool {current_tool} marked as loaded, performing unload")
-                    success = self.smart_unload(tool_index=current_tool)
+                    success = self.smart_unload(tool_index=current_tool, keep_heater=True)
                     if not success:
                         raise Exception(f"Failed to unload tool {current_tool}")
                     self.gcode.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
@@ -2034,7 +2036,7 @@ class AceManager:
                 self.gcode.respond_info(f"ACE: Unknown filament_pos='{filament_pos}', checking sensors...")
                 if self.get_switch_state(SENSOR_TOOLHEAD):
                     self.gcode.respond_info("ACE: Toolhead sensor triggered, performing unload")
-                    success = self.smart_unload(tool_index=current_tool)
+                    success = self.smart_unload(tool_index=current_tool, keep_heater=True)
                     if not success:
                         raise Exception(f"Failed to unload tool {current_tool}")
                 else:
