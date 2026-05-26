@@ -743,6 +743,54 @@ class AceManager:
             self.gcode.respond_info(f"ACE: Error preparing toolhead for retraction: {e}")
             return False
 
+    def _ensure_hot_for_recovery_unload(self, current_tool, target_temp):
+        """Heat the extruder before a plausibility-mismatch recovery unload.
+
+        The plausibility-mismatch unloads in :meth:`perform_tool_change` run
+        *before* the PRE macro has heated the nozzle.  When the toolhead sensor
+        is triggered, :meth:`smart_unload` drives extruder moves (pre-cut
+        retract, coordinated retract) which Klipper rejects with
+        "Extrude below minimum temp" on a cold nozzle.
+
+        Picks the best available temperature — the stuck tool's material temp,
+        then the incoming target temp, then ``min_extrude_temp`` as a last
+        resort — and waits for it via ``M109`` when the nozzle is too cold.
+        Independent of whether an RDM sensor is present.
+
+        Args:
+            current_tool: Tool currently recorded as loaded (-1 if unknown).
+            target_temp:  Target tool temperature already resolved by the caller
+                          (0 when unavailable, e.g. unload-only changes).
+        """
+        extruder = self.printer.lookup_object("extruder", None)
+        if extruder is None:
+            return
+        heater = extruder.get_heater()
+        cur_temp = heater.get_temp(self.reactor.monotonic())[0]
+        min_temp = heater.min_extrude_temp
+        if cur_temp >= min_temp:
+            return  # already hot enough to move the extruder
+
+        # The filament physically stuck in the path belongs to the current
+        # tool, so prefer its material temperature.
+        heat_temp = 0
+        if current_tool >= 0:
+            cur_ace, cur_slot = get_ace_instance_and_slot_for_tool(current_tool)
+            if cur_ace is not None:
+                heat_temp = cur_ace.inventory[cur_slot].get("temp", 0) or 0
+        if heat_temp <= 0:
+            heat_temp = target_temp
+        if heat_temp <= 0:
+            # Last resort: clear Klipper's cold-extrude guard so recovery can
+            # proceed at all — better than crashing the whole toolchange.
+            heat_temp = min_temp
+
+        self.gcode.respond_info(
+            f"ACE: Extruder too cold ({cur_temp:.0f}°C < {min_temp:.0f}°C) for "
+            f"recovery unload — heating to {heat_temp:.0f}°C before clearing path"
+        )
+        self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
+
     def execute_coordinated_retraction(self, retract_length, retract_speed, retract_speed_mmmin, current_tool):
         """
         Perform coordinated retraction of ACE and extruder.
@@ -898,16 +946,38 @@ class AceManager:
                         f"(filament may have been manually removed) - "
                         f"short safety retract of {retract_dist}mm"
                     )
+                    instance._smart_unload_slot(local_slot, length=retract_dist)
                 else:
-                    # Toolhead clear but RDM still triggered: full retract needed.
+                    # Toolhead clear but RDM still triggered: retract until the
+                    # RDM clears.  With an RDM sensor, monitor it during the
+                    # retraction (early stop + overshoot) instead of blindly
+                    # pulling the full park-to-toolhead distance — the latter can
+                    # keep retracting long after the path is clear and pull the
+                    # slot's filament back over the ACE entry sensor.
                     retract_dist = self._get_config_for_tool(
                         tool_index, "parkposition_to_toolhead_length"
                     )
-                    self.gcode.respond_info(
-                        f"ACE: Toolhead clear, RDM triggered - full retract of T{tool_index} ({retract_dist}mm)"
-                    )
-
-                instance._smart_unload_slot(local_slot, length=retract_dist)
+                    if self.has_rdm_sensor():
+                        self.gcode.respond_info(
+                            f"ACE: Toolhead clear, RDM triggered - RDM-monitored "
+                            f"retract of T{tool_index} (max {retract_dist}mm)"
+                        )
+                        unload_ok = instance.rmd_triggered_unload_slot(
+                            self, local_slot,
+                            length=retract_dist,
+                            overshoot_length=instance.rdm_overshoot_length,
+                        )
+                        if not unload_ok:
+                            raise Exception(
+                                f"RDM-monitored unload of T{tool_index} failed"
+                            )
+                    else:
+                        # No RDM sensor: a fixed-length retract is the best we can
+                        # do — there is no sensor between ACE and toolhead to stop on.
+                        self.gcode.respond_info(
+                            f"ACE: Toolhead clear - full retract of T{tool_index} ({retract_dist}mm)"
+                        )
+                        instance._smart_unload_slot(local_slot, length=retract_dist)
 
                 if self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -1242,6 +1312,10 @@ class AceManager:
 
                 else:
                     # CASE 3: ACE-only retraction with sensor monitoring
+                    # Uses early_stop_callback inside _retract() so the sensor
+                    # is polled DURING retraction (not after) — same approach
+                    # as rmd_triggered_unload_slot from PR #11.
+
                     # Disable feed assist BEFORE retraction — it pushes forward
                     # which fights the retraction.
                     if instance._feed_assist_index == slot:
@@ -1250,45 +1324,94 @@ class AceManager:
                         )
                         instance._disable_feed_assist(slot)
 
-                    instance.wait_ready()
-                    instance._retract(slot, length=full_unload_length, speed=retract_speed)
+                    overshoot_length = instance.rdm_overshoot_length
 
-                    # Monitor sensor during retraction
-                    start_time = self.reactor.monotonic()
-                    max_wait = (full_unload_length / retract_speed) + 2.0
-                    trigger_time = None
-                    delay_after_trigger = sensor_to_parking_length / retract_speed if sensor_to_parking_length else 0.5
+                    # Limit retraction length for wrong-slot protection:
+                    # if sensor_to_parking_length is known, the correct slot's
+                    # filament must clear within (full - parking) mm.  Don't
+                    # retract more than necessary to avoid pulling a wrong
+                    # slot's filament completely out of the ACE unit.
+                    if sensor_to_parking_length and sensor_to_parking_length < full_unload_length:
+                        test_length = full_unload_length - sensor_to_parking_length + overshoot_length
+                    else:
+                        test_length = full_unload_length
 
-                    while True:
-                        elapsed = self.reactor.monotonic() - start_time
-                        if elapsed > max_wait:
-                            self.gcode.respond_info(
-                                f"ACE[{instance_num}]: Timeout waiting for {sensor_name} change on slot {slot}"
-                            )
-                            break
+                    # Shared state for the early_stop_callback
+                    monitor_state = {
+                        "cleared": False,
+                        "start_time": time.time(),
+                        "last_log": 0,
+                    }
 
-                        sensor_state = self.get_instant_switch_state(sensor_name)
+                    def make_sensor_callback(inst_num, sname, overshoot_len, overshoot_spd, mstate):
+                        """Factory to capture loop variables in closure."""
+                        def sensor_early_stop_check():
+                            elapsed = time.time() - mstate["start_time"]
 
-                        # Detect sensor clearing (triggered → clear)
-                        if not sensor_state and trigger_time is None:
-                            trigger_time = self.reactor.monotonic()
-                            self.gcode.respond_info(
-                                f"ACE[{instance_num}]: {sensor_name} cleared! "
-                                f"Waiting {delay_after_trigger:.2f}s before stopping"
-                            )
+                            sensor_has_filament = self.get_instant_switch_state(sname)
 
-                        # Wait for delay after trigger
-                        if trigger_time is not None:
-                            time_since_trigger = self.reactor.monotonic() - trigger_time
-                            if time_since_trigger >= delay_after_trigger:
+                            # Log every 2 seconds
+                            if elapsed - mstate["last_log"] >= 2.0:
+                                state_str = "TRIGGERED" if sensor_has_filament else "CLEAR"
                                 self.gcode.respond_info(
-                                    f"ACE[{instance_num}]: ✓ T{tool_num} identified via {sensor_name} monitoring"
+                                    f"ACE[{inst_num}]: [{elapsed:.1f}s] {sname}={state_str}"
                                 )
-                                instance._stop_feed(slot)
-                                identified_tool = (instance_num, slot, tool_num)
-                                break
+                                mstate["last_log"] = elapsed
 
-                        self.reactor.pause(self.reactor.monotonic() + 0.05)
+                            if not sensor_has_filament and not mstate["cleared"]:
+                                mstate["cleared"] = True
+
+                                self.gcode.respond_info(
+                                    f"ACE[{inst_num}]: {sname} cleared after {elapsed:.1f}s — "
+                                    f"applying {overshoot_len}mm overshoot"
+                                )
+
+                                overshoot_time = overshoot_len / overshoot_spd
+                                if overshoot_time > 0:
+                                    self.reactor.pause(
+                                        self.reactor.monotonic() + overshoot_time
+                                    )
+                                return f"{sname} clear at {elapsed:.1f}s"
+
+                            return None
+                        return sensor_early_stop_check
+
+                    early_stop_cb = make_sensor_callback(
+                        instance_num, sensor_name, overshoot_length,
+                        retract_speed, monitor_state
+                    )
+
+                    self.gcode.respond_info(
+                        f"ACE[{instance_num}]: Cycling test — slot {slot} (T{tool_num}), "
+                        f"max {test_length:.0f}mm @ {retract_speed}mm/s, "
+                        f"overshoot {overshoot_length}mm"
+                    )
+
+                    instance.wait_ready()
+                    try:
+                        instance._retract(
+                            slot, length=test_length, speed=retract_speed,
+                            early_stop_callback=early_stop_cb,
+                        )
+                    except Exception as e:
+                        instance._stop_retract(slot)
+                        self.gcode.respond_info(
+                            f"ACE[{instance_num}]: Retract error on slot {slot}: {e}"
+                        )
+
+                    if monitor_state["cleared"]:
+                        elapsed = time.time() - monitor_state["start_time"]
+                        self.gcode.respond_info(
+                            f"ACE[{instance_num}]: ✓ T{tool_num} identified via "
+                            f"{sensor_name} monitoring in {elapsed:.1f}s"
+                        )
+                        identified_tool = (instance_num, slot, tool_num)
+                    else:
+                        elapsed = time.time() - monitor_state["start_time"]
+                        self.gcode.respond_info(
+                            f"ACE[{instance_num}]: {sensor_name} not cleared by "
+                            f"slot {slot} after {elapsed:.1f}s — wrong slot"
+                        )
 
                     if identified_tool is not None:
                         break
@@ -1851,15 +1974,43 @@ class AceManager:
             f"State: filament_pos='{filament_pos}', current_tool=T{current_tool}"
         )
 
+        # Resolve the target tool's temperature up-front.  The plausibility-
+        # mismatch unloads below run before the PRE macro heats the nozzle and
+        # need a temperature to fall back on when heating for a recovery unload.
+        target_temp = 0
+        if target_tool >= 0:
+            target_ace, target_slot = get_ace_instance_and_slot_for_tool(target_tool)
+            if target_ace is not None:
+                inv_temp = target_ace.inventory[target_slot].get("temp", 0)
+                if inv_temp > 0:
+                    target_temp = inv_temp
+                    self.gcode.respond_info(
+                        f"ACE: Target tool T{target_tool} inventory temp: {target_temp}°C"
+                    )
+
         if (toolhead_sensor or rdm_sensor) and (filament_pos == FILAMENT_STATE_BOWDEN):
             self.gcode.respond_info(
                 f"ACE: PLAUSIBILITY MISMATCH - Sensors show filament present "
                 f"but state='{filament_pos}'. Performing smart_unload to clear path. May help or not..."
             )
 
+            # smart_unload may drive extruder moves: prepare_toolhead re-reads
+            # the toolhead sensor live (it can differ from the read above), and
+            # stale moves queued by a failed load can flush here.  Heat the
+            # nozzle first regardless of the current sensor read.  This runs
+            # before the PRE macro; the guard returns immediately when the
+            # nozzle is already above min_extrude_temp.
+            self._ensure_hot_for_recovery_unload(current_tool, target_temp)
+
             success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1, keep_heater=True)
             if not success:
                 raise Exception("Failed to clear filament path - plausibility check failed")
+            # Reset extruder state after emergency unload — the cycling path
+            # (Case 2/3) has no G92 E0 cleanup unlike the normal unload path.
+            # Stale E position or queued moves can cause "Extrude below
+            # minimum temp" when M109 flushes the move queue.
+            self.gcode.run_script_from_command("G92 E0")
+            self.gcode.run_script_from_command("M400")
             current_tool = -1
 
         if not toolhead_sensor and rdm_sensor and (filament_pos == FILAMENT_STATE_SPLITTER):
@@ -1871,18 +2022,9 @@ class AceManager:
             success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1, keep_heater=True)
             if not success:
                 raise Exception("Failed to clear RMS filament path")
+            self.gcode.run_script_from_command("G92 E0")
+            self.gcode.run_script_from_command("M400")
             current_tool = -1
-
-        target_temp = 0
-        if target_tool >= 0:
-            target_ace, target_slot = get_ace_instance_and_slot_for_tool(target_tool)
-            if target_ace is not None:
-                inv_temp = target_ace.inventory[target_slot].get("temp", 0)
-                if inv_temp > 0:
-                    target_temp = inv_temp
-                    self.gcode.respond_info(
-                        f"ACE: Target tool T{target_tool} inventory temp: {target_temp}°C"
-                    )
 
         # ===== HANDLE TOOL RESELECTION =====
         if current_tool == target_tool:
@@ -2060,6 +2202,34 @@ class AceManager:
 
             if target_ace is None:
                 raise Exception(f"Tool {target_tool} not managed by any ACE instance")
+
+            # Safety: verify extruder is at operating temperature before
+            # attempting to load.  The PRE macro should have heated via M109,
+            # but after error-recovery paths (plausibility mismatch, jam
+            # recovery) the nozzle may still be cold.
+            #
+            # Unlike the plausibility recovery guard (_ensure_hot_for_recovery_unload),
+            # this guard fails fast by design: reaching here cold with no target
+            # temperature means BOTH the PRE macro and the recovery guard failed
+            # to heat — something is fundamentally wrong, so raising is safer than
+            # guessing a temperature and loading blind.  Do not "unify" the two
+            # guards: clearing a stuck path must degrade gracefully, loading must not.
+            extruder = self.printer.lookup_object("extruder", None)
+            if extruder:
+                cur_temp = extruder.get_heater().get_temp(self.reactor.monotonic())[0]
+                min_temp = extruder.get_heater().min_extrude_temp
+                if cur_temp < min_temp:
+                    self.gcode.respond_info(
+                        f"ACE: Extruder too cold ({cur_temp:.0f}°C < {min_temp:.0f}°C) "
+                        f"— waiting for temperature before load"
+                    )
+                    if target_temp > 0:
+                        self.gcode.run_script_from_command(f"M109 S{target_temp}")
+                    else:
+                        raise Exception(
+                            f"Extruder too cold ({cur_temp:.0f}°C) and no target "
+                            f"temperature set — cannot load filament"
+                        )
 
             self.gcode.respond_info(f"ACE[{target_ace.instance_num}]: Loading tool {target_tool}...")
 
