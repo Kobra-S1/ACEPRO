@@ -83,9 +83,10 @@ extras/ace/
 - `ace_global_enabled`: ACE system master enable
 - **Sensor Management**: Manages shared sensors (toolhead, optional RDM), supporting both
   `filament_switch_sensor` and `filament_tracker` via `FilamentTrackerAdapter`
-- **Smart Operations**: `smart_unload()`, `smart_load()` with sensor-aware fallback
+- **Smart Operations**: `smart_unload()`, `smart_load()`, and `full_unload_slot()` with sensor-aware fallback
 - **Tool Change Orchestration**: `perform_tool_change()` coordinates unload/load across instances
 - **Runout Detection**: Creates `RunoutMonitor` to poll sensors (50ms interval) and raise events
+- **Heater Safety**: Turns off the extruder heater after successful unload when not printing/paused
 
 **Toolchange Guard Decorator:**
 ```python
@@ -101,8 +102,10 @@ The decorator uses a **depth counter** (`_toolchange_depth`) to support nested t
 # Core Operations
 smart_unload(tool_index)                    # Intelligent unload with fallback strategies
 smart_load()                                # Load all non-empty slots to RDM sensor
+full_unload_slot(tool_index)                # Full retract until slot empty (active/non-active aware)
 perform_tool_change(current, target)        # Complete tool change sequence
 execute_coordinated_retraction(...)         # Synchronized ACE + extruder retraction
+_turn_off_heater_if_idle()                  # Safety: M104 S0 after unloads outside print jobs
 
 # Startup Validation
 _validate_startup_tool_state()              # Clear stale persisted tool state if sensors show clear;
@@ -155,14 +158,15 @@ serial_mgr: AceSerialManager        # Communication handler
 # Defaults for non-RFID spools (applied when slot becomes ready with no metadata)
 DEFAULT_MATERIAL = "Unknown"       # Won't match in endless spool exact/material modes
 DEFAULT_COLOR = [0, 0, 0]           # Black - default empty slot color
-DEFAULT_TEMP = 225                  # Safe middle-ground temperature
+DEFAULT_TEMP = 0                    # Unknown temp until RFID/manual metadata is available
 ```
 
 **Key Methods:**
 ```python
 # Feed/Retract Operations
 _feed(slot, length, speed, callback)         # Feed filament from slot (async)
-_retract(slot, length, speed, on_retract_started, on_wait_for_ready)
+_retract(slot, length, speed, on_retract_started, on_wait_for_ready,
+         early_stop_callback)
                                              # Retract filament to slot with callbacks
 _stop_feed(slot)                             # Stop active feed operation
 _stop_retract(slot)                          # Stop active retract operation
@@ -172,7 +176,7 @@ _feed_sync(slot, length, speed)              # Synchronous feed with blocking wa
 _feed_filament_into_toolhead(tool)           # Load filament to nozzle (multi-stage)
 _feed_filament_to_verification_sensor(slot)  # Feed to RDM/toolhead sensor only
 _smart_unload_slot(slot, length)             # Unload with sensor validation and retry
-rmd_triggered_unload_slot(...)               # RDM-triggered unload with coordinated retraction
+rmd_triggered_unload_slot(...)               # RDM-triggered unload with callback-driven early stop + overshoot
 
 # Feed Assist
 _enable_feed_assist(slot)                    # Auto-push filament on detection
@@ -235,6 +239,14 @@ This enables precise timing measurements for:
 - Detecting stuck filament (late sensor triggers)
 - Optimizing movement speeds
 - Diagnosing mechanical issues
+
+**Retract Early-Stop Behavior:**
+- `_retract()` supports two early-stop paths:
+  - Slot reports empty (`_is_slot_empty`) -> retract is stopped immediately
+  - Optional `early_stop_callback` returns a stop reason (for sensor-driven stop conditions)
+- `_last_retract_early_stopped` is set when retract exits via one of those early-stop paths.
+  `full_unload_slot()` uses this to distinguish "slot definitely emptied" from "full-length retract finished"
+  when deciding success/failure.
 
 ### 3. EndlessSpool (`endless_spool.py`)
 
@@ -868,6 +880,7 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `baud` | protocol-aware | Serial baud rate. Default 115200 for ACE1, 230400 for ACE2. Per-instance overridable |
 | `parkposition_to_toolhead_length` | 1000 | Distance park → nozzle (mm) |
 | `parkposition_to_rdm_length` | 150 | Distance park → RDM (mm) |
+| `rdm_overshoot_length` | 50.0 | Extra retract distance (mm) after RDM clears in callback-driven unload paths |
 | `toolhead_retraction_speed` | 10 | Retraction speed at toolhead (mm/s) |
 | `toolhead_retraction_length` | 40 | Retraction length at toolhead (mm) |
 | `toolhead_full_purge_length` | 22 | Purge length for full load (mm) |
@@ -941,16 +954,21 @@ ACE_STOP_RETRACT [T=<tool>|INSTANCE=<n> INDEX=<n>]
 **Tool Change & Loading:**
 ```
 ACE_SMART_UNLOAD [TOOL=<n>]                # Intelligent unload with fallback strategies
-                                           # Tries current, then other slots, then cross-instance
+                                           # For known tools, uses coordinated retract + RDM early-stop
+                                           # (when RDM exists), validates path clear, then may shut heater off
+                                           # when not printing/paused
 
 ACE_SMART_LOAD                             # Load all non-empty slots to verification sensor (toolhead)
 
 ACE_CHANGE_TOOL TOOL=<n>                   # Execute tool change T<n>
                                            # TOOL=-1: unload current tool
                                            
-ACE_FULL_UNLOAD [TOOL=<n>|TOOL=ALL]        # Full unload until slot empty
+ACE_FULL_UNLOAD [TOOL=<n>|TOOL=ALL]        # Full unload until slot sensor reports empty
                                            # TOOL=ALL: unload all non-empty slots
+                                           #          (skips tool currently loaded at nozzle)
                                            # No TOOL: unload current tool
+                                           # Active tool: includes toolhead prep + extruder retract + ACE retract
+                                           # Non-active tool: ACE-only retract (no heating/cutting)
                                            # Clears tool index on success
 ```
 

@@ -57,6 +57,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
 - ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
+- ✅ **Idle Heater Safety on Unload**: Successful smart unload turns off extruder heater when printer is not printing/paused
 - ✅ **Tangle Detection (optional)**: Extruder vs encoder monitoring to catch stuck spools mid-print
 - ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
 - ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
@@ -87,6 +88,8 @@ The browser-based dashboard (adapted from ValgACE) gives you a full ACE view wit
 - **[tests/README.md](tests/README.md)** - Test suite documentation
 
 ## 🏗️ Architecture
+
+![Architecture Diagram](architecture.png)
 
 This implementation is organized into separate modules:
 
@@ -515,6 +518,8 @@ ACE supports both `filament_switch_sensor <name>` and `filament_tracker <name>` 
 `filament_runout_sensor_name_nozzle` is required.
 `filament_runout_sensor_name_rdm` is optional and helps verify the filament has fully retracted to the hub.
 
+`rdm_overshoot_length` is optional unload tuning (default 50mm): after RDM clears during callback-driven retract, ACE continues retracting by this extra distance before stop.
+
 ```ini
 [ace]
 # Enable RDM (Return Module) sensor monitoring
@@ -771,10 +776,16 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_SMART_UNLOAD` | Intelligent unload with multi-slot fallback | `[TOOL=<index>]` |
+| `ACE_SMART_UNLOAD` | Intelligent unload with coordinated retract + RDM-aware validation; turns heater off after success when idle | `[TOOL=<index>]` |
 | `ACE_SMART_LOAD` | Load all non-empty slots to RMS sensor | - |
-| `ACE_FULL_UNLOAD` | Complete unload until slot empty | `TOOL=<index>` or `TOOL=ALL` |
+| `ACE_FULL_UNLOAD` | Complete unload until slot sensor reports empty (active/non-active aware flow) | `TOOL=<index>` or `TOOL=ALL` |
 | `_ACE_HANDLE_PRINT_END` | End-of-print cleanup (disable runout, optionally unload) | `[CUT_TIP=1]` (1=unload+cut, 0=keep loaded) |
+
+Behavior notes:
+- `ACE_FULL_UNLOAD TOOL=<index>` uses two flows:
+   - Active tool (currently loaded): toolhead prep + extruder retract + ACE retract.
+   - Non-active tool: ACE-only retract (no heating/cut path).
+- `ACE_FULL_UNLOAD TOOL=ALL` skips the currently loaded nozzle tool and processes other non-empty slots.
 
 ### Manual Feed/Retract Operations
 
