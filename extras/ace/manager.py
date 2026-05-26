@@ -2798,19 +2798,25 @@ class AceManager:
 
     def full_unload_slot(self, tool_index):
         """
-        Fully unload a slot using fixed-length retraction.
+        Fully unload a slot from the ACE.
 
-        **FIXED-LENGTH MODE:**
-        - Retracts exactly total_max_feeding_length
-        - No status polling during retraction
-        - Uses time-based dwell + wait_ready (via _retract)
-        - Validates with sensors after completion (if available)
+        Two modes depending on whether the tool is currently loaded
+        in the toolhead:
+
+        **ACTIVE TOOL** (tool_index == ace_current_index):
+        Prepares the toolhead (heating, pre_cut_retract, CUT_TIP if
+        available), retracts the extruder, then ACE-retracts (stops
+        early when slot sensor clears).
+        On success, resets ace_current_index and filament_pos.
+
+        **NON-ACTIVE TOOL** (different tool loaded, or no tool loaded):
+        Simple ACE-only retract (no heating/cutting needed).
 
         Args:
             tool_index: Global tool index to unload
 
         Returns:
-            bool: True if unload successful and path clear
+            bool: True if unload successful
         """
         instance_num = get_instance_from_tool(tool_index)
         if instance_num < 0:
@@ -2836,69 +2842,93 @@ class AceManager:
             )
             instance._disable_feed_assist(local_slot)
 
-        total_length = instance.total_max_feeding_length
-        retract_speed = instance.retract_speed
+        # Determine if this tool is currently loaded in the toolhead
+        current_tool_index = self.state.get("ace_current_index", -1)
+        is_active_tool = (tool_index == current_tool_index)
 
-        self.gcode.respond_info(
-            f"ACE[{instance_num}]: Full unload slot {local_slot} (fixed-length mode):\n"
-            f"  Retracting: {total_length}mm\n"
-            f"  Speed: {retract_speed}mm/s\n"
-            f"  Expected time: {(total_length / retract_speed):.1f}s"
-        )
-
-        try:
-            instance.wait_ready()
-            instance._retract(local_slot, length=total_length, speed=retract_speed)
-
+        if is_active_tool:
+            # --- ACTIVE TOOL: Filament is in the toolhead ---
+            # 1. Prepare toolhead (heat, pre_cut_retract, CUT_TIP)
+            # 2. Extruder retract to clear the toolhead
+            # 3. ACE retract (stops early when slot sensor clears)
             self.gcode.respond_info(
-                f"ACE[{instance_num}]: Retraction completed"
+                f"ACE[{instance_num}]: Full unload of ACTIVE tool T{tool_index}"
             )
 
-            # **CONSISTENCY CHECK: Validate final state**
-            has_rdm = self.has_rdm_sensor()
+            try:
+                self.prepare_toolhead_for_filament_retraction(tool_index=tool_index)
 
-            if has_rdm:
-                # Both sensors available - check both
-                toolhead_clear = not self.get_instant_switch_state(SENSOR_TOOLHEAD)
-                rdm_clear = not self.get_instant_switch_state(SENSOR_RDM)
-                path_clear = toolhead_clear and rdm_clear
+                # Extruder retract to clear the toolhead
+                self._extruder_move(
+                    -abs(self.toolhead_retraction_length),
+                    self.toolhead_retraction_speed,
+                    wait_for_move_end=True
+                )
 
-                if path_clear:
+                # ACE retract — _retract() polls slot sensor every ~200ms
+                # via check_slot_empty() and stops as soon as slot is empty
+                if not instance.protocol.feed_assist_causes_busy():
+                    instance.wait_ready()
+                instance._retract(
+                    local_slot,
+                    length=instance.total_max_feeding_length,
+                    speed=instance.retract_speed,
+                )
+
+                if instance._last_retract_early_stopped:
+                    self.state.set("ace_current_index", -1)
+                    self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(
-                        f"ACE[{instance_num}]: ✓ Full unload successful - path clear (both sensors)"
-                    )
-                    self.state.set(
-                        "ace_filament_pos", FILAMENT_STATE_BOWDEN
+                        f"ACE[{instance_num}]: ✓ Active tool T{tool_index} fully unloaded"
                     )
                     return True
                 else:
                     self.gcode.respond_info(
-                        f"ACE[{instance_num}]: ⚠ Path still blocked after full unload:\n"
-                        f"  Toolhead: {'BLOCKED' if not toolhead_clear else 'clear'}\n"
-                        f"  RDM: {'BLOCKED' if not rdm_clear else 'clear'}"
+                        f"ACE[{instance_num}]: ⚠ Active tool T{tool_index} — "
+                        f"full retract completed but slot sensor never reported empty"
                     )
                     return False
-            else:
-                # RDM not available - check only toolhead
-                toolhead_clear = not self.get_instant_switch_state(SENSOR_TOOLHEAD)
 
-                if toolhead_clear:
+            except Exception as e:
+                self.gcode.respond_info(
+                    f"ACE[{instance_num}]: Full unload of active tool failed: {e}"
+                )
+                return False
+            finally:
+                self.gcode.run_script_from_command("M104 S0")
+                self.gcode.run_script_from_command("G92 E0")
+                self.gcode.run_script_from_command("G90")
+        else:
+            # --- NON-ACTIVE TOOL ---
+            # Filament is only in ACE/tube, not in toolhead.
+            # Simple ACE retract, no heating or cutting needed.
+            total_length = instance.total_max_feeding_length
+            retract_speed = instance.retract_speed
+
+            self.gcode.respond_info(
+                f"ACE[{instance_num}]: Full unload slot {local_slot} (non-active tool):\n"
+                f"  Retracting: {total_length}mm at {retract_speed}mm/s\n"
+                f"  Expected time: {(total_length / retract_speed):.1f}s"
+            )
+
+            try:
+                instance.wait_ready()
+                instance._retract(local_slot, length=total_length, speed=retract_speed)
+
+                if instance._last_retract_early_stopped:
                     self.gcode.respond_info(
-                        f"ACE[{instance_num}]: ✓ Full unload complete - toolhead sensor clear"
-                    )
-                    self.state.set(
-                        "ace_filament_pos", FILAMENT_STATE_BOWDEN
+                        f"ACE[{instance_num}]: ✓ Full unload slot {local_slot} successful"
                     )
                     return True
                 else:
                     self.gcode.respond_info(
-                        f"ACE[{instance_num}]: ⚠ Toolhead sensor still triggered after {total_length}mm retraction\n"
-                        f"  (No RDM sensor for additional validation)"
+                        f"ACE[{instance_num}]: ⚠ Full unload slot {local_slot} — "
+                        f"full retract completed but slot sensor never reported empty"
                     )
                     return False
 
-        except Exception as e:
-            self.gcode.respond_info(
-                f"ACE[{instance_num}]: Full unload failed: {e}"
-            )
-            return False
+            except Exception as e:
+                self.gcode.respond_info(
+                    f"ACE[{instance_num}]: Full unload failed: {e}"
+                )
+                return False

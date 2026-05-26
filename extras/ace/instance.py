@@ -115,6 +115,7 @@ class AceInstance:
         self._feed_assist_topology_position = None  # Track chain position (0, 1, 2...)
         self._pending_feed_assist_restore = -1  # Slot to restore after first heartbeat
         self._pending_rfid_refresh = False  # Flag to refresh all RFID data after reconnect
+        self._last_retract_early_stopped = False  # Slot sensor confirmed empty during _retract() (or slot was already empty)
         self._dryer_active = False
         self._dryer_temperature = 0
         self._dryer_duration = 0
@@ -623,9 +624,11 @@ class AceInstance:
         retry_delay_s = 2.0
 
         self.wait_ready()
+        self._last_retract_early_stopped = False
 
         # If the slot already reports empty, there is nothing to retract.
         if self._is_slot_empty(slot):
+            self._last_retract_early_stopped = True
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Retract skipped - slot {slot} is empty"
             )
@@ -654,6 +657,7 @@ class AceInstance:
                     return
                 if self._is_slot_empty(slot):
                     early_stop_state["triggered"] = True
+                    self._last_retract_early_stopped = True
                     early_stop_state["elapsed"] = time.time() - retract_start_time
                     self.gcode.respond_info(
                         f"ACE[{self.instance_num}]: Retract stopped after "
