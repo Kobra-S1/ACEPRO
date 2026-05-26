@@ -3062,6 +3062,153 @@ class TestSmartUnload(unittest.TestCase):
             manager.smart_unload(tool_index=99, prepare_toolhead=False)
 
 
+class TestTurnOffHeaterIfIdle(unittest.TestCase):
+    """Tests for _turn_off_heater_if_idle — heater control after unload."""
+
+    def setUp(self):
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+
+        self.mock_config = Mock()
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+
+        self.mock_config.get_printer.return_value = self.mock_printer
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_reactor.monotonic.return_value = 0.0
+        self.mock_reactor.register_timer = Mock(return_value=None)
+        self.mock_reactor.pause = Mock()
+
+        self.variables = {
+            "ace_global_enabled": True,
+            "ace_current_index": -1,
+            "ace_filament_pos": FILAMENT_STATE_BOWDEN,
+        }
+        self.mock_save_vars.allVariables = self.variables
+
+        def lookup(name, default=None):
+            if name == "gcode":
+                return self.mock_gcode
+            if name == "save_variables":
+                return self.mock_save_vars
+            if name == "output_pin ACE_Pro":
+                pin = Mock()
+                pin.get_status = Mock(return_value={'value': 1})
+                return pin
+            return default
+
+        self.mock_printer.lookup_object.side_effect = lookup
+
+        def getint(key, default=None):
+            vals = {"ace_count": 1, "feed_speed": "100", "retract_speed": "100"}
+            val = vals.get(key, default)
+            return int(val) if val is not None else default
+
+        def getfloat(key, default=None):
+            vals = {
+                "feed_speed": "100.0",
+                "retract_speed": "100.0",
+                "toolhead_retraction_speed": "300.0",
+                "toolhead_retraction_length": "10.0",
+                "default_color_change_purge_length": "50.0",
+                "default_color_change_purge_speed": "400.0",
+                "timeout_multiplier": "2.0",
+                "total_max_feeding_length": "1000.0",
+                "parkposition_to_toolhead_length": "500.0",
+                "toolchange_load_length": "480.0",
+                "parkposition_to_rdm_length": "350.0",
+                "incremental_feeding_length": "10.0",
+                "incremental_feeding_speed": "50.0",
+                "extruder_feeding_length": "50.0",
+                "extruder_feeding_speed": "5.0",
+                "toolhead_slow_loading_speed": "10.0",
+                "heartbeat_interval": "1.0",
+                "max_dryer_temperature": "70.0",
+                "toolhead_full_purge_length": "100.0",
+                "feed_assist_active_after_ace_connect": "1",
+            }
+            val = vals.get(key, default)
+            return float(val) if val is not None else default
+
+        self.mock_config.getint.side_effect = getint
+        self.mock_config.getfloat.side_effect = getfloat
+        self.mock_config.get.side_effect = lambda k, default=None: {
+            "filament_runout_sensor_name_rdm": "return_module",
+            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+        }.get(k, default)
+
+    def _build_manager(self):
+        instance = Mock()
+        instance.instance_num = 0
+        instance.SLOT_COUNT = SLOTS_PER_ACE
+        instance.tool_offset = 0
+        instance.inventory = [{"status": "ready"}] * 4
+        with patch('ace.manager.AceInstance', return_value=instance), \
+             patch('ace.manager.EndlessSpool'), \
+             patch('ace.manager.RunoutMonitor'):
+            return AceManager(self.mock_config, dummy_ace_count=1)
+
+    def test_heater_off_when_idle(self):
+        """Heater should turn off when printer is not printing."""
+        manager = self._build_manager()
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "standby"}
+        manager.printer.lookup_object = Mock(return_value=mock_print_stats)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_called_once_with("M104 S0")
+
+    def test_heater_stays_on_when_printing(self):
+        """Heater should stay on when printer is actively printing."""
+        manager = self._build_manager()
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "printing"}
+        manager.printer.lookup_object = Mock(return_value=mock_print_stats)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_not_called()
+
+    def test_heater_stays_on_when_paused(self):
+        """Heater should stay on when printer is paused."""
+        manager = self._build_manager()
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "paused"}
+        manager.printer.lookup_object = Mock(return_value=mock_print_stats)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_not_called()
+
+    def test_heater_off_when_print_stats_unavailable(self):
+        """Heater should turn off when print_stats object is not available."""
+        manager = self._build_manager()
+        manager.printer.lookup_object = Mock(return_value=None)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_called_once_with("M104 S0")
+
+    def test_exception_logged_not_raised(self):
+        """Exceptions should be caught and logged, not raised."""
+        manager = self._build_manager()
+        manager.printer.lookup_object = Mock(side_effect=Exception("lookup failed"))
+
+        # Should not raise
+        manager._turn_off_heater_if_idle()
+
+        # Should log warning
+        manager.gcode.respond_info.assert_called()
+        warning_logged = any(
+            "could not turn off heater" in str(c)
+            for c in manager.gcode.respond_info.call_args_list
+        )
+        self.assertTrue(warning_logged, "Should log warning about failed heater control")
+
+
 class TestUpdateAceSupportActiveState(unittest.TestCase):
     """Coverage for update_ace_support_active_state and _sync_inventory_to_persistent."""
 
