@@ -1441,8 +1441,22 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         if is_printing and not is_startup:
             active_tool = tool_index
         else:
-            # If unload already completed, clear active tool in idle/startup mode.
-            active_tool = -1 if filament_pos == FILAMENT_STATE_BOWDEN else fallback_tool
+            # Idle/startup failure. Decide which tool is physically in the path.
+            if filament_pos == FILAMENT_STATE_BOWDEN:
+                # The unload of the previous tool completed (filament_pos only
+                # becomes "bowden" after a successful retract). If the sensors
+                # still report filament, the tool we just tried to LOAD is stuck
+                # in the path, so it must become the current tool — otherwise the
+                # next toolchange loses track of it and cycles blindly through
+                # parked slots (which can pull an innocent slot out of the ACE).
+                if manager.is_filament_path_free_instant():
+                    active_tool = -1
+                else:
+                    active_tool = tool_index
+            else:
+                # The unload did not complete (filament_pos still "nozzle"/
+                # "splitter") — the previous tool is still in the path.
+                active_tool = fallback_tool
 
         manager.state.set(
             "ace_current_index",

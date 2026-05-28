@@ -2170,14 +2170,83 @@ class TestToolChangeIntegration:
             return default
         INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
 
+        # Path is clear after the unload (nothing stuck) -> active tool is cleared.
+        INSTANCE_MANAGERS[0].is_filament_path_free_instant = Mock(return_value=True)
+
         with patch('ace.commands.get_printer', return_value=mock_printer):
             with pytest.raises(Exception):
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
 
-            # Idle/startup + bowden state: clear active tool.
+            # Idle/startup + bowden state + path clear: clear active tool.
             INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", -1)
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1" in c for c in calls)
+
+    def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_blocked_path_marks_load_tool(self, mock_gcmd, setup_mocks):
+        """Idle/startup failure with a still-blocked path must mark the tool we
+        tried to LOAD as current (it is stuck in the path), not clear it to -1.
+
+        Scenario: T0 was unloaded successfully (filament_pos -> "bowden"), then
+        the T1 load failed leaving T1 stuck between RDM and toolhead. The path
+        sensors still report filament, so ace_current_index must become T1
+        (tool_index) so the next toolchange targets the correct slot via a
+        direct CASE-1 unload instead of cycling blindly through parked slots.
+        """
+        mock_gcmd.get_int = Mock(return_value=1)
+        mock_gcmd.error = Exception
+
+        # Mock printer objects
+        mock_printer = Mock()
+        mock_toolhead = Mock()
+        mock_kinematics = Mock()
+        mock_reactor = Mock()
+        mock_gcode = Mock()
+        mock_print_stats = Mock()
+
+        # Mock homed
+        mock_kinematics.get_status = Mock(return_value={'homed_axes': 'xyz'})
+        mock_toolhead.get_kinematics = Mock(return_value=mock_kinematics)
+        mock_reactor.monotonic = Mock(return_value=1.0)
+        mock_printer.get_reactor = Mock(return_value=mock_reactor)
+
+        # Mock print_stats to indicate NOT printing
+        mock_print_stats.get_status = Mock(return_value={'state': 'ready'})
+
+        def lookup_side_effect(obj, default=None):
+            if obj == 'toolhead':
+                return mock_toolhead
+            elif obj == 'gcode':
+                return mock_gcode
+            elif obj == 'print_stats':
+                return mock_print_stats
+            return default if default is not None else Mock()
+
+        mock_printer.lookup_object = Mock(side_effect=lookup_side_effect)
+
+        # Load of T1 fails after T0 was unloaded successfully.
+        INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Load failed after unload"))
+
+        # State after the failed load: old tool (T0) still recorded as current,
+        # filament_pos reset to "bowden" by the successful T0 unload.
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return 0
+            if varname == "ace_filament_pos":
+                return "bowden"
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
+
+        # Path is still blocked (e.g. RDM still triggered by the stuck T1).
+        INSTANCE_MANAGERS[0].is_filament_path_free_instant = Mock(return_value=False)
+
+        with patch('ace.commands.get_printer', return_value=mock_printer):
+            with pytest.raises(Exception):
+                ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
+
+            # The tool we tried to load (T1) is stuck -> it must be current, not -1.
+            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", 1)
+            calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
+            assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=1" in c for c in calls)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_updates_state_before_dialog(self, mock_gcmd, setup_mocks):
         """Test that tool state is updated even when tool change fails during printing."""
