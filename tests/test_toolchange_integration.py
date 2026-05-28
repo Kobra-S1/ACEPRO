@@ -252,7 +252,7 @@ class TestToolChangeIntegration(unittest.TestCase):
                 instance._smart_unload_slot.return_value = True
             
             # Mock smart_unload to properly update filament_pos and clear sensors
-            def mock_smart_unload(tool_index=-1, prepare_toolhead=True):
+            def mock_smart_unload(tool_index=-1, prepare_toolhead=True, keep_heater=False):
                 # Update filament_pos to splitter
                 from ace.config import FILAMENT_STATE_SPLITTER
                 manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_SPLITTER)

@@ -1973,8 +1973,9 @@ class TestPerformToolChange(unittest.TestCase):
             
             result = manager.perform_tool_change(current_tool=1, target_tool=2)
             
-            # Should have called smart_unload for current tool
-            manager.smart_unload.assert_called_with(tool_index=1)
+            # Should have called smart_unload for current tool with keep_heater=True
+            # (heater stays on during toolchange so new filament can load immediately)
+            manager.smart_unload.assert_called_with(tool_index=1, keep_heater=True)
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -2049,8 +2050,9 @@ class TestPerformToolChange(unittest.TestCase):
         
         result = manager.perform_tool_change(current_tool=1, target_tool=-1)
         
-        # Should have unloaded but not loaded
-        manager.smart_unload.assert_called_once_with(tool_index=1)
+        # Should have unloaded but not loaded — keep_heater=True because
+        # perform_tool_change always passes it (POST macro handles heater shutdown)
+        manager.smart_unload.assert_called_once_with(tool_index=1, keep_heater=True)
         self.assertEqual(self.variables['ace_current_index'], -1)
         self.assertIn("Unloaded", result)
 
@@ -2998,6 +3000,59 @@ class TestSmartUnload(unittest.TestCase):
         self.assertTrue(result)
         instance._smart_unload_slot.assert_called_once()
         manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+    def test_keep_heater_false_turns_off_heater(self):
+        """When keep_heater=False (standalone unload), heater is turned off."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager.get_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager._turn_off_heater_if_idle = Mock()
+
+        result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=False)
+
+        self.assertTrue(result)
+        manager._turn_off_heater_if_idle.assert_called_once()
+
+    def test_keep_heater_true_preserves_heater(self):
+        """When keep_heater=True (toolchange), heater stays on for next load."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager.get_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager._turn_off_heater_if_idle = Mock()
+
+        result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=True)
+
+        self.assertTrue(result)
+        manager._turn_off_heater_if_idle.assert_not_called()
+
+    def test_keep_heater_true_sensor_triggered_path(self):
+        """keep_heater=True also works on sensor-triggered coordinated retraction path."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager.get_switch_state = Mock(return_value=True)
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager._extruder_move = Mock()
+        manager._wait_toolhead_move_finished = Mock()
+        manager._turn_off_heater_if_idle = Mock()
+
+        result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=True)
+
+        self.assertTrue(result)
+        manager._turn_off_heater_if_idle.assert_not_called()
 
     def test_known_tool_invalid_instance_raises(self):
         instance = self._make_instance()
