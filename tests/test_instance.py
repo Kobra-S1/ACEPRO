@@ -1378,6 +1378,61 @@ class TestFeedAssist(unittest.TestCase):
         instance.send_request.assert_not_called()
         INSTANCE_MANAGERS[0].state.set_and_save.assert_not_called()
 
+    @patch('ace.instance.AceSerialManager')
+    def test_disable_feed_assist_ace2_skips_wait_ready(self, mock_serial_mgr_class):
+        """Regression: on ACE2, _disable_feed_assist must NOT call wait_ready()
+        either before or after sending STOP_FEED_ASSIST.
+
+        ACE2 reports status='busy' *because* feed assist is active, and the cached
+        status only refreshes on the next 1 Hz heartbeat.  A wait_ready() call
+        here can stall up to 60s if a heartbeat times out around print-end --
+        which is the deadlock that hangs PRINT_END after the nozzle lifts off.
+        """
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._feed_assist_index = 1
+        # Simulate ACE2 protocol semantics.
+        protocol = Mock()
+        protocol.feed_assist_causes_busy.return_value = True
+        protocol.build_stop_feed_assist_request.return_value = {
+            'method': 'stop_feed_assist', 'params': {'index': 1}
+        }
+        instance.protocol = protocol
+        instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 0}))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+
+        instance._disable_feed_assist(1)
+
+        # The fix: wait_ready must not be called at all on ACE2.
+        instance.wait_ready.assert_not_called()
+        # STOP_FEED_ASSIST still sent, state still cleared.
+        instance.send_request.assert_called_once()
+        self.assertEqual(instance._feed_assist_index, -1)
+        instance.dwell.assert_called_once_with(1.0)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_disable_feed_assist_ace1_still_waits(self, mock_serial_mgr_class):
+        """ACE1 behaviour unchanged: wait_ready() is called both before and
+        after sending STOP_FEED_ASSIST."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._feed_assist_index = 1
+        protocol = Mock()
+        protocol.feed_assist_causes_busy.return_value = False
+        protocol.build_stop_feed_assist_request.return_value = {
+            'method': 'stop_feed_assist', 'params': {'index': 1}
+        }
+        instance.protocol = protocol
+        instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 0}))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+
+        instance._disable_feed_assist(1)
+
+        self.assertEqual(instance.wait_ready.call_count, 2)
+        instance.send_request.assert_called_once()
+
 
 class TestInventoryManagement(unittest.TestCase):
     """Test inventory operations."""

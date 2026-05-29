@@ -86,7 +86,31 @@ extras/ace/
 - **Smart Operations**: `smart_unload()`, `smart_load()`, and `full_unload_slot()` with sensor-aware fallback
 - **Tool Change Orchestration**: `perform_tool_change()` coordinates unload/load across instances
 - **Runout Detection**: Creates `RunoutMonitor` to poll sensors (50ms interval) and raise events
-- **Heater Safety**: Turns off the extruder heater after successful unload when not printing/paused
+- **Heater Safety**: Turns off the extruder heater after a standalone unload when not printing/paused.
+  During a tool change (`perform_tool_change`), the heater is intentionally **kept on** between unloading
+  the old tool and loading the new tool — this avoids a 60-90 s reheat cycle. The POST macro
+  (`_ACE_POST_TOOLCHANGE`) is responsible for heater shutdown after load+purge complete.
+  The `smart_unload(keep_heater=False)` default preserves the off-after-unload behavior for all
+  standalone callers; `perform_tool_change` passes `keep_heater=True` to all its internal call sites.
+- **Cold-Nozzle Recovery Guard**: Before executing a plausibility-mismatch recovery unload
+  (which runs before the PRE macro heats the nozzle), `_ensure_hot_for_recovery_unload()` checks
+  extruder temperature and heats if necessary. Temperature priority: stuck tool's material temp →
+  target tool's inventory temp → `min_extrude_temp` as last resort. No-op when already hot.
+  A separate fail-fast guard before the load step raises if no target temperature is available.
+
+**Idle/Startup Failed-Load State Tracking:**
+When a tool change fails while the printer is idle or starting up, the error handler resolves
+`ace_current_index` based on both `ace_filament_pos` and the live path sensor:
+
+| `ace_filament_pos` after failure | Path sensor | `ace_current_index` set to |
+|---|---|---|
+| `"bowden"` (old tool unloaded OK) | **clear** | `-1` (no tool in path) |
+| `"bowden"` (old tool unloaded OK) | **blocked** | `tool_index` (new tool stuck in path) |
+| `"nozzle"` or `"splitter"` (unload failed) | any | `fallback_tool` (old tool still in path) |
+
+This prevents silent loss of the stuck-tool identity, which previously caused the
+next tool change to hit the plausibility block and cycle blindly through parked slots.
+During a print, the existing print-recovery branch already records the requested tool correctly.
 
 **Toolchange Guard Decorator:**
 ```python
@@ -100,7 +124,12 @@ The decorator uses a **depth counter** (`_toolchange_depth`) to support nested t
 **Key Methods:**
 ```python
 # Core Operations
-smart_unload(tool_index)                    # Intelligent unload with fallback strategies
+smart_unload(tool_index, prepare_toolhead=True, keep_heater=False)
+                                            # Intelligent unload with fallback strategies
+                                            # keep_heater=False (default): turns off heater
+                                            #   after unload (standalone unload behavior)
+                                            # keep_heater=True: heater stays on (used by
+                                            #   perform_tool_change; POST macro handles shutdown)
 smart_load()                                # Load all non-empty slots to RDM sensor
 full_unload_slot(tool_index)                # Full retract until slot empty (active/non-active aware)
 perform_tool_change(current, target)        # Complete tool change sequence
@@ -119,6 +148,11 @@ is_filament_path_free_instant()             # Check if bowden path is clear (ins
 has_rdm_sensor()                            # Check if RDM sensor is configured
 
 # Toolhead Preparation
+_ensure_hot_for_recovery_unload(current_tool, target_temp)
+                                            # Heat extruder before a plausibility-mismatch
+                                            #   recovery unload (runs before PRE macro).
+                                            # Priority: stuck-tool material temp → target temp
+                                            #   → min_extrude_temp fallback. No-op if already hot.
 prepare_toolhead_for_filament_retraction(tool_index)  # Heat and prepare for unload
 check_and_wait_for_spool_ready(tool)        # Wait for spool motor stability (with timeout)
 
@@ -242,11 +276,15 @@ This enables precise timing measurements for:
 
 **Retract Early-Stop Behavior:**
 - `_retract()` supports two early-stop paths:
-  - Slot reports empty (`_is_slot_empty`) -> retract is stopped immediately
+  - Slot reports empty (`_is_slot_empty`) → retract is stopped immediately
   - Optional `early_stop_callback` returns a stop reason (for sensor-driven stop conditions)
 - `_last_retract_early_stopped` is set when retract exits via one of those early-stop paths.
   `full_unload_slot()` uses this to distinguish "slot definitely emptied" from "full-length retract finished"
   when deciding success/failure.
+- **Case-3 slot cycling** (`_cycle_slots_with_sensor_check`) uses `early_stop_callback` to poll the
+  RDM sensor *during* the retraction — not after. The callback applies the overshoot delay inline
+  when the sensor clears. Per-slot test length is capped to `full_unload − sensor_to_parking + overshoot`
+  to avoid pulling a wrong slot's filament past the ACE entry sensor.
 
 ### 3. EndlessSpool (`endless_spool.py`)
 
@@ -953,10 +991,13 @@ ACE_STOP_RETRACT [T=<tool>|INSTANCE=<n> INDEX=<n>]
 
 **Tool Change & Loading:**
 ```
-ACE_SMART_UNLOAD [TOOL=<n>]                # Intelligent unload with fallback strategies
-                                           # For known tools, uses coordinated retract + RDM early-stop
-                                           # (when RDM exists), validates path clear, then may shut heater off
-                                           # when not printing/paused
+ACE_SMART_UNLOAD [TOOL=<n>]                # Intelligent unload with fallback strategies.
+                                           # Case 1 (toolhead clear, RDM triggered): RDM-monitored
+                                           #   retract (early-stop + overshoot) when RDM sensor
+                                           #   present; fixed-length fallback otherwise.
+                                           # Validates path clear after unload.
+                                           # Turns off heater when not printing/paused
+                                           #   (standalone unload; keep_heater=False default).
 
 ACE_SMART_LOAD                             # Load all non-empty slots to verification sensor (toolhead)
 
@@ -1190,25 +1231,36 @@ def ace_get_instance_and_slot(gcmd):
    - Heat to target temp
    - Move to throw position (if heating needed)
    ↓
-4. Unload Current Tool (if any)
-   - AceManager.smart_unload(current_tool)
+4. Plausibility Check (if sensors mismatch persisted state)
+   - _ensure_hot_for_recovery_unload(): heat nozzle if cold (runs before PRE macro)
+   - smart_unload(keep_heater=True): clear stuck filament from path
+   - G92 E0 + M400: flush stale extruder state after emergency unload
+   ↓
+5. Unload Current Tool (if any)
+   - AceManager.smart_unload(current_tool, keep_heater=True)
    - Cut filament (CUT_TIP macro)
    - Retract to bowden
    - Validate sensors clear
+   - Heater stays on (POST macro handles shutdown after load+purge)
    ↓
-5. Load Target Tool
+6. Cold-nozzle guard before load
+   - Verify extruder ≥ min_extrude_temp before loading
+   - If cold + target_temp known: M109 to heat
+   - If cold + no target_temp: raise (fail fast — PRE macro should have heated)
+   ↓
+7. Load Target Tool
    - Find instance managing T3 (instance 0)
    - Check spool ready
    - Feed from slot 3 → toolhead sensor
    - Feed toolhead sensor → nozzle
    - Update ace_filament_pos = "nozzle"
    ↓
-6. _ACE_POST_TOOLCHANGE macro
+8. _ACE_POST_TOOLCHANGE macro
    - Purge filament
    - Wipe nozzle
-   - Update state
+   - Restore temperature / shut off heater if done
    ↓
-7. Set ace_current_index = 3
+9. Set ace_current_index = 3
 ```
 
 ### Runout Detection Flow

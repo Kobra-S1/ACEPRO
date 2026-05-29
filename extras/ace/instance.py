@@ -523,7 +523,12 @@ class AceInstance:
         request = self.protocol.build_stop_feed_assist_request(slot_index)
         self.send_request(request, callback)
         self.dwell(1.0)
-        self.wait_ready()
+        # ACE2: the device only leaves 'busy' once it has processed STOP_FEED_ASSIST,
+        # and the cached status is refreshed via the 1 Hz heartbeat.  If a heartbeat
+        # times out around print-end, wait_ready() can stall for up to 60s before
+        # giving up
+        if not self.protocol.feed_assist_causes_busy():
+            self.wait_ready()
 
     def _feed(self, slot, length, speed, callback=None):
         """Feed filament from slot."""

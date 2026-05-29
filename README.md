@@ -57,8 +57,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
 - ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
-- ✅ **Idle Heater Safety on Unload**: Successful smart unload turns off extruder heater when printer is not printing/paused
-- ✅ **Tangle Detection (optional)**: Extruder vs encoder monitoring to catch stuck spools mid-print
+- ✅ **Tangle Detection (Work in progress, not production ready yet)**: Extruder vs encoder monitoring to catch stuck spools mid-print
 - ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
 - ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
@@ -67,7 +66,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 - ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
 - ✅ **Spoolman Integration**: Automatic spool selection via RFID-to-ID mapping or manual slot assignment
-- 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can be synced automatically from the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
+- 🟠 **OrcaSlicer Filament Sync** *(requires recent Orca version)*: Filament type and color can be synced automatically from the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
 
 ### Standalone Web Dashboard
 
