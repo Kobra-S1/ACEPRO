@@ -57,7 +57,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
 - ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
-- ✅ **Tangle Detection (Work in progress, not production ready yet)**: Extruder vs encoder monitoring to catch stuck spools mid-print
+- ✅ **Tangle Detection (ACE Gen 1)**: Pauses the print when the ACE pumps continuously against a blocked spool, via the firmware-reported `cont_assist_time` field
 - ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
 - ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
@@ -585,7 +585,7 @@ Link `extras/temperature_ace.py` into Klipper extras (see installation) and rest
 
 ### Other `[ace]` options worth knowing
 
-- `tangle_detection` / `tangle_detection_length`: Enable encoder-vs-extruder tangle checks (default off; length default 15mm).
+- `tangle_detection` / `tangle_pump_time`: Enable ACE-side tangle detection (ACE Gen 1; default off; threshold 4.0 s). Pauses the print when ACE has been pumping continuously past the threshold, i.e. feeding against a blockage at the spool. Reads the firmware-reported `cont_assist_time` field. Toggle live during a print with `ACE_TANGLE_DETECTION ENABLE=0/1`.
 - `persistence_mode`: `deferred` (default) makes `set_and_save` defer disk writes until a safe `flush`; `immediate` writes to disk right away.
 - `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings).
 

@@ -199,8 +199,8 @@ def read_ace_config(config):
     ace_config["tangle_detection"] = config.getboolean(
         "tangle_detection", False
     )
-    ace_config["tangle_detection_length"] = config.getfloat(
-        "tangle_detection_length", 15.0
+    ace_config["tangle_pump_time"] = config.getfloat(
+        "tangle_pump_time", 4.0
     )
     # Persistence mode controls when set_and_save() actually writes to disk.
     # - deferred:  set_and_save() behaves like set() — RAM + dirty mark only;

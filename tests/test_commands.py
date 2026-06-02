@@ -1216,6 +1216,41 @@ class TestDryingCommands:
         ace.commands.cmd_ACE_ENDLESS_SPOOL_STATUS(mock_gcmd)
         assert mock_gcmd.respond_info.called
 
+    def test_cmd_ACE_TANGLE_DETECTION_query(self, mock_gcmd, setup_mocks):
+        """No ENABLE arg → respond with current state."""
+        monitor = Mock()
+        monitor.tangle_detection_enabled = True
+        monitor.tangle_pump_time = 4.0
+        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        mock_gcmd.get_int = Mock(return_value=None)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        monitor.set_tangle_detection_enabled.assert_not_called()
+
+    def test_cmd_ACE_TANGLE_DETECTION_enable(self, mock_gcmd, setup_mocks):
+        monitor = Mock()
+        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        mock_gcmd.get_int = Mock(return_value=1)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        monitor.set_tangle_detection_enabled.assert_called_once_with(True)
+
+    def test_cmd_ACE_TANGLE_DETECTION_disable(self, mock_gcmd, setup_mocks):
+        monitor = Mock()
+        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        mock_gcmd.get_int = Mock(return_value=0)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        monitor.set_tangle_detection_enabled.assert_called_once_with(False)
+
+    def test_cmd_ACE_TANGLE_DISABLE_AND_RESUME(self, mock_gcmd, setup_mocks):
+        """Prompt button helper: disables detection + runs RESUME."""
+        monitor = Mock()
+        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        ace.commands.cmd__ACE_TANGLE_DISABLE_AND_RESUME(mock_gcmd)
+        monitor.set_tangle_detection_enabled.assert_called_once_with(False)
+        INSTANCE_MANAGERS[0].gcode.run_script_from_command.assert_called_once_with(
+            "RESUME"
+        )
+
     def test_cmd_ACE_DEBUG(self, mock_gcmd, setup_mocks):
         """Test ACE_DEBUG command."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})

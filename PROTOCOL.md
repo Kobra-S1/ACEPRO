@@ -179,7 +179,7 @@ Response params:
 - enable_rfid: 1
 - fan_speed: Fan speed in RPM
 - feed_assist_count: 0
-- cont_assist_time: 0.0 (Continous feeding time in milliseconds)
+- cont_assist_time: 0.0 (Continuous feed-assist pump duration, in seconds)
 - slots: Array of dictionary of slot status
 
 Dryer status dictionary:
