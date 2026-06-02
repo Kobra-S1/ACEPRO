@@ -282,3 +282,54 @@ class TestTangleInMonitorLoop:
         with patch.object(monitor, "_check_tangle") as mock_check:
             monitor._monitor_runout(1000.0)
             mock_check.assert_not_called()
+
+
+class TestOutputPinGate:
+    """[output_pin TANGLE_DETECTION] slider acts as a runtime kill switch."""
+
+    def _mount_pin(self, monitor, value):
+        """Attach a fake output_pin via printer.lookup_object."""
+        pin = Mock()
+        pin.get_status.return_value = {"value": value}
+        monitor.printer.lookup_object.side_effect = lambda name, default=None: (
+            pin if name == "output_pin TANGLE_DETECTION" else default
+        )
+        return pin
+
+    def test_no_pin_falls_back_to_flag(self):
+        monitor, *_ = _make_monitor(tangle_detection=True)
+        monitor.printer.lookup_object.side_effect = (
+            lambda name, default=None: default
+        )
+        assert monitor._is_tangle_detection_active() is True
+
+    def test_no_pin_and_flag_off_stays_off(self):
+        monitor, *_ = _make_monitor(tangle_detection=False)
+        monitor.printer.lookup_object.side_effect = (
+            lambda name, default=None: default
+        )
+        assert monitor._is_tangle_detection_active() is False
+
+    def test_pin_on_with_flag_on(self):
+        monitor, *_ = _make_monitor(tangle_detection=True)
+        self._mount_pin(monitor, value=1)
+        assert monitor._is_tangle_detection_active() is True
+
+    def test_pin_off_disables_even_when_flag_on(self):
+        monitor, *_ = _make_monitor(tangle_detection=True)
+        self._mount_pin(monitor, value=0)
+        assert monitor._is_tangle_detection_active() is False
+
+    def test_pin_on_does_not_override_flag_off(self):
+        monitor, *_ = _make_monitor(tangle_detection=False)
+        self._mount_pin(monitor, value=1)
+        assert monitor._is_tangle_detection_active() is False
+
+    def test_pin_read_failure_falls_back_to_flag(self):
+        monitor, *_ = _make_monitor(tangle_detection=True)
+        pin = Mock()
+        pin.get_status.side_effect = RuntimeError("boom")
+        monitor.printer.lookup_object.side_effect = lambda name, default=None: (
+            pin if name == "output_pin TANGLE_DETECTION" else default
+        )
+        assert monitor._is_tangle_detection_active() is True

@@ -341,7 +341,7 @@ class RunoutMonitor:
                 self._runout_false_count = 0
 
             # ===== TANGLE DETECTION (optional) =====
-            if self.tangle_detection_enabled and not self.runout_handling_in_progress:
+            if self._is_tangle_detection_active() and not self.runout_handling_in_progress:
                 self._check_tangle(eventtime, current_tool)
 
             # Update previous state for next cycle
@@ -375,6 +375,29 @@ class RunoutMonitor:
         self.tangle_detection_enabled = bool(enabled)
         self._pt_phase_start_eventtime = None
         self._pt_last_value_s = 0.0
+
+    def _is_tangle_detection_active(self):
+        """True iff the config flag is set AND no [output_pin TANGLE_DETECTION] slider has explicitly disabled it.
+
+        The slider is optional — when not configured the flag alone gates
+        detection.  Same pattern as AUTO_UNLOAD: the consumer (this code)
+        reads the pin's current value each cycle.
+        """
+        if not self.tangle_detection_enabled:
+            return False
+        try:
+            pin = self.printer.lookup_object(
+                "output_pin TANGLE_DETECTION", None
+            )
+        except Exception:
+            return True
+        if pin is None:
+            return True
+        try:
+            value = pin.get_status(self.reactor.monotonic()).get("value", 1)
+            return bool(int(round(float(value))))
+        except Exception:
+            return True
 
     def _check_tangle(self, eventtime, current_tool):
         """Trigger when cont_assist_time stays above tangle_pump_time.
