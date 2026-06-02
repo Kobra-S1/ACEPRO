@@ -475,6 +475,7 @@ reads present again, or on any baseline reset (pause, stop, no active tool).
 **Tangle Detection (optional, ACE Gen 1 only):**
 - Enabled via `[ace] tangle_detection` with threshold `tangle_pump_time` (default 4.0 s)
 - Watches the ACE-reported `cont_assist_time` heartbeat field; trips when it stays above the threshold (ACE pumping continuously against resistance)
+- Live toggle via `ACE_TANGLE_DETECTION ENABLE=0/1`, or expose a Mainsail/Fluidd slider by uncommenting `[output_pin TANGLE_DETECTION]` in the printer config example. When the pin is configured it is authoritative — both the command and the in-prompt "Disable Detection & Resume" button flip the pin so the dashboard never drifts out of sync with the runtime state.
 
 ### 5. AceSerialManager (`serial_manager.py`)
 

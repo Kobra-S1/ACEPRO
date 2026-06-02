@@ -285,7 +285,7 @@ class TestTangleInMonitorLoop:
 
 
 class TestOutputPinGate:
-    """[output_pin TANGLE_DETECTION] slider acts as a runtime kill switch."""
+    """[output_pin TANGLE_DETECTION] is authoritative when present; flag is fallback."""
 
     def _mount_pin(self, monitor, value):
         """Attach a fake output_pin via printer.lookup_object."""
@@ -296,14 +296,14 @@ class TestOutputPinGate:
         )
         return pin
 
-    def test_no_pin_falls_back_to_flag(self):
+    def test_no_pin_uses_flag_on(self):
         monitor, *_ = _make_monitor(tangle_detection=True)
         monitor.printer.lookup_object.side_effect = (
             lambda name, default=None: default
         )
         assert monitor._is_tangle_detection_active() is True
 
-    def test_no_pin_and_flag_off_stays_off(self):
+    def test_no_pin_uses_flag_off(self):
         monitor, *_ = _make_monitor(tangle_detection=False)
         monitor.printer.lookup_object.side_effect = (
             lambda name, default=None: default
@@ -320,10 +320,12 @@ class TestOutputPinGate:
         self._mount_pin(monitor, value=0)
         assert monitor._is_tangle_detection_active() is False
 
-    def test_pin_on_does_not_override_flag_off(self):
+    def test_pin_on_overrides_flag_off(self):
+        # Pin wins: user added the slider and flipped it on, detector runs
+        # even though the static config flag is False.
         monitor, *_ = _make_monitor(tangle_detection=False)
         self._mount_pin(monitor, value=1)
-        assert monitor._is_tangle_detection_active() is False
+        assert monitor._is_tangle_detection_active() is True
 
     def test_pin_read_failure_falls_back_to_flag(self):
         monitor, *_ = _make_monitor(tangle_detection=True)

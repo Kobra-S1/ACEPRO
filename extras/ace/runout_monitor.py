@@ -377,27 +377,29 @@ class RunoutMonitor:
         self._pt_last_value_s = 0.0
 
     def _is_tangle_detection_active(self):
-        """True iff the config flag is set AND no [output_pin TANGLE_DETECTION] slider has explicitly disabled it.
+        """True when the detector should run this cycle.
 
-        The slider is optional — when not configured the flag alone gates
-        detection.  Same pattern as AUTO_UNLOAD: the consumer (this code)
-        reads the pin's current value each cycle.
+        [output_pin TANGLE_DETECTION] is authoritative when configured —
+        the slider IS the runtime control, so command and slider stay
+        consistent regardless of which side toggles.  Without the pin,
+        the python flag (tangle_detection config / ACE_TANGLE_DETECTION
+        command) is the source of truth.
         """
-        if not self.tangle_detection_enabled:
-            return False
         try:
             pin = self.printer.lookup_object(
                 "output_pin TANGLE_DETECTION", None
             )
         except Exception:
-            return True
-        if pin is None:
-            return True
-        try:
-            value = pin.get_status(self.reactor.monotonic()).get("value", 1)
-            return bool(int(round(float(value))))
-        except Exception:
-            return True
+            pin = None
+        if pin is not None:
+            try:
+                value = pin.get_status(
+                    self.reactor.monotonic()
+                ).get("value", 1)
+                return bool(int(round(float(value))))
+            except Exception:
+                pass  # read failure → fall through to flag
+        return self.tangle_detection_enabled
 
     def _check_tangle(self, eventtime, current_tool):
         """Trigger when cont_assist_time stays above tangle_pump_time.

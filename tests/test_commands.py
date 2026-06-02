@@ -1219,7 +1219,7 @@ class TestDryingCommands:
     def test_cmd_ACE_TANGLE_DETECTION_query(self, mock_gcmd, setup_mocks):
         """No ENABLE arg → respond with current state."""
         monitor = Mock()
-        monitor.tangle_detection_enabled = True
+        monitor._is_tangle_detection_active = Mock(return_value=True)
         monitor.tangle_pump_time = 4.0
         INSTANCE_MANAGERS[0].runout_monitor = monitor
         mock_gcmd.get_int = Mock(return_value=None)
@@ -1227,29 +1227,79 @@ class TestDryingCommands:
         assert mock_gcmd.respond_info.called
         monitor.set_tangle_detection_enabled.assert_not_called()
 
-    def test_cmd_ACE_TANGLE_DETECTION_enable(self, mock_gcmd, setup_mocks):
+    def test_cmd_ACE_TANGLE_DETECTION_enable_no_pin(self, mock_gcmd, setup_mocks):
         monitor = Mock()
-        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: d)
+        manager.gcode.run_script_from_command.reset_mock()
         mock_gcmd.get_int = Mock(return_value=1)
         ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
         monitor.set_tangle_detection_enabled.assert_called_once_with(True)
+        # No pin → no SET_PIN emission
+        for c in manager.gcode.run_script_from_command.call_args_list:
+            assert "SET_PIN" not in str(c)
 
-    def test_cmd_ACE_TANGLE_DETECTION_disable(self, mock_gcmd, setup_mocks):
+    def test_cmd_ACE_TANGLE_DETECTION_disable_no_pin(self, mock_gcmd, setup_mocks):
         monitor = Mock()
-        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: d)
+        manager.gcode.run_script_from_command.reset_mock()
         mock_gcmd.get_int = Mock(return_value=0)
         ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        monitor.set_tangle_detection_enabled.assert_called_once_with(False)
+
+    def test_cmd_ACE_TANGLE_DETECTION_with_pin_emits_SET_PIN(self, mock_gcmd, setup_mocks):
+        """When output_pin TANGLE_DETECTION exists, the slider gets flipped."""
+        monitor = Mock()
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        pin = Mock()
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: (
+            pin if n == "output_pin TANGLE_DETECTION" else d
+        ))
+        manager.gcode.run_script_from_command.reset_mock()
+        mock_gcmd.get_int = Mock(return_value=0)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        set_pin_calls = [
+            c for c in manager.gcode.run_script_from_command.call_args_list
+            if "SET_PIN PIN=TANGLE_DETECTION" in str(c)
+        ]
+        assert set_pin_calls, "expected SET_PIN emission to mirror slider"
+        assert "VALUE=0.0" in str(set_pin_calls[0])
         monitor.set_tangle_detection_enabled.assert_called_once_with(False)
 
     def test_cmd_ACE_TANGLE_DISABLE_AND_RESUME(self, mock_gcmd, setup_mocks):
         """Prompt button helper: disables detection + runs RESUME."""
         monitor = Mock()
-        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: d)
+        manager.gcode.run_script_from_command.reset_mock()
         ace.commands.cmd__ACE_TANGLE_DISABLE_AND_RESUME(mock_gcmd)
         monitor.set_tangle_detection_enabled.assert_called_once_with(False)
-        INSTANCE_MANAGERS[0].gcode.run_script_from_command.assert_called_once_with(
-            "RESUME"
-        )
+        resume_calls = [
+            c for c in manager.gcode.run_script_from_command.call_args_list
+            if str(c) == "call('RESUME')"
+        ]
+        assert resume_calls, "expected RESUME to be issued"
+
+    def test_cmd_ACE_TANGLE_DISABLE_AND_RESUME_with_pin(self, mock_gcmd, setup_mocks):
+        """Prompt button must ALSO flip the slider so dashboard stays truthful."""
+        monitor = Mock()
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        pin = Mock()
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: (
+            pin if n == "output_pin TANGLE_DETECTION" else d
+        ))
+        manager.gcode.run_script_from_command.reset_mock()
+        ace.commands.cmd__ACE_TANGLE_DISABLE_AND_RESUME(mock_gcmd)
+        calls = [str(c) for c in manager.gcode.run_script_from_command.call_args_list]
+        assert any("SET_PIN PIN=TANGLE_DETECTION" in c and "VALUE=0.0" in c
+                   for c in calls), "prompt button must lower the slider"
+        assert any(c == "call('RESUME')" for c in calls)
 
     def test_cmd_ACE_DEBUG(self, mock_gcmd, setup_mocks):
         """Test ACE_DEBUG command."""
