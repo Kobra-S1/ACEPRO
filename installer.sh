@@ -446,7 +446,7 @@ EOF
             if prompt_yes_no "Link dashboard files into Mainsail?"; then
                 ACE_MAINSAIL_DIR=$(prompt_input "Mainsail install directory" "$ACE_MAINSAIL_DEFAULT")
                 if [ -d "$ACE_MAINSAIL_DIR" ]; then
-                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js favicon.svg; do
+                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js vue.global.prod.js favicon.svg; do
                         create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_MAINSAIL_DIR/$ace_file" "Mainsail $ace_file"
                     done
                 else
@@ -459,7 +459,7 @@ EOF
             if prompt_yes_no "Link dashboard files into Fluidd?"; then
                 ACE_FLUIDD_DIR=$(prompt_input "Fluidd install directory" "$ACE_FLUIDD_DEFAULT")
                 if [ -d "$ACE_FLUIDD_DIR" ]; then
-                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js favicon.svg; do
+                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js vue.global.prod.js favicon.svg; do
                         create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_FLUIDD_DIR/$ace_file" "Fluidd $ace_file"
                     done
                 else
