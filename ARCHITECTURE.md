@@ -375,7 +375,7 @@ Mode     | Material | Color/RGB | Example
 - **Print State Tracking**: Know when printing is active (vs idle/paused)
 - **Runout Coordination**: Trigger endless spool or show prompts
 - **Print Start Baseline**: Re-initialize sensor baseline when print starts
-- **Optional Tangle Detection**: Compare extruder motion vs RDM encoder to detect stuck spools
+- **Optional Tangle Detection**: ACE Gen 1 — watch `cont_assist_time` heartbeat field for sustained pumping against resistance
 
 **Architecture:**
 RunoutMonitor is purely an observer - it does NOT change state directly. Instead:
@@ -472,10 +472,10 @@ reads present again, or on any baseline reset (pause, stop, no active tool).
 - Action: Re-initialize sensor baseline to current state
 - Purpose: Prevent false runout detection if print starts with wrong baseline
 
-**Tangle Detection (optional):**
-- Enabled via `[ace] tangle_detection` with threshold `tangle_detection_length` (default 15mm)
-- Every 0.25s compares extruder motion vs RDM encoder pulses while sensors still show filament
-- If extruder moves beyond the threshold with no encoder movement, declares a spool tangle for intervention
+**Tangle Detection (optional, ACE Gen 1 only):**
+- Enabled via `[ace] tangle_detection` with threshold `tangle_pump_time` (default 4.0 s)
+- Watches the ACE-reported `cont_assist_time` heartbeat field; trips when it stays above the threshold (ACE pumping continuously against resistance)
+- Live toggle via `ACE_TANGLE_DETECTION ENABLE=0/1`, or expose a Mainsail/Fluidd slider by uncommenting `[output_pin TANGLE_DETECTION]` in the printer config example. When the pin is configured it is authoritative — both the command and the in-prompt "Disable Detection & Resume" button flip the pin so the dashboard never drifts out of sync with the runtime state.
 
 ### 5. AceSerialManager (`serial_manager.py`)
 
@@ -934,8 +934,8 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
-| `tangle_detection` | False | Enable encoder-based tangle detection |
-| `tangle_detection_length` | 15.0 | Extruder distance (mm) without encoder motion → tangle |
+| `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (Gen 1 only) |
+| `tangle_pump_time` | 4.0 | Seconds of continuous ACE pumping before declaring a tangle |
 | `ace_connection_supervision` | True | Monitor connections; pause and alert on instability |
 | `moonraker_lane_sync_enabled` | True | Sync slot metadata to Moonraker `lane_data` namespace |
 | `moonraker_lane_sync_unknown_material_mode` | `empty` | How to publish placeholder materials: `passthrough`/`empty`/`map` |

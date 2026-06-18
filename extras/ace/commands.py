@@ -1076,6 +1076,52 @@ def cmd_ACE_QUERY_SLOTS(gcmd):
         gcmd.respond_info("\n".join(lines))
 
 
+def _sync_tangle_detection(manager, enabled):
+    """Set both the python flag and [output_pin TANGLE_DETECTION] (if configured) so the slider never lies about the runtime state."""
+    try:
+        pin = manager.printer.lookup_object(
+            "output_pin TANGLE_DETECTION", None
+        )
+    except Exception:
+        pin = None
+    if pin is not None:
+        manager.gcode.run_script_from_command(
+            f"SET_PIN PIN=TANGLE_DETECTION VALUE={1.0 if enabled else 0.0}"
+        )
+    manager.runout_monitor.set_tangle_detection_enabled(enabled)
+
+
+def cmd_ACE_TANGLE_DETECTION(gcmd):
+    """Toggle tangle detection live.  ENABLE=0/1 (no arg → query)."""
+    manager = ace_get_manager(0)
+    monitor = manager.runout_monitor
+
+    enable_arg = gcmd.get_int("ENABLE", default=None, minval=0, maxval=1)
+    if enable_arg is None:
+        active = monitor._is_tangle_detection_active()
+        state = "enabled" if active else "disabled"
+        gcmd.respond_info(
+            f"ACE: tangle detection {state} "
+            f"(threshold {monitor.tangle_pump_time:.1f}s)"
+        )
+        return
+
+    _sync_tangle_detection(manager, bool(enable_arg))
+    state = "ENABLED" if enable_arg else "DISABLED"
+    gcmd.respond_info(f"ACE: tangle detection {state}")
+    logging.info("ACE: tangle detection %s via gcode", state)
+
+
+def cmd__ACE_TANGLE_DISABLE_AND_RESUME(gcmd):
+    """Internal: disable tangle detection and resume.  Wired to the
+    "Disable & Resume" button on the tangle-detected prompt."""
+    manager = ace_get_manager(0)
+    _sync_tangle_detection(manager, False)
+    gcmd.respond_info("ACE: tangle detection DISABLED, resuming")
+    logging.info("ACE: tangle detection disabled + resume via prompt button")
+    manager.gcode.run_script_from_command("RESUME")
+
+
 def cmd_ACE_ENABLE_ENDLESS_SPOOL(gcmd):
     """Enable endless spool (automatic material matching on runout)."""
     manager = ace_get_manager(0)
@@ -2205,6 +2251,10 @@ ACE_COMMANDS = [
      "Show resolved config for ACE instance(s). [INSTANCE=<num>]"),
     ("ACE_FLUSH", cmd_ACE_FLUSH,
      "Persist any pending variable changes to disk immediately"),
+    ("ACE_TANGLE_DETECTION", cmd_ACE_TANGLE_DETECTION,
+     "Toggle tangle detection live.  ENABLE=0/1 (no arg → query state)"),
+    ("_ACE_TANGLE_DISABLE_AND_RESUME", cmd__ACE_TANGLE_DISABLE_AND_RESUME,
+     "Internal: prompt button — disable tangle detection and resume"),
 ]
 
 

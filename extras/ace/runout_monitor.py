@@ -1,18 +1,12 @@
 """
-Runout and tangle monitoring module for ACE Pro filament management system.
+Runout and tangle monitoring for ACE Pro.
 
-This module handles filament runout detection during printing, coordinating
-with the endless spool system for automatic material swapping when runout
-is detected.
+Runout: toolhead sensor present → absent transition, coordinated with
+endless spool for automatic material swapping.
 
-Optional tangle detection (``tangle_detection: True`` in ``[ace]``):
-    While printing with feed-assist active, compares extruder stepper
-    movement against RDM encoder pulses.  If the extruder extrudes more
-    than ``tangle_detection_length`` (default 15 mm, configurable in
-    ``[ace]``) without any encoder activity, and both RDM and nozzle
-    sensors still show filament present, a spool tangle is declared —
-    the filament is stuck between the spool and RDM while the extruder
-    consumes the RDM-to-nozzle buffer.
+Tangle (optional, ACE Gen 1 only): watches the ACE-reported
+``cont_assist_time`` field; pauses the print when it stays above
+``tangle_pump_time`` seconds.
 """
 
 import logging
@@ -27,86 +21,66 @@ from .config import (
 
 
 class RunoutMonitor:
-    """
-    Monitors filament sensors during printing and handles runout detection.
+    """Periodic monitor for filament runout and ACE-side tangle detection."""
 
-    Responsibilities:
-    - Track sensor state changes during print
-    - Detect filament runout (sensor present → absent transition)
-    - Detect spool tangle (extruder moves but encoder is stalled)
-    - Coordinate with endless spool for automatic material swapping
-    - Show user prompts when manual intervention needed
-    - Manage runout handling state machine
-
-    The monitor runs as a periodic callback registered with the Klipper reactor,
-    checking sensor states and print status to detect runout events.
-    """
-
-    # Default detection length for tangle checking (mm).
-    DEFAULT_TANGLE_DETECTION_LENGTH = 15.0
-
-    # How often the tangle check runs (seconds).  250 ms matches the
-    # Klipper filament_motion_sensor cadence.
+    # Monitor loop cadence (seconds) when actively checking.
     TANGLE_CHECK_INTERVAL = 0.250
+
+    # pump_time defaults
+    DEFAULT_TANGLE_PUMP_TIME = 4.0
+    TANGLE_PUMP_TIME_FLOOR = 2.0
 
     def __init__(self, printer, gcode, reactor, endless_spool, manager,
                  runout_debounce_count=1, tangle_detection=False,
-                 tangle_detection_length=None):
-        """
-        Initialize runout monitor.
+                 tangle_pump_time=None):
+        """Initialize runout monitor.
 
         Args:
-            printer: Klipper printer object for accessing printer state
-            gcode: Klipper gcode object for sending commands and responses
-            reactor: Klipper reactor for timer management
-            endless_spool: EndlessSpool instance for automatic swapping
-            manager: AceManager instance (for sensor queries and state)
-            runout_debounce_count: Number of consecutive sensor-absent readings
-                required before confirming a runout event. At the default 50ms
-                poll interval, 3 readings ≈ 150ms debounce window. Set to 1
-                for immediate (no debounce) behaviour (default).
-            tangle_detection: When True, monitor encoder vs extruder
-                movement to detect spool tangles while printing.
-            tangle_detection_length: Distance in mm the extruder must
-                move without encoder activity before a tangle is declared.
-                Defaults to DEFAULT_TANGLE_DETECTION_LENGTH (15.0 mm).
+            printer, gcode, reactor: Klipper objects.
+            endless_spool: EndlessSpool instance for automatic swapping.
+            manager: AceManager (sensor queries, state, ACE instances).
+            runout_debounce_count: Consecutive sensor-absent reads before
+                confirming a runout (default 1 = no debounce).
+            tangle_detection: Enable pump_time tangle detection (ACE Gen 1).
+            tangle_pump_time: cont_assist_time threshold in seconds for
+                tangle trigger (default DEFAULT_TANGLE_PUMP_TIME, clamped
+                to TANGLE_PUMP_TIME_FLOOR).
         """
         self.printer = printer
         self.gcode = gcode
         self.reactor = reactor
         self.endless_spool = endless_spool
-        self.manager = manager  # Reference back to manager for sensor queries
+        self.manager = manager
 
-        # Debounce configuration
         self.runout_debounce_count = max(1, int(runout_debounce_count))
         self._runout_false_count = 0
 
-        # State tracking
         self.prev_toolhead_sensor_state = None
         self.last_printing_active = False
         self.last_print_state = "idle"
         self.monitor_debug_counter = 0
 
-        # Control flags
         self.runout_detection_active = False
         self.runout_handling_in_progress = False
-
-        # Timer handle
         self._monitoring_timer = None
 
-        # --- Tangle detection state ---
+        # Tangle detection (pump_time)
         self.tangle_detection_enabled = bool(tangle_detection)
-        self.tangle_detection_length = float(
-            tangle_detection_length if tangle_detection_length is not None
-            else self.DEFAULT_TANGLE_DETECTION_LENGTH
+        threshold = float(
+            tangle_pump_time if tangle_pump_time is not None
+            else self.DEFAULT_TANGLE_PUMP_TIME
         )
-        # Extruder position beyond which a tangle is declared
-        self._tangle_runout_pos = None
-        # Encoder pulse snapshot at the time the window was set
-        self._tangle_encoder_snapshot = None
-        # Klipper objects resolved at first use
-        self._extruder = None
-        self._estimated_print_time = None
+        if threshold < self.TANGLE_PUMP_TIME_FLOOR:
+            logging.warning(
+                "ACE: tangle_pump_time=%.1f below floor %.1f; clamping",
+                threshold, self.TANGLE_PUMP_TIME_FLOOR,
+            )
+            threshold = self.TANGLE_PUMP_TIME_FLOOR
+        self.tangle_pump_time = threshold
+        # pump_time state — see _check_tangle for semantics
+        self._pt_last_value_s = 0.0
+        self._pt_phase_start_eventtime = None
+        self._pt_unsupported_logged = False
 
     def start_monitoring(self):
         """Start runout detection monitor loop."""
@@ -266,7 +240,7 @@ class RunoutMonitor:
 
         # Early exit if detection disabled or toolchange in progress
         if not self.runout_detection_active or self.manager.toolchange_in_progress:
-            self._tangle_runout_pos = None
+            self._pt_phase_start_eventtime = None
             return eventtime + 0.2
 
         try:
@@ -283,7 +257,7 @@ class RunoutMonitor:
                 self.gcode.respond_info("ACE: Print stopped/cancelled - resetting monitor baseline")
                 self.prev_toolhead_sensor_state = None
                 self._runout_false_count = 0
-                self._tangle_runout_pos = None
+                self._pt_phase_start_eventtime = None
                 self.runout_handling_in_progress = False
 
                 if not self.runout_detection_active:
@@ -303,7 +277,7 @@ class RunoutMonitor:
             if raw_print_state == "paused" or not is_printing:
                 self.prev_toolhead_sensor_state = None
                 self._runout_false_count = 0
-                self._tangle_runout_pos = None
+                self._pt_phase_start_eventtime = None
                 return eventtime + 0.2
 
             # Enhanced baseline initialization
@@ -367,7 +341,7 @@ class RunoutMonitor:
                 self._runout_false_count = 0
 
             # ===== TANGLE DETECTION (optional) =====
-            if self.tangle_detection_enabled and not self.runout_handling_in_progress:
+            if self._is_tangle_detection_active() and not self.runout_handling_in_progress:
                 self._check_tangle(eventtime, current_tool)
 
             # Update previous state for next cycle
@@ -390,131 +364,123 @@ class RunoutMonitor:
             self.gcode.respond_info(f"ACE: Monitor error: {e}")
             return eventtime + 1.0
 
-    # ========== Tangle Detection ==========
+    # ========== Tangle Detection (pump_time, ACE Gen 1) ==========
 
-    def _resolve_extruder(self):
-        """Lazily look up the Klipper extruder and estimated_print_time.
+    def set_tangle_detection_enabled(self, enabled):
+        """Live toggle of tangle detection mid-print.
 
-        Called once on the first tangle check.  Returns True on success.
+        Clears in-flight phase tracking on toggle so a stale
+        cont_assist_time value cannot fire immediately on re-enable.
         """
-        if self._extruder is not None:
-            return True
+        self.tangle_detection_enabled = bool(enabled)
+        self._pt_phase_start_eventtime = None
+        self._pt_last_value_s = 0.0
+
+    def _is_tangle_detection_active(self):
+        """True when the detector should run this cycle.
+
+        [output_pin TANGLE_DETECTION] is authoritative when configured —
+        the slider IS the runtime control, so command and slider stay
+        consistent regardless of which side toggles.  Without the pin,
+        the python flag (tangle_detection config / ACE_TANGLE_DETECTION
+        command) is the source of truth.
+        """
         try:
-            self._extruder = self.printer.lookup_object("extruder")
-            mcu = self.printer.lookup_object("mcu")
-            self._estimated_print_time = mcu.estimated_print_time
-            return True
-        except Exception as e:
-            logging.warning("ACE: Tangle detection: cannot resolve extruder: %s", e)
-            return False
-
-    def _get_extruder_pos(self, eventtime):
-        """Return extruder stepper position in mm at *eventtime*."""
-        print_time = self._estimated_print_time(eventtime)
-        return self._extruder.find_past_position(print_time)
-
-    def _reset_tangle_window(self, eventtime):
-        """Reset the tangle detection window.
-
-        Snapshots the current extruder position and encoder pulse count
-        so the next check starts fresh.
-        """
-        if not self._resolve_extruder():
-            self._tangle_runout_pos = None
-            return
-        encoder_pulse = self.manager.get_rdm_encoder_pulse()
-        if encoder_pulse is None:
-            self._tangle_runout_pos = None
-            return
-        extruder_pos = self._get_extruder_pos(eventtime)
-        self._tangle_runout_pos = extruder_pos + self.tangle_detection_length
-        self._tangle_encoder_snapshot = encoder_pulse
+            pin = self.printer.lookup_object(
+                "output_pin TANGLE_DETECTION", None
+            )
+        except Exception:
+            pin = None
+        if pin is not None:
+            try:
+                value = pin.get_status(
+                    self.reactor.monotonic()
+                ).get("value", 1)
+                return bool(int(round(float(value))))
+            except Exception:
+                pass  # read failure → fall through to flag
+        return self.tangle_detection_enabled
 
     def _check_tangle(self, eventtime, current_tool):
-        """Check for spool tangle condition.
+        """Trigger when cont_assist_time stays above tangle_pump_time.
 
-        Tangle is declared when ALL of the following are true:
-            1. Print state is "printing" (already guaranteed by caller)
-            2. ACE feed-assist is active
-            3. RDM detect pin shows filament present
-            4. Nozzle sensor shows filament present
-            5. Extruder moved >= TANGLE_DETECTION_LENGTH since last reset
-            6. RDM encoder pulse count has NOT changed since last reset
-
-        When any condition fails, the detection window is reset so we
-        never accumulate stale state.
-
-        Args:
-            eventtime: Current reactor eventtime.
-            current_tool: Global tool index being printed.
+        Called from the monitor loop only while actively printing —
+        the dispatcher gates on is_printing, toolchange_in_progress,
+        and runout_handling_in_progress.  Noops further unless the
+        currently pumping instance is Gen 1 (Gen 2 has device-native
+        tangle reporting and is intentionally not covered here).
+        Tracks monotonic growth of cont_assist_time: a value drop ends
+        the current phase, a value at or above the threshold while a
+        phase is active fires the tangle handler.
         """
-        # Condition 2: feed-assist must be active
-        if not self.manager.is_feed_assist_active():
-            self._tangle_runout_pos = None
+        inst = self._get_active_gen1_instance()
+        if inst is None:
+            self._pt_phase_start_eventtime = None
             return
 
-        # Condition 3: RDM sensor shows filament present
-        if not self.manager.get_switch_state(SENSOR_RDM):
-            self._tangle_runout_pos = None
+        info = getattr(inst, "_info", None) or {}
+        val = info.get("cont_assist_time") if isinstance(info, dict) else None
+        if val is None:
+            if not self._pt_unsupported_logged:
+                self._pt_unsupported_logged = True
+                logging.info(
+                    "ACE: tangle detection requested but firmware does not "
+                    "report cont_assist_time — detector disabled"
+                )
+            return
+        current = float(val)
+
+        prev = self._pt_last_value_s
+        self._pt_last_value_s = current
+
+        # Cycle ended or idle: reset phase
+        if current < prev or current <= 0.0:
+            self._pt_phase_start_eventtime = None
             return
 
-        # Condition 4: Nozzle sensor shows filament present
-        if not self.manager.get_switch_state(SENSOR_TOOLHEAD):
-            self._tangle_runout_pos = None
+        # First growth tick: mark phase start, wait for next tick
+        if self._pt_phase_start_eventtime is None:
+            self._pt_phase_start_eventtime = eventtime
             return
 
-        # Get current encoder pulse count from RDM tracker
-        current_encoder = self.manager.get_rdm_encoder_pulse()
-        if current_encoder is None:
-            # RDM is not a filament_tracker — cannot do tangle detection
-            return
+        # Threshold crossed → tangle
+        if current >= self.tangle_pump_time:
+            logging.warning(
+                "ACE: TANGLE DETECTED on T%d — cont_assist_time=%.1fs >= %.1fs",
+                current_tool, current, self.tangle_pump_time,
+            )
+            self._pt_phase_start_eventtime = None
+            self._pt_last_value_s = 0.0
+            self._handle_tangle_detected(current_tool)
 
-        # Initialize window if not set
-        if self._tangle_runout_pos is None:
-            self._reset_tangle_window(eventtime)
-            return
+    def _get_active_gen1_instance(self):
+        """Return the Gen 1 instance currently pumping (feed_assist active), or None.
 
-        # Condition 6: If encoder has moved, filament is flowing — reset window
-        if current_encoder != self._tangle_encoder_snapshot:
-            self._reset_tangle_window(eventtime)
-            return
-
-        # Condition 5: Check extruder position
-        if not self._resolve_extruder():
-            return
-        extruder_pos = self._get_extruder_pos(eventtime)
-        if extruder_pos < self._tangle_runout_pos:
-            # Extruder hasn't moved far enough yet — no tangle
-            return
-
-        # ===== ALL 6 CONDITIONS MET — TANGLE DETECTED =====
-        logging.warning(
-            "ACE: TANGLE DETECTED on T%d — extruder at %.1f mm "
-            "(window was %.1f mm), encoder stuck at %d pulses",
-            current_tool, extruder_pos,
-            self._tangle_runout_pos - self.tangle_detection_length,
-            current_encoder,
-        )
-        self._handle_tangle_detected(current_tool)
+        Gen 2 instances are skipped on purpose — they expose device-native
+        tangle/jam signals and do not need pump_time monitoring.
+        """
+        try:
+            for inst in getattr(self.manager, "instances", None) or []:
+                if getattr(inst, "_feed_assist_index", -1) < 0:
+                    continue
+                if getattr(inst, "protocol_name", "") != "ace1_json":
+                    continue
+                return inst
+        except Exception:
+            pass
+        return None
 
     def _handle_tangle_detected(self, tool_index):
-        """Handle a confirmed spool tangle.
-
-        Pauses the print and shows a Mainsail prompt informing the user
-        that a tangle was detected.  Resets the tangle window so that
-        after the user resolves the tangle and resumes, detection starts
-        fresh.
-
-        Args:
-            tool_index: Global tool index where the tangle was detected.
-        """
+        """Pause the print and prompt the user to clear the tangle."""
         self.runout_handling_in_progress = True
-        self._tangle_runout_pos = None
+        self._pt_phase_start_eventtime = None
+        self._pt_last_value_s = 0.0
 
         try:
             self.gcode.respond_info(
                 f"ACE: Spool tangle detected on T{tool_index}! "
-                f"Filament stuck between spool and RDM. Pausing print."
+                f"ACE pumping continuously without delivering filament. "
+                f"Pausing print."
             )
             self._pause_for_runout()
 
@@ -525,13 +491,15 @@ class RunoutMonitor:
             self.gcode.run_script_from_command(
                 f'RESPOND TYPE=command MSG="action:prompt_text '
                 f'Spool tangle detected on T{tool_index}! '
-                f'The extruder is consuming the tube buffer but no filament '
-                f'is passing through the RDM encoder. '
-                f'Check the spool for tangles, then resume."'
+                f'ACE can\'t push filament. Check the spool, then resume."'
             )
             self.gcode.run_script_from_command(
                 'RESPOND TYPE=command MSG="action:prompt_footer_button '
                 'Resume|RESUME|primary"'
+            )
+            self.gcode.run_script_from_command(
+                'RESPOND TYPE=command MSG="action:prompt_footer_button '
+                'Disable Det. & Resume|_ACE_TANGLE_DISABLE_AND_RESUME|secondary"'
             )
             self.gcode.run_script_from_command(
                 'RESPOND TYPE=command MSG="action:prompt_footer_button '
