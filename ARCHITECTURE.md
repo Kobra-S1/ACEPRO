@@ -12,9 +12,12 @@ extras/ace/
 ├── manager.py              # AceManager — orchestrates all instances, shared transport,
 │                           #   ACE2 bus discovery, sensor management, tool changes
 ├── instance.py             # AceInstance — per-unit state, feed/retract, inventory, RFID
-├── protocol.py             # Protocol seam — ACE1 JSON & ACE2 protobuf adapters,
-│                           #   command catalog, request builders, wire codecs,
-│                           #   transport rules, baud/port auto-selection
+├── protocol.py             # Protocol base — AceProtocolAdapter abstract class,
+│                           #   command specs (AceCommandSpec/AceTransportSpec),
+│                           #   resolve_protocol_name(), shared request builders
+├── protocol_ace1.py        # AceJsonProtocolAdapter — JSON frame codec for ACE1 units
+├── protocol_ace2.py        # AceProtoProtocolAdapter — protobuf frame codec for ACE2,
+│                           #   ACE2_COMMAND_CATALOG with field schemas, response decoders
 ├── ace2_bus.py             # ACE2 shared-bus session — UID discovery, device-id binding,
 │                           #   deterministic assignment planning
 ├── serial_manager.py       # Serial transport — connect/reconnect, frame I/O, sliding-
@@ -78,7 +81,9 @@ extras/ace/
   - Instance N: ...
 - **Global State Management**:
   - `ace_filament_pos`: Tracks filament position ("bowden", "splitter", "toolhead", "nozzle")
-- `ace_current_index`: Currently active tool (-1 = none)
+- `ace_current_index`: Currently active tool (-1 = none) — last **CONFIRMED** physically loaded tool
+- `ace_target_index`: In-flight/unconfirmed toolchange target (-1 = none) — see
+  "In-Flight Toolchange Tracking" below
 - `ace_endless_spool_enabled`: Endless spool active/inactive
 - `ace_global_enabled`: ACE system master enable
 - **Sensor Management**: Manages shared sensors (toolhead, optional RDM), supporting both
@@ -112,6 +117,26 @@ This prevents silent loss of the stuck-tool identity, which previously caused th
 next tool change to hit the plausibility block and cycle blindly through parked slots.
 During a print, the existing print-recovery branch already records the requested tool correctly.
 
+**In-Flight Toolchange Tracking (`ace_target_index`):**
+Tracks the tool of an in-flight or failed toolchange attempt (-1 = none),
+separate from `ace_current_index` (last confirmed loaded tool). Owned
+entirely by `perform_tool_change()`:
+
+- Set to `target_tool` at the start of `perform_tool_change()`.
+- Cleared to `-1` on confirmed success (load confirmed, or unload-only confirmed).
+- Left unchanged if an exception is raised during the attempt.
+
+Consumers:
+- `ACE_GET_CURRENT_INDEX` / `ACE_DEBUG_STATE`: report it alongside `ace_current_index`.
+- `ACE_DEBUG_SET_TARGET_INDEX [TOOL=<n>]`: manual override. `ACE_DEBUG_SET_CURRENT_INDEX` also clears it.
+- `get_status()`: exposes it as `target_index`.
+- KlipperScreen (`acepro.py`): shows `"ACE: Toolchange to T<target> unconfirmed"` when it differs from the loaded slot.
+- RESUME macro (`printer_generic_macros.cfg`): reloads `ace_target_index` instead of `_ACE_STATE.active` when they differ.
+- `_validate_startup_tool_state()`: skips entirely when this is non`-1`, since
+  it (unlike `print_stats`/`pause_resume`) survives a klippy restart and
+  signals a pending resume/retry that must not have its fallback tool state
+  overwritten.
+
 **Toolchange Guard Decorator:**
 ```python
 @toolchange_in_progress_guard
@@ -137,8 +162,12 @@ execute_coordinated_retraction(...)         # Synchronized ACE + extruder retrac
 _turn_off_heater_if_idle()                  # Safety: M104 S0 after unloads outside print jobs
 
 # Startup Validation
-_validate_startup_tool_state()              # Clear stale persisted tool state if sensors show clear;
-                                            # currently disabled on startup (timing-sensitive, pending rewrite)
+_validate_startup_tool_state()              # Clear stale persisted tool state if sensors show clear.
+                                            # Runs from _handle_ready via reactor.register_callback
+                                            #   (own greenlet, non-blocking to other klippy:ready
+                                            #   handlers). Skips if ace_target_index != -1
+                                            #   (unconfirmed toolchange pending resume/retry) or
+                                            #   toolchange_in_progress (e.g. KlipperPLR recovery).
 
 # Sensor Management
 get_switch_state(sensor_name)               # Query sensor state (debounced)
@@ -707,11 +736,10 @@ disable_ace_pro()                        # Disable reconnection attempts
 is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 ```
 
-### 6. Protocol Layer (`protocol.py`)
+### 6. Protocol Layer (`protocol.py`, `protocol_ace1.py`, `protocol_ace2.py`)
 
 **Primary Responsibilities:**
-- **Protocol Seam**: Single abstraction boundary between transport-agnostic instance
-  logic and wire-format-specific encode/decode
+- **Protocol Seam**: Three-file split — `protocol.py` holds the base `AceProtocolAdapter` class, command spec dataclasses (`AceCommandSpec`, `AceTransportSpec`), shared request builders, and `resolve_protocol_name()` for auto-detection; `protocol_ace1.py` holds `AceJsonProtocolAdapter`; `protocol_ace2.py` holds `AceProtoProtocolAdapter` and `ACE2_COMMAND_CATALOG`.
 - **Dual Protocol Support**: `AceJsonProtocolAdapter` (ACE1) and
   `AceProtoProtocolAdapter` (ACE2) implement the same `AceProtocolAdapter` interface
 - **Command Catalog**: `ACE2_COMMAND_CATALOG` maps command names to `AceCommandSpec`
@@ -814,8 +842,8 @@ set_and_save(varname, value)    # Update RAM and either defer or write immediate
 flush()                         # Write all dirty variables to disk; clears dirty set
                                 # Safe to call when nothing is dirty (no-op)
 
-# Property
-has_pending                     # True if any dirty variables await flushing
+# Method (callable)
+has_pending()             # True if any dirty variables await flushing
 ```
 
 **Usage Pattern:**
@@ -1118,7 +1146,9 @@ _ACE_HANDLE_PRINT_END                      # Called at print end (cleanup sequen
 
 **Debug & Testing Commands:**
 ```
-ACE_GET_CURRENT_INDEX                      # Query currently loaded tool index
+ACE_GET_CURRENT_INDEX                      # Query currently loaded tool index, plus
+                                           # ace_target_index (in-flight/unconfirmed
+                                           # toolchange target, -1 = none)
 
 ACE_GET_CONNECTION_STATUS                  # Show connection status for all instances
                                            # Reports: connected, stable, recent reconnects
@@ -1142,6 +1172,11 @@ ACE_DEBUG_SET_CURRENT_INDEX [TOOL=<n>]     # Override saved tool index
                                            # TOOL=-1: no tool loaded (default)
                                            # Useful for correcting stale state after
                                            # manual filament removal while powered off
+                                           # Also clears ace_target_index to -1
+
+ACE_DEBUG_SET_TARGET_INDEX [TOOL=<n>]      # Override saved in-flight toolchange target
+                                           # TOOL=-1: no toolchange in flight (default)
+                                           # Does NOT clear ace_current_index
 
 ACE_DEBUG_SET_FILAMENT_STATE [STATE=bowden|splitter|toolhead|nozzle]
                                            # Override saved filament position
@@ -1217,6 +1252,84 @@ def ace_get_instance_and_slot(gcmd):
 # - Restore position and continue
 ```
 
+## USB Discovery & Instance-to-Hardware Topology Resolution
+
+Covers `AceManager._resolve_daisy_chain_topology` / `_scan_ace_candidate_ports_with_retry`
+(manager.py) and shared-bus discovery in `_initialize_shared_bus_transport` /
+`_on_shared_bus_connected` (manager.py) + `Ace2BusSession` (ace2_bus.py).
+
+**Core problem this solves:** logical instance number (0..ace_count-1, what
+tool mapping/inventory/persistence key off) must map to the correct *physical*
+ACE unit every boot, even though `/dev/ttyACMx` numbering is reassigned by
+enumeration order/timing, not physical identity. Getting this wrong silently
+binds one instance's inventory/RFID queries to the *wrong physical unit*
+(observed bug: ACE[1]'s manually-set PETG got clobbered by ACE[2]'s RFID
+spool after an ACE power-cycle + `restart klipper`).
+
+**`ace_count` = number of physical ACE units (= logical instances), NOT the
+number of USB serial ports.** A dedicated ACE1 unit consumes one port. A
+chain of ACE2 units shares ONE USB-to-RS485 adapter/port for all of them,
+addressed afterward by `device_id` — so port count can be less than
+`ace_count` by design. Never conflate the two.
+
+**Resolution order (`_resolve_daisy_chain_topology`, runs once in
+`AceManager.__init__`):**
+1. Scan `comports()` for ports matching a known ACE transport description,
+   sort by physical USB location depth then lexicographically
+   (`sort_ace_candidate_ports`) — this is what makes "instance N" mean "Nth
+   physical position in the chain", independent of `/dev/ttyACMx` numbering.
+2. Force dedicated (ACE1) candidates before shared-bus (ACE2) candidates,
+   regardless of raw scan order (mixed chains must resolve ACE1-first).
+3. Walk the ordered candidates assigning instance numbers sequentially; the
+   first shared-bus candidate found backs *every remaining* instance slot
+   (one physical port, N logical instances via device_id).
+
+**Why the scan retries (`_scan_ace_candidate_ports_with_retry`):** USB
+enumeration is async relative to Klipper startup — a physically-present
+device can simply be missing from `comports()` on the first read. Resolving
+against an incomplete scan silently shifts every instance after the missing
+one down by one slot (this was the actual root cause of the ACE[1]/ACE[2]
+mixup above). So the scan polls instead of reading once:
+- Fast path: stop as soon as `len(candidates) >= ace_count` (normal case,
+  every instance has its own port).
+- Otherwise wait for the candidate set to stay identical across 2
+  consecutive polls ("stability") before finalizing — needed because a
+  shared-bus port alone can never reach `ace_count` candidates (one port
+  backs several instances), so count alone can't be the only stop condition.
+  Do **not** stop the instant *any* shared-bus candidate appears — an
+  earlier dedicated unit may simply not have enumerated yet, which would
+  reproduce the exact bug being fixed.
+- **Budget is deliberately short (~1.5s, not longer): ACE1 units self-reset
+  on a ~2-3s watchdog if nothing talks to them**, and this scan runs before
+  any `AceInstance`/serial connection exists, so an already-visible-but-idle
+  ACE1 gets zero communication for the whole scan. Waiting longer than the
+  watchdog risks the unit resetting (and re-enumerating) *during* the wait —
+  making enumeration churn worse, not better. This can't fix races slower
+  than the watchdog itself; that's an accepted residual limitation, not an
+  oversight.
+- Bounded by an attempt counter, not wall-clock deltas, so a reactor whose
+  clock doesn't advance (mocked tests, exotic reactors) can't spin forever.
+  `self.reactor.pause(...)` failures are swallowed (best-effort yield only)
+  for the same reason.
+
+**Shared-bus (ACE2) device discovery, after connect
+(`_initialize_shared_bus_transport` / `_on_shared_bus_connected`):**
+- `ace_count` again means every configured ACE2 unit on that bus must
+  actually be found — no partial acceptance. The discovery loop tries all
+  `len(shared_instances)` `DISCOVER_DEVICE` slots even if some don't answer
+  (a single slow/flaky unit must not truncate discovery of the rest).
+- `_on_shared_bus_connected` only starts instance setup/heartbeats when
+  `ready_count == expected_count`. Anything less schedules a retry and
+  starts *nothing* on that bus — a partially-available shared bus must never
+  look "ready" to the rest of the system (a print relying on a spool behind
+  an undiscovered unit must not silently proceed as if it were present).
+- Retry is a **flat interval (3s), not exponential backoff** — missing
+  units may need to be found again quickly, including mid-print after a
+  reconnect; a growing/long backoff just delays recovery for no benefit.
+- UID-to-instance bindings are persisted (`PersistentState`) so daisy-chain
+  discovery order changing across reconnects doesn't reshuffle which
+  logical instance a physical ACE2 unit maps to.
+
 ## Data Flow
 
 ### Tool Change Sequence
@@ -1225,6 +1338,7 @@ def ace_get_instance_and_slot(gcmd):
 1. User Command: T3
    ↓
 2. AceManager.perform_tool_change(current=-1, target=3)
+   - Set ace_target_index = 3 (in-flight, unconfirmed)
    ↓
 3. _ACE_PRE_TOOLCHANGE macro
    - Z-hop
@@ -1260,7 +1374,9 @@ def ace_get_instance_and_slot(gcmd):
    - Wipe nozzle
    - Restore temperature / shut off heater if done
    ↓
-9. Set ace_current_index = 3
+9. Set ace_current_index = 3, clear ace_target_index = -1 (confirmed)
+
+If any step raises before step 9, ace_target_index stays = 3.
 ```
 
 ### Runout Detection Flow
@@ -1322,7 +1438,8 @@ endless spool matching based on the previous spool's color/material metadata.
 
 ```python
 ace_filament_pos: str               # "bowden" | "splitter" | "toolhead" | "nozzle"
-ace_current_index: int              # Currently loaded tool (-1 = none)
+ace_current_index: int              # Last CONFIRMED loaded tool (-1 = none)
+ace_target_index: int               # In-flight/unconfirmed toolchange target (-1 = none)
 ace_endless_spool_enabled: bool     # Endless spool active
 ace_endless_spool_match_mode: str   # Match mode: "exact" | "material" | "next"
 ace_global_enabled: bool            # ACE system enabled

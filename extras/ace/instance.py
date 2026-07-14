@@ -64,6 +64,7 @@ class AceInstance:
         active_protocol_name=None,
         serial_mgr=None,
         bus_session=None,
+        target_usb_location=None,
     ):
         """
         Initialize ACE instance.
@@ -73,6 +74,10 @@ class AceInstance:
             ace_config: Configuration dict
             printer: Klipper printer object
             ace_enabled: Initial ACE Pro enabled state
+            target_usb_location: Physical USB location this instance is
+                bound to, as resolved from daisy-chain topology order by
+                AceManager. Ignored when `serial_mgr` is already provided
+                (shared-bus instances build their AceSerialManager elsewhere).
         """
         self.variables = {}
         self.SLOT_COUNT = SLOTS_PER_ACE
@@ -115,6 +120,7 @@ class AceInstance:
         self._feed_assist_topology_position = None  # Track chain position (0, 1, 2...)
         self._pending_feed_assist_restore = -1  # Slot to restore after first heartbeat
         self._pending_rfid_refresh = False  # Flag to refresh all RFID data after reconnect
+        self._pending_rfid_refresh_slots = []  # Reconnect RFID refresh queue (throttled)
         self._last_retract_early_stopped = False  # Slot sensor confirmed empty during _retract() (or slot was already empty)
         self._dryer_active = False
         self._dryer_temperature = 0
@@ -145,6 +151,7 @@ class AceInstance:
             status_debug_logging=self.status_debug_logging,
             supervision_enabled=self.supervision_enabled,
             protocol=self.protocol,
+            target_usb_location=target_usb_location,
         )
         self.tool_offset = get_tool_offset(self.instance_num)
         if not self.transport_spec.shared_bus:
@@ -152,6 +159,55 @@ class AceInstance:
         self.serial_mgr.set_on_connect_callback(self._on_ace_connect)
         self._dryer_start_logged = False  # prevent duplicate dryer start messages
         self._shared_bus_heartbeat_timer = None
+
+    def rebind_transport(
+        self,
+        protocol,
+        protocol_name,
+        baud,
+        serial_mgr=None,
+        bus_session=None,
+        target_usb_location=None,
+    ):
+        """Swap this instance's protocol/transport in place.
+
+        Used by ``AceManager`` re-detection (``ACE_REDETECT``) to recover an
+        instance that was mis-typed by an empty/incomplete startup USB scan -
+        e.g. an instance frozen on ``ace1_json`` because its ACE2 RS-485 adapter
+        enumerated late, leaving it unable to ever find its port.
+
+        Only the protocol adapter, serial transport, bound bus session and baud
+        change; instance identity is preserved so inventory, tool mapping,
+        sensors and monitors that already reference this object stay valid.
+
+        Callers must gate the *decision* to re-type on positive evidence
+        (ACE2 ``DISCOVER_DEVICE`` confirming an unbound unit) - this method only
+        performs the swap.
+        """
+        was_enabled = True
+        if self.serial_mgr is not None:
+            is_enabled = getattr(self.serial_mgr, "is_ace_pro_enabled", None)
+            if callable(is_enabled):
+                was_enabled = bool(is_enabled())
+
+        self.protocol = protocol
+        self.protocol_name = protocol_name
+        self.transport_spec = protocol.get_transport_spec()
+        self.baud = baud
+        self.bus_session = bus_session
+        self.serial_mgr = serial_mgr or AceSerialManager(
+            self.gcode,
+            self.reactor,
+            self.instance_num,
+            ace_enabled=was_enabled,
+            status_debug_logging=self.status_debug_logging,
+            supervision_enabled=self.supervision_enabled,
+            protocol=self.protocol,
+            target_usb_location=target_usb_location,
+        )
+        if not self.transport_spec.shared_bus:
+            self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)
+        self.serial_mgr.set_on_connect_callback(self._on_ace_connect)
 
     def _prepare_request(self, request):
         """Normalize request and attach ACE2 shared-bus target when known."""
@@ -311,6 +367,12 @@ class AceInstance:
             temp_max = extruder_temp.get("max", 0)
             temp_mode = self.ace_config.get("rfid_temp_mode", "average")
 
+            # Some RFID reads come back "identified" but with no actual
+            # temperature/material payload (e.g. a blank/unreadable tag).
+            # Only compute a usable temp when we have real data to derive it
+            # from - otherwise leave any existing (e.g. manually-set) temp
+            # alone instead of clobbering it with a bogus 0/default value.
+            have_temp_data = True
             if temp_min > 0 or temp_max > 0:
                 if temp_mode == "min" and temp_min > 0:
                     rfid_temp = temp_min
@@ -322,8 +384,11 @@ class AceInstance:
                     rfid_temp = temp_max
                 else:
                     rfid_temp = temp_min
+            elif material and material in self.MATERIAL_TEMPS:
+                rfid_temp = self.MATERIAL_TEMPS[material]
             else:
-                rfid_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
+                rfid_temp = self.DEFAULT_TEMP
+                have_temp_data = False
 
             if 0 <= slot_idx < self.SLOT_COUNT:
                 inv = self.inventory[slot_idx]
@@ -332,8 +397,12 @@ class AceInstance:
                     inv["material"] = material
 
                 old_temp = inv.get("temp", 0)
-                if rfid_temp != old_temp:
+                if have_temp_data and rfid_temp != old_temp:
                     inv["temp"] = rfid_temp
+                elif not have_temp_data:
+                    # Preserve existing temp (e.g. manually set via dashboard)
+                    # instead of zeroing it out with no usable RFID data.
+                    rfid_temp = old_temp
 
                 if rfid_color:
                     inv["color"] = rfid_color
@@ -1518,12 +1587,20 @@ class AceInstance:
             if self._pending_rfid_refresh:
                 self._pending_rfid_refresh = False
                 if self.rfid_inventory_sync_enabled:
-                    # Unconditionally query all slots to catch any spool changes during disconnect
-                    for slot_idx in range(self.SLOT_COUNT):
-                        logging.info(
-                            f"ACE[{self.instance_num}]: Reconnect - querying RFID data for slot {slot_idx}"
-                        )
-                        self._query_rfid_full_data(slot_idx)
+                    # Query slots sequentially to avoid post-reconnect request bursts
+                    # that can push responses beyond timeout and look unsolicited.
+                    self._pending_rfid_refresh_slots = list(range(self.SLOT_COUNT))
+
+            if (
+                self.rfid_inventory_sync_enabled
+                and self._pending_rfid_refresh_slots
+                and not self._pending_rfid_queries
+            ):
+                slot_idx = self._pending_rfid_refresh_slots.pop(0)
+                logging.info(
+                    f"ACE[{self.instance_num}]: Reconnect - querying RFID data for slot {slot_idx}"
+                )
+                self._query_rfid_full_data(slot_idx)
 
             slots = self._info.get("slots", [])
             for slot in slots:
@@ -1620,6 +1697,21 @@ class AceInstance:
                             updated_color = [0, 0, 0]
                             updated_temp = 0
                             inventory_changed = True  # Force persistence update
+
+                        # Authoritative check: if this slot is recorded as the
+                        # active/loaded tool (ace_current_index) but the ACE
+                        # hardware itself reports it empty, the persisted
+                        # state is stale - clear it. Catches cases the
+                        # sensor-only startup validation can miss entirely
+                        # (e.g. wrong physical unit bound to this instance).
+                        if self.manager:
+                            self.manager.reconcile_stale_current_index(
+                                self.tool_offset + idx,
+                                reason=(
+                                    f"ACE[{self.instance_num}] slot {idx} "
+                                    f"status update"
+                                ),
+                            )
 
                     # Handle RFID tag detection - only query get_filament_info, don't use status metadata
                     elif new_status == AceSlotStateMachineState.READY.value:
@@ -1867,6 +1959,7 @@ class AceInstance:
         # Set flag to refresh RFID data on next status update
         # This ensures we have current data if spools were changed during disconnect
         self._pending_rfid_refresh = True
+        self._pending_rfid_refresh_slots = []
         logging.info(
             f"ACE[{self.instance_num}]: Connected - will refresh RFID data after first status update"
         )

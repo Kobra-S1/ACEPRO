@@ -125,6 +125,9 @@
                 <div class="current-tool-indicator" :class="{ none: currentTool < 0 }">
                     Current Loaded: {{ currentTool >= 0 ? `T${currentTool}` : 'None' }}
                 </div>
+                <div class="target-tool-indicator" v-if="Number.isInteger(targetTool) && targetTool >= 0 && targetTool !== currentTool">
+                    Toolchange to T{{ targetTool }} unconfirmed
+                </div>
                 <div class="instances-wrapper">
                     <div 
                         v-for="inst in instancesPanels"
@@ -144,13 +147,15 @@
                                     ready: slot.status === 'ready',
                                     empty: slot.status === 'empty',
                                     busy: slot.status === 'busy',
-                                    active: isCurrentToolSlot(slot, inst.index)
+                                    active: isCurrentToolSlot(slot, inst.index),
+                                    'target-tool': isTargetToolSlot(slot, inst.index)
                                 }"
                             >
                                 <div class="slot-header">
                                     <h3 class="tool-title" v-if="slot.tool !== null && slot.tool !== undefined">T{{ slot.tool }} <span class="slot-sub" v-if="slot.index !== undefined">({{ t('slots.slot') }} {{ slot.index }})</span></h3>
                                     <h3 v-else>{{ t('slots.slot') }} {{ slot.index }}</h3>
                                     <span v-if="isCurrentToolSlot(slot, inst.index)" class="current-tool-badge">LOADED</span>
+                                    <span v-if="isTargetToolSlot(slot, inst.index)" class="target-tool-badge">TARGET</span>
                                     <span v-if="isRfidIdentified(slot.rfid)" class="rfid-badge">{{ t('slots.rfid') }}</span>
                                     <span class="slot-status-badge" :class="slot.status">
                                         {{ getSlotStatusText(slot.status) }}

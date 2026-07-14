@@ -161,6 +161,30 @@ class TestAceManagerInitialization(unittest.TestCase):
         self.assertIn(0, INSTANCE_MANAGERS)
         self.assertEqual(INSTANCE_MANAGERS[0], manager)
 
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_manager_clears_stale_registry_entries_on_init(self, mock_endless_spool, mock_ace_instance):
+        """A Klipper RESTART reuses the same Python process, so ACE_INSTANCES/
+        INSTANCE_MANAGERS (plain module-level dicts) are NOT reset between
+        RESTARTs. If ace_count is lowered (e.g. 2 -> 1) across a RESTART, a
+        stale instance/manager from the previous, larger ace_count must not
+        keep lingering in these registries -- AceManager.__init__ must clear
+        both before repopulating them.
+        """
+        # Simulate leftover state from a PREVIOUS AceManager with a higher
+        # ace_count (e.g. instance 5 no longer exists with ace_count=2).
+        stale_instance = Mock()
+        stale_manager = Mock()
+        ACE_INSTANCES[5] = stale_instance
+        INSTANCE_MANAGERS[5] = stale_manager
+
+        manager = AceManager(self.mock_config)  # ace_count=2 per _mock_config_getint
+
+        self.assertNotIn(5, ACE_INSTANCES)
+        self.assertNotIn(5, INSTANCE_MANAGERS)
+        self.assertEqual(set(ACE_INSTANCES.keys()), {0, 1})
+        self.assertEqual(set(INSTANCE_MANAGERS.keys()), {0, 1})
+
 
 class TestGlobalEnableDisable(unittest.TestCase):
     """Test global ACE Pro enable/disable functionality."""
@@ -665,6 +689,389 @@ class TestSharedAce2Transport(unittest.TestCase):
 
         discovered = [device.identity.uid_tuple for device in bus_session.iter_discovered_devices()]
         assert discovered == [(11, 22, 33), (44, 55, 66)]
+
+    def test_persisted_but_absent_ace2_unit_is_not_counted_ready(self):
+        """
+        Regression (Finding B): an ACE2 unit that was previously bound (so its
+        UID is restored from persisted bindings) but is momentarily silent
+        during discovery must NOT be reported as "ready".
+
+        Here instance 0's unit (11,22,33) answers discovery and its
+        ASSIGN_DEVICE_ID is ACKed, but instance 1's unit (44,55,66) is offline:
+        it answers neither discovery nor assignment. Because it is still in the
+        session (from the persisted binding), ``build_assignment_plan`` hands it
+        a local ``device_id`` anyway - so ``_get_shared_bus_ready_instances``
+        counts it as ready even though nothing on the wire confirmed it.
+
+        ``ready_count`` gates the flat 3s "retry until every declared unit is
+        really here" recovery in ``_on_shared_bus_connected``. If an absent unit
+        counts as ready, that retry is cancelled and a running print believes a
+        spool bay is available when its unit never actually re-bound. Only units
+        confirmed on the bus this cycle should count.
+        """
+        self.variables["ace2_bus_bindings_0_1"] = {
+            0: (11, 22, 33),
+            1: (44, 55, 66),
+        }
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            # discovery: only instance 0's unit answers; instance 1's is silent
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            None,
+            # assignment: instance 0's unit ACKs; instance 1's times out
+            {"code": 0, "msg": "SUCCESS"},
+            None,
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        ready_count = manager._initialize_shared_bus_transport(manager.instances[0])
+
+        self.assertEqual(
+            ready_count,
+            1,
+            "an absent (only persisted) ACE2 unit was counted as ready, which "
+            "cancels the discovery retry that should keep hunting for it",
+        )
+
+    def test_new_lower_uid_device_does_not_steal_persisted_instance(self):
+        """
+        Regression (Finding C): the positional ``zip`` binding must not reshuffle
+        an already-bound logical instance when a lower-UID, still-unbound device
+        is discovered alongside it.
+
+        Persisted state binds instance 0 to unit (44,55,66); instance 1 was
+        never bound. On this bus scan both (11,22,33) [new, unbound, lower UID]
+        and (44,55,66) [bound to instance 0] are discovered. Sorted by UID the
+        new unit sorts first, so a positional
+        ``zip(sorted_instances, sorted_devices)`` pairs instance 0 with the new
+        (11,22,33) unit and unbinds it from (44,55,66) - silently moving
+        instance 0 onto a different physical unit (and its spools/inventory).
+
+        Correct behaviour: instance 0 stays on its persisted unit (44,55,66);
+        the newly discovered (11,22,33) fills the still-unbound instance 1.
+        """
+        self.variables["ace2_bus_bindings_0_1"] = {
+            0: (44, 55, 66),
+        }
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"code": 0, "msg": "SUCCESS"},
+            {"code": 0, "msg": "SUCCESS"},
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        manager._initialize_shared_bus_transport(manager.instances[0])
+
+        bus_session = manager.instances[0].bus_session
+        device0 = bus_session.get_device_for_instance(0)
+        device1 = bus_session.get_device_for_instance(1)
+        self.assertEqual(
+            device0.identity.uid_tuple,
+            (44, 55, 66),
+            "instance 0 was moved off its persisted unit by a newly discovered "
+            "lower-UID device",
+        )
+        self.assertEqual(
+            device1.identity.uid_tuple,
+            (11, 22, 33),
+            "newly discovered unit should have filled the unbound instance 1",
+        )
+
+    # ---- ACE_REDETECT (mis-typed protocol recovery, Phase 1) ----
+
+    def _stuck_instance(self, num, connected=False, shared=False, protocol_name="ace1_json"):
+        inst = Mock()
+        inst.instance_num = num
+        inst.configured_protocol_name = "auto"
+        inst.protocol_name = protocol_name
+        inst.transport_spec = Mock(shared_bus=shared)
+        inst.serial_mgr = Mock(is_connected=Mock(return_value=connected))
+        return inst
+
+    def _redetect_manager(self, instances, unbound_count, adapter_visible=True):
+        manager = self._build_manager()
+        manager.instances = instances
+        manager.ace_count = len(instances)
+        manager.toolchange_in_progress = False
+        manager._is_printing_or_paused = Mock(return_value=False)
+        manager._ace2_adapter_visible = Mock(return_value=adapter_visible)
+        self._ctx = {"serial_mgr": Mock(), "bus_session": Mock()}
+        manager._probe_ace2_unbound_units = Mock(return_value=(self._ctx, unbound_count))
+        manager._retype_instance_to_ace2 = Mock()
+        manager._on_shared_bus_connected = Mock()
+        return manager
+
+    def test_redetect_adopts_stuck_instance_when_unbound_unit_exists(self):
+        ok = self._stuck_instance(0, connected=True)
+        stuck = self._stuck_instance(1, connected=False)
+        manager = self._redetect_manager([ok, stuck], unbound_count=1)
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager.redetect_transports()
+
+        manager._retype_instance_to_ace2.assert_called_once_with(stuck, self._ctx)
+        manager._on_shared_bus_connected.assert_called_once_with(self._ctx["bus_session"])
+
+    def test_redetect_refuses_when_no_unbound_unit(self):
+        """INV-1: a stuck instance is NOT adopted if the bus is full (missing ACE1)."""
+        stuck = self._stuck_instance(0, connected=False)
+        manager = self._redetect_manager([stuck], unbound_count=0)
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager.redetect_transports()
+
+        manager._retype_instance_to_ace2.assert_not_called()
+        manager._on_shared_bus_connected.assert_not_called()
+
+    def test_redetect_adopts_highest_instances_first_capped_by_unbound(self):
+        """Two stuck instances, one unbound unit -> only the highest is adopted."""
+        stuck0 = self._stuck_instance(0, connected=False)
+        stuck1 = self._stuck_instance(1, connected=False)
+        manager = self._redetect_manager([stuck0, stuck1], unbound_count=1)
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager.redetect_transports()
+
+        manager._retype_instance_to_ace2.assert_called_once_with(stuck1, self._ctx)
+
+    def test_redetect_skips_during_toolchange(self):
+        stuck = self._stuck_instance(0, connected=False)
+        manager = self._redetect_manager([stuck], unbound_count=1)
+        manager.toolchange_in_progress = True
+
+        manager.redetect_transports()
+
+        manager._probe_ace2_unbound_units.assert_not_called()
+        manager._retype_instance_to_ace2.assert_not_called()
+
+    def test_redetect_skips_during_print(self):
+        stuck = self._stuck_instance(0, connected=False)
+        manager = self._redetect_manager([stuck], unbound_count=1)
+        manager._is_printing_or_paused = Mock(return_value=True)
+
+        manager.redetect_transports()
+
+        manager._probe_ace2_unbound_units.assert_not_called()
+
+    def test_redetect_no_probe_when_no_ace2_adapter_visible(self):
+        stuck = self._stuck_instance(0, connected=False)
+        manager = self._redetect_manager([stuck], unbound_count=1, adapter_visible=False)
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager.redetect_transports()
+
+        manager._probe_ace2_unbound_units.assert_not_called()
+        manager._retype_instance_to_ace2.assert_not_called()
+
+    def test_redetect_ignores_already_shared_and_connected_instances(self):
+        connected = self._stuck_instance(0, connected=True)
+        already_shared = self._stuck_instance(1, connected=False, shared=True)
+        manager = self._redetect_manager([connected, already_shared], unbound_count=1)
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager.redetect_transports()
+
+        # No eligible (ace1-typed, disconnected) instance -> probe never runs.
+        manager._probe_ace2_unbound_units.assert_not_called()
+        manager._retype_instance_to_ace2.assert_not_called()
+
+    def test_probe_counts_only_unbound_discovered_units(self):
+        """The discovery gate: unbound = discovered UIDs minus already-bound UIDs."""
+        manager = self._build_manager()
+        serial_mgr = Mock(is_connected=Mock(return_value=True), instance_num=1)
+        serial_mgr.protocol = Mock(
+            build_discover_device_request=Mock(return_value={"command": "DISCOVER_DEVICE", "params": {}})
+        )
+        bus_session = Mock(export_bindings=Mock(return_value={0: (11, 22, 33)}))
+        ctx = {"serial_mgr": serial_mgr, "bus_session": bus_session}
+        manager._get_or_create_ace2_shared_context = Mock(return_value=ctx)
+        manager.ace_count = 2
+
+        # Discovery reveals a bound unit (11,22,33) and an unbound one (44,55,66).
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+        ])
+        manager._send_bus_request = Mock(side_effect=lambda sm, req, timeout_s=5.0: next(responses, None))
+
+        context, unbound = manager._probe_ace2_unbound_units(ports=[])
+
+        self.assertIs(context, ctx)
+        self.assertEqual(unbound, 1)
+
+    def test_probe_reports_zero_unbound_when_all_discovered_are_bound(self):
+        manager = self._build_manager()
+        serial_mgr = Mock(is_connected=Mock(return_value=True), instance_num=1)
+        serial_mgr.protocol = Mock(
+            build_discover_device_request=Mock(return_value={"command": "DISCOVER_DEVICE", "params": {}})
+        )
+        bus_session = Mock(export_bindings=Mock(return_value={0: (11, 22, 33), 1: (44, 55, 66)}))
+        ctx = {"serial_mgr": serial_mgr, "bus_session": bus_session}
+        manager._get_or_create_ace2_shared_context = Mock(return_value=ctx)
+        manager.ace_count = 2
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            None,
+        ])
+        manager._send_bus_request = Mock(side_effect=lambda sm, req, timeout_s=5.0: next(responses, None))
+
+        _context, unbound = manager._probe_ace2_unbound_units(ports=[])
+        self.assertEqual(unbound, 0)
+
+    def test_retype_to_ace2_tears_down_orphaned_old_serial_mgr(self):
+        """The dedicated ace1 manager left behind by adoption must be disconnected.
+
+        Otherwise its reconnect timer keeps looping 'No ACE device found' under
+        the instance's label forever, even though the instance is now connected
+        via the shared bus.
+        """
+        manager = self._build_manager()
+        old_mgr = Mock()
+        inst = Mock(instance_num=1, serial_mgr=old_mgr, rebind_transport=Mock())
+        manager.instances = [inst]
+        ctx = {"serial_mgr": Mock(), "bus_session": Mock()}
+
+        # Simulate rebind pointing the instance at the shared manager.
+        def _rebind(**kwargs):
+            inst.serial_mgr = ctx["serial_mgr"]
+        inst.rebind_transport.side_effect = _rebind
+
+        manager._retype_instance_to_ace2(inst, ctx)
+
+        old_mgr.disconnect.assert_called_once_with()
+
+    def test_teardown_leaves_shared_manager_still_in_use(self):
+        """A serial manager still referenced by another instance is NOT torn down."""
+        manager = self._build_manager()
+        shared = Mock()
+        keep = Mock(instance_num=1, serial_mgr=shared)
+        manager.instances = [keep]
+
+        manager._teardown_orphaned_serial_mgr(shared)
+
+        shared.disconnect.assert_not_called()
+
+    def test_redetect_sustained_gate_skips_recent_failures(self):
+        """Automatic pass: an instance failing < grace (flicker) is not adopted."""
+        ok = self._stuck_instance(0, connected=True)
+        stuck = self._stuck_instance(1, connected=False)
+        stuck.serial_mgr.sustained_port_miss_s = Mock(return_value=5.0)  # < 30s grace
+        manager = self._redetect_manager([ok, stuck], unbound_count=1)
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager.redetect_transports(require_sustained=True, quiet=True, now=100.0)
+
+        manager._probe_ace2_unbound_units.assert_not_called()
+        manager._retype_instance_to_ace2.assert_not_called()
+
+    def test_redetect_sustained_gate_adopts_after_grace(self):
+        ok = self._stuck_instance(0, connected=True)
+        stuck = self._stuck_instance(1, connected=False)
+        stuck.serial_mgr.sustained_port_miss_s = Mock(return_value=45.0)  # > 30s grace
+        manager = self._redetect_manager([ok, stuck], unbound_count=1)
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager.redetect_transports(require_sustained=True, quiet=True, now=100.0)
+
+        manager._retype_instance_to_ace2.assert_called_once_with(stuck, self._ctx)
+
+    # ---- Direction B: over-subscription self-heal ----
+
+    def _oversub_manager(self, unit_count):
+        manager = self._build_manager()
+        bus = Mock()
+        i0 = Mock(instance_num=0, bus_session=bus)
+        i1 = Mock(instance_num=1, bus_session=bus)
+        manager.instances = [i0, i1]
+        manager._last_discovered_unit_count = {id(bus): unit_count}
+        manager._oversubscribed_since = {}
+        manager._retype_instance_to_ace1 = Mock()
+        manager._on_shared_bus_connected = Mock()
+        return manager, bus, i0, i1
+
+    def test_direction_b_demotes_lowest_after_grace(self):
+        manager, bus, i0, i1 = self._oversub_manager(unit_count=1)  # 2 bound / 1 unit
+
+        # First pass starts the timer but does not act.
+        manager._reconcile_oversubscribed_buses(now=0.0, ports=[])
+        manager._retype_instance_to_ace1.assert_not_called()
+
+        # After the grace period, the surplus lowest instance is handed to ace1.
+        manager._reconcile_oversubscribed_buses(now=manager.OVERSUBSCRIBE_GRACE_S + 1, ports=[])
+        manager._retype_instance_to_ace1.assert_called_once_with(i0, [])
+        manager._on_shared_bus_connected.assert_called_once_with(bus)
+
+    def test_direction_b_does_not_act_when_unit_count_unknown_or_zero(self):
+        """K == 0 means the bus is unreachable, not over-subscribed — never demote."""
+        manager, bus, _i0, _i1 = self._oversub_manager(unit_count=0)
+
+        manager._reconcile_oversubscribed_buses(now=1000.0, ports=[])
+
+        manager._retype_instance_to_ace1.assert_not_called()
+
+    def test_direction_b_clears_timer_when_not_oversubscribed(self):
+        manager, bus, _i0, _i1 = self._oversub_manager(unit_count=2)  # 2 bound / 2 units = ok
+        manager._oversubscribed_since = {id(bus): 0.0}  # stale timer from before
+
+        manager._reconcile_oversubscribed_buses(now=1000.0, ports=[])
+
+        manager._retype_instance_to_ace1.assert_not_called()
+        self.assertNotIn(id(bus), manager._oversubscribed_since)
+
+    def test_direction_b_transient_oversubscription_clears_before_grace(self):
+        """A second unit appearing before the grace elapses cancels the demote."""
+        manager, bus, _i0, _i1 = self._oversub_manager(unit_count=1)
+
+        manager._reconcile_oversubscribed_buses(now=0.0, ports=[])  # over-subscribed, timer starts
+        manager._last_discovered_unit_count[id(bus)] = 2  # 2nd unit shows up
+        manager._reconcile_oversubscribed_buses(now=5.0, ports=[])  # now balanced
+
+        manager._retype_instance_to_ace1.assert_not_called()
+        self.assertNotIn(id(bus), manager._oversubscribed_since)
+
+    def test_reconcile_transports_runs_both_directions_when_idle(self):
+        manager = self._build_manager()
+        manager.toolchange_in_progress = False
+        manager._is_printing_or_paused = Mock(return_value=False)
+        manager.redetect_transports = Mock()
+        manager._reconcile_oversubscribed_buses = Mock()
+
+        with patch("ace.manager.serial.tools.list_ports.comports", return_value=[]):
+            manager._reconcile_transports(now=123.0)
+
+        manager.redetect_transports.assert_called_once()
+        _a, kwargs = manager.redetect_transports.call_args
+        self.assertTrue(kwargs["require_sustained"])
+        self.assertTrue(kwargs["quiet"])
+        manager._reconcile_oversubscribed_buses.assert_called_once()
+
+    def test_reconcile_transports_skips_during_toolchange(self):
+        manager = self._build_manager()
+        manager.toolchange_in_progress = True
+        manager.redetect_transports = Mock()
+        manager._reconcile_oversubscribed_buses = Mock()
+
+        manager._reconcile_transports(now=123.0)
+
+        manager.redetect_transports.assert_not_called()
+        manager._reconcile_oversubscribed_buses.assert_not_called()
 
     def test_monitor_transport_reconnects_calls_ensure_connect_timer_once_per_transport(self):
         manager = self._build_manager()
@@ -1671,6 +2078,21 @@ class TestGetStatus(unittest.TestCase):
         self.assertIn('ace_instances', status)
         self.assertEqual(status['ace_instances'], 2)
 
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_get_status_includes_target_index_default(self, mock_endless_spool, mock_ace_instance):
+        """get_status() must expose ace_target_index (no toolchange in flight -> -1).
+
+        See ARCHITECTURE.md ace_target_index design: distinct from
+        current_index, tracks an in-flight/unconfirmed toolchange attempt.
+        """
+        manager = AceManager(self.mock_config)
+
+        status = manager.get_status()
+
+        self.assertIn('target_index', status)
+        self.assertEqual(status['target_index'], -1)
+
 
 class TestPerformToolChange(unittest.TestCase):
     """Test perform_tool_change functionality with comprehensive branch coverage."""
@@ -1783,6 +2205,8 @@ class TestPerformToolChange(unittest.TestCase):
         post_calls = [call for call in self.mock_gcode.run_script_from_command.call_args_list 
                      if '_ACE_POST_TOOLCHANGE' in str(call)]
         self.assertEqual(len(post_calls), 0, "Should not call POST_TOOLCHANGE for reselection")
+        # Toolchange is fully confirmed -- ace_target_index must not be left stuck.
+        self.assertEqual(self.variables.get('ace_target_index'), -1)
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -2568,6 +2992,253 @@ class TestPerformToolChange(unittest.TestCase):
             
             # Should have completed without unload (sensor clear = no filament)
             self.assertIn("2", result)
+
+
+class TestPerformToolChangeTargetIndex(unittest.TestCase):
+    """Test the ace_target_index lifecycle inside perform_tool_change().
+
+    ace_target_index tracks an *in-flight, unconfirmed* toolchange attempt,
+    distinct from ace_current_index (last *confirmed* physically loaded tool).
+    It must be:
+      - set to target_tool at the very start of perform_tool_change(), before
+        any plausibility/unload/load steps run
+      - cleared back to -1 only once the attempt completes successfully
+        (either a confirmed load, or an unload-only tool change)
+      - left untouched (still pointing at the attempted target) if any
+        exception is raised during the attempt
+
+    See ARCHITECTURE.md for full rationale.
+    """
+
+    def setUp(self):
+        """Set up test fixtures with extensive mocking."""
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+
+        self.mock_config = Mock()
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+        self.mock_gcode_move = Mock()
+
+        self.mock_config.get_printer.return_value = self.mock_printer
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_printer.lookup_object.side_effect = self._mock_lookup_object
+        self.mock_reactor.monotonic.return_value = 0.0
+        self.mock_reactor.register_timer = Mock(return_value=None)
+
+        self.variables = {
+            'ace_global_enabled': True,
+            'ace_current_index': -1,
+            'ace_filament_pos': FILAMENT_STATE_SPLITTER,
+        }
+        self.mock_save_vars.allVariables = self.variables
+
+        self.mock_config.get.side_effect = self._mock_config_get
+        self.mock_config.getint.side_effect = self._mock_config_getint
+        self.mock_config.getfloat.side_effect = self._mock_config_getfloat
+
+    def _mock_lookup_object(self, name, default=None):
+        if name == 'gcode':
+            return self.mock_gcode
+        elif name == 'save_variables':
+            return self.mock_save_vars
+        elif name == 'gcode_move':
+            return self.mock_gcode_move
+        elif name == 'output_pin ACE_Pro':
+            mock_pin = Mock()
+            mock_pin.get_status = Mock(return_value={'value': 1})
+            return mock_pin
+        return default
+
+    def _mock_config_get(self, key, default=None):
+        config_values = {
+            'filament_runout_sensor_name_rdm': 'return_module',
+            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+        }
+        return config_values.get(key, default)
+
+    def _mock_config_getint(self, key, default=None):
+        config_values = {'ace_count': '2'}
+        val = config_values.get(key, default)
+        return int(val) if val is not None else default
+
+    def _mock_config_getfloat(self, key, default=None):
+        config_values = {
+            'toolhead_retraction_speed': '300.0',
+            'toolhead_retraction_length': '10.0',
+            'default_color_change_purge_length': '50.0',
+            'default_color_change_purge_speed': '400.0',
+            'timeout_multiplier': '2.0',
+            'total_max_feeding_length': '1000.0',
+            'parkposition_to_toolhead_length': '500.0',
+            'toolchange_load_length': '480.0',
+            'parkposition_to_rdm_length': '350.0',
+            'incremental_feeding_length': '10.0',
+            'incremental_feeding_speed': '50.0',
+            'extruder_feeding_length': '50.0',
+            'extruder_feeding_speed': '5.0',
+            'toolhead_slow_loading_speed': '10.0',
+            'heartbeat_interval': '1.0',
+            'max_dryer_temperature': '70.0',
+            'toolhead_full_purge_length': '100.0',
+            'feed_assist_active_after_ace_connect': '1',
+        }
+        val = config_values.get(key, default)
+        return float(val) if val is not None else default
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_target_index_set_before_load_begins(self, mock_endless_spool, mock_ace_instance):
+        """ace_target_index must already be target_tool by the time the load starts."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        manager.smart_unload = Mock(return_value=True)
+
+        captured = {}
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {2: {'status': 'ready', 'temp': 220}}
+
+        def fake_feed(tool, check_pre_condition=False):
+            captured['target_index_during_load'] = self.variables.get('ace_target_index')
+            return 5.0
+        mock_instance._feed_filament_into_toolhead = Mock(side_effect=fake_feed)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 2)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+
+            manager.perform_tool_change(current_tool=1, target_tool=2)
+
+        self.assertEqual(captured.get('target_index_during_load'), 2)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_target_index_cleared_after_successful_load(self, mock_endless_spool, mock_ace_instance):
+        """On a fully successful load, ace_target_index must be cleared back to -1."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        manager.smart_unload = Mock(return_value=True)
+
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {2: {'status': 'ready', 'temp': 220}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 2)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+
+            manager.perform_tool_change(current_tool=1, target_tool=2)
+
+        self.assertEqual(self.variables.get('ace_target_index'), -1)
+        self.assertEqual(self.variables['ace_current_index'], 2)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_target_index_cleared_after_unload_only_success(self, mock_endless_spool, mock_ace_instance):
+        """An unload-only tool change (target_tool=-1) must also clear ace_target_index."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
+        self.variables['ace_current_index'] = 1
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
+        manager.smart_unload = Mock(return_value=True)
+
+        manager.perform_tool_change(current_tool=1, target_tool=-1)
+
+        self.assertEqual(self.variables.get('ace_target_index'), -1)
+        self.assertEqual(self.variables['ace_current_index'], -1)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_target_index_persists_after_load_failure(self, mock_endless_spool, mock_ace_instance):
+        """If the load step raises, ace_target_index must still point at the
+        attempted target (it is NOT cleared and NOT reset to -1), so callers
+        have a durable record of the outstanding attempt distinct from
+        whatever ace_current_index guesses about physical state.
+        """
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        manager.smart_unload = Mock(return_value=True)
+
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {2: {'status': 'ready', 'temp': 220}}
+        mock_instance._feed_filament_into_toolhead = Mock(side_effect=Exception("Feed timeout"))
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 2)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+
+            with self.assertRaises(Exception):
+                manager.perform_tool_change(current_tool=1, target_tool=2)
+
+        self.assertEqual(self.variables.get('ace_target_index'), 2)
+        # ace_current_index must NOT have been guessed/pinned to the target by
+        # perform_tool_change itself -- that heuristic belongs to the caller
+        # (cmd_ACE_CHANGE_TOOL), not to this method.
+        self.assertEqual(self.variables['ace_current_index'], -1)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_target_index_persists_after_spool_not_ready_failure(self, mock_endless_spool, mock_ace_instance):
+        """Even an early failure (spool not ready, before any motion) must leave
+        ace_target_index set -- it is written before any plausibility/load
+        step runs.
+        """
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
+        manager.check_and_wait_for_spool_ready = Mock(return_value=False)
+
+        mock_instance = Mock()
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+
+        with self.assertRaises(Exception):
+            manager.perform_tool_change(current_tool=-1, target_tool=2)
+
+        self.assertEqual(self.variables.get('ace_target_index'), 2)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    @patch('ace.manager.get_ace_instance_and_slot_for_tool')
+    def test_target_index_cleared_on_reselection_state_corrected(
+        self, mock_get_ace, mock_endless_spool, mock_ace_instance
+    ):
+        """Reselecting the same tool while state != 'nozzle' but the toolhead
+        sensor reports filament present takes the 'state corrected' early
+        return. This fully confirms the toolchange (no further action is
+        pending), so ace_target_index must be cleared back to -1, not left
+        stuck at the target.
+        """
+        manager = AceManager(self.mock_config)
+        # SPLITTER (not BOWDEN/NOZZLE) avoids the earlier plausibility-mismatch
+        # unload checks, so execution reaches the reselection branch below.
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
+
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {1: {'status': 'loaded', 'temp': 0}}
+        mock_get_ace.return_value = (mock_instance, 1)
+        manager.instances[0] = mock_instance
+
+        result = manager.perform_tool_change(current_tool=1, target_tool=1)
+
+        self.assertIn("state corrected", result)
+        self.assertEqual(self.variables.get('ace_target_index'), -1)
 
 
 class TestConfigForTool(unittest.TestCase):

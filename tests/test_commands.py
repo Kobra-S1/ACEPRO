@@ -715,6 +715,94 @@ class TestCommandSmoke:
         ace.commands.cmd_ACE_GET_CURRENT_INDEX(mock_gcmd)
         assert mock_gcmd.respond_info.called
 
+    def test_cmd_ACE_GET_CURRENT_INDEX_reports_unconfirmed_target(self, mock_gcmd, setup_mocks):
+        """ACE_GET_CURRENT_INDEX must also surface ace_target_index when a
+        toolchange is in flight/unconfirmed (distinct from current_index)."""
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return 0
+            if varname == "ace_target_index":
+                return 2
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
+
+        ace.commands.cmd_ACE_GET_CURRENT_INDEX(mock_gcmd)
+
+        output = "\n".join(call[0][0] for call in mock_gcmd.respond_info.call_args_list)
+        assert "Current tool index: 0" in output
+        assert "Target tool index: 2" in output
+        assert "unconfirmed" in output
+
+    def test_cmd_ACE_GET_CURRENT_INDEX_no_target_in_flight(self, mock_gcmd, setup_mocks):
+        """When no toolchange is in flight, target_index is reported as -1."""
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return 1
+            if varname == "ace_target_index":
+                return -1
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
+
+        ace.commands.cmd_ACE_GET_CURRENT_INDEX(mock_gcmd)
+
+        output = "\n".join(call[0][0] for call in mock_gcmd.respond_info.call_args_list)
+        assert "Target tool index: -1" in output
+        assert "no toolchange in flight" in output
+
+    def test_cmd_ACE_DEBUG_SET_CURRENT_INDEX_clears_target_index(self, mock_gcmd, setup_mocks):
+        """Manually asserting ace_current_index must also clear ace_target_index
+        -- the operator is declaring the confirmed state, so no toolchange
+        attempt should be considered in flight anymore."""
+        mock_gcmd.get_int = Mock(return_value=2)
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=-1)
+
+        ace.commands.cmd_ACE_DEBUG_SET_CURRENT_INDEX(mock_gcmd)
+
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call("ace_current_index", 2)
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call("ace_target_index", -1)
+
+    def test_cmd_ACE_DEBUG_SET_TARGET_INDEX_sets_value(self, mock_gcmd, setup_mocks):
+        """ACE_DEBUG_SET_TARGET_INDEX TOOL=<n> overrides ace_target_index."""
+        mock_gcmd.get_int = Mock(return_value=3)
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=-1)
+
+        ace.commands.cmd_ACE_DEBUG_SET_TARGET_INDEX(mock_gcmd)
+
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_called_once_with("ace_target_index", 3)
+        assert mock_gcmd.respond_info.called
+
+    def test_cmd_ACE_DEBUG_SET_TARGET_INDEX_defaults_to_clear(self, mock_gcmd, setup_mocks):
+        """ACE_DEBUG_SET_TARGET_INDEX without TOOL= clears the in-flight target."""
+        mock_gcmd.get_int = Mock(return_value=-1)
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=3)
+
+        ace.commands.cmd_ACE_DEBUG_SET_TARGET_INDEX(mock_gcmd)
+
+        INSTANCE_MANAGERS[0].state.set_and_save.assert_called_once_with("ace_target_index", -1)
+
+    def test_cmd_ACE_DEBUG_SET_TARGET_INDEX_rejects_out_of_range(self, mock_gcmd, setup_mocks):
+        """ACE_DEBUG_SET_TARGET_INDEX validates TOOL= against configured tool count."""
+        mock_gcmd.get_int = Mock(return_value=99)
+
+        with pytest.raises(Exception):
+            ace.commands.cmd_ACE_DEBUG_SET_TARGET_INDEX(mock_gcmd)
+
+    def test_cmd_ACE_DEBUG_STATE_reports_target_index(self, mock_gcmd, setup_mocks):
+        """ACE_DEBUG_STATE must include both current_index and target_index."""
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return 1
+            if varname == "ace_target_index":
+                return 2
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
+
+        ace.commands.cmd_ACE_DEBUG_STATE(mock_gcmd)
+
+        output = "\n".join(call[0][0] for call in mock_gcmd.respond_info.call_args_list)
+        assert "Current Tool Index: 1" in output
+        assert "Target Tool Index: 2" in output
+
     def test_cmd_ACE_FEED(self, mock_gcmd, setup_mocks):
         """Test ACE_FEED command."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
@@ -1403,6 +1491,8 @@ class TestDryingCommands:
         """Test ACE_RESET_ACTIVE_TOOLHEAD."""
         ace.commands.cmd_ACE_RESET_ACTIVE_TOOLHEAD(mock_gcmd)
         assert mock_gcmd.respond_info.called
+        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
+        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_target_index", -1)
 
     def test_cmd_ACE_DEBUG_SENSORS(self, mock_gcmd, setup_mocks):
         """Test ACE_DEBUG_SENSORS basic functionality."""
@@ -2208,8 +2298,11 @@ class TestToolChangeIntegration:
             assert any("M104 S0" in c for c in calls)
 
             # Verify idle/startup failure keeps the previous active tool (0), not target (1)
-            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", 0)
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", 0)
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=0" in c for c in calls)
+            # No RESUME cycle follows an idle/startup failure, so the stale
+            # in-flight target must be cleared (see ARCHITECTURE.md ace_target_index).
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_target_index", -1)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_after_unload_sets_no_active_tool(self, mock_gcmd, setup_mocks):
         """Test idle/startup failure sets active tool to -1 when filament is already in bowden."""
@@ -2263,9 +2356,12 @@ class TestToolChangeIntegration:
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
 
             # Idle/startup + bowden state + path clear: clear active tool.
-            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", -1)
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1" in c for c in calls)
+            # No RESUME cycle follows an idle/startup failure, so the stale
+            # in-flight target must be cleared (see ARCHITECTURE.md ace_target_index).
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_target_index", -1)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_blocked_path_marks_load_tool(self, mock_gcmd, setup_mocks):
         """Idle/startup failure with a still-blocked path must mark the tool we
@@ -2329,9 +2425,12 @@ class TestToolChangeIntegration:
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
 
             # The tool we tried to load (T1) is stuck -> it must be current, not -1.
-            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", 1)
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", 1)
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=1" in c for c in calls)
+            # No RESUME cycle follows an idle/startup failure, so the stale
+            # in-flight target must be cleared (see ARCHITECTURE.md ace_target_index).
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_target_index", -1)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_updates_state_before_dialog(self, mock_gcmd, setup_mocks):
         """Test that tool state is updated even when tool change fails during printing."""
@@ -2435,7 +2534,11 @@ class TestToolChangeIntegration:
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 2)
 
             # Must clear active tool, not pin requested T2.
-            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", -1)
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
+            # No RESUME cycle follows a startup failure (it raises to abort the
+            # macro instead), so the stale in-flight target must be cleared
+            # (see ARCHITECTURE.md ace_target_index).
+            INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_target_index", -1)
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1" in c for c in calls)
             assert any("M104 S0" in c for c in calls)

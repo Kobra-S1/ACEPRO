@@ -6,8 +6,9 @@ here.  The concrete adapters are in ``protocol_ace1`` and ``protocol_ace2``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +81,123 @@ def transport_description_matches(expected_description: str, actual_description:
         return "ace" in actual and not actual.startswith("ace2")
 
     return expected in actual
+
+
+# ---------------------------------------------------------------------------
+# USB daisy-chain topology helpers
+# ---------------------------------------------------------------------------
+#
+# ACE units are physically daisy-chained through a USB hub built into each
+# unit (root ACE plugs into the Pi, the next ACE plugs into the root ACE's
+# hub, etc). The `LOCATION=` hwid field pyserial exposes (e.g. "6-1.3") is
+# derived from this physical port/hub wiring and is stable across resets and
+# USB re-enumeration - unlike `/dev/ttyACMx`, which is just "whichever device
+# re-registered first this time" and can point at a different physical unit
+# after every reset. Ordering "which unit is instance 0 / instance 1" must
+# therefore be based on this location, not on `/dev/ttyACMx` device paths nor
+# on how many ports match a particular protocol's description string (mixed
+# ACE1/ACE2 setups use different USB descriptions for otherwise-equivalent
+# daisy-chain positions).
+
+def parse_usb_location(location_str: str | None) -> Tuple[int, ...]:
+    """
+    Parse a USB location string into a tuple for physical-topology sorting.
+
+    Examples:
+        "1-1.4.3:1.0" -> (1, 1, 4, 3)
+        "acm.2"       -> (999998, 2)
+
+    ACM fallback locations (when no LOCATION= hwid is available) sort after
+    real USB locations but before unrecognized devices (999999).
+    """
+    if not location_str:
+        return (999999,)
+
+    location_str = str(location_str)
+
+    if location_str.startswith('acm.'):
+        try:
+            return (999998, int(location_str[4:]))
+        except ValueError:
+            return (999999,)
+
+    location_str = location_str.split(':')[0]
+    parts = location_str.replace('-', '.').split('.')
+
+    try:
+        return tuple(int(p) for p in parts)
+    except ValueError:
+        return (999999,)
+
+
+def get_port_usb_location(portinfo: Any) -> str | None:
+    """Extract a stable USB location string from a comports() entry."""
+    hwid = getattr(portinfo, "hwid", "") or ""
+    m = re.search(r'LOCATION=([-\w\.]+)', hwid)
+    if m:
+        return m.group(1)
+
+    device = getattr(portinfo, "device", "") or ""
+    m2 = re.search(r'ACM(\d+)', device)
+    if m2:
+        return f"acm.{m2.group(1)}"
+
+    return device or None
+
+
+def known_transport_specs() -> List[Tuple[str, "AceTransportSpec"]]:
+    """Return (protocol_name, transport_spec) for every auto-detectable ACE protocol."""
+    from .protocol_ace1 import AceJsonProtocolAdapter
+    from .protocol_ace2 import AceProtoProtocolAdapter
+
+    return [
+        ("ace1_json", AceJsonProtocolAdapter().get_transport_spec()),
+        ("ace2_proto", AceProtoProtocolAdapter().get_transport_spec()),
+    ]
+
+
+def sort_ace_candidate_ports(
+    ports: Iterable[Any],
+) -> List[Tuple[Tuple[int, ...], str, str, str, "AceTransportSpec"]]:
+    """
+    Find all serial ports matching ANY known ACE transport description and
+    sort them by physical USB daisy-chain position.
+
+    This makes "instance N" mean the Nth physical ACE unit in the chain,
+    counted from the connection closest to the host, regardless of which
+    protocol/USB-serial chip that particular unit happens to use internally.
+
+    Returns a list of ``(sort_key, location, device, protocol_name,
+    transport_spec)`` tuples ordered from the port closest to the host to
+    the furthest (deepest in the daisy chain).
+    """
+    transports = known_transport_specs()
+    matches = []
+
+    for portinfo in ports:
+        description = getattr(portinfo, "description", "") or ""
+        matched = None
+        for protocol_name, transport in transports:
+            if transport_description_matches(transport.port_description, description):
+                matched = (protocol_name, transport)
+                break
+        if matched is None:
+            continue
+
+        location = get_port_usb_location(portinfo)
+        location_key = parse_usb_location(location)
+        # Sort by hop-count (depth) first, then lexicographically within the
+        # same depth. Hop-count is what guarantees daisy-chain order: a unit
+        # chained through another unit's internal hub is *always* exactly one
+        # hop deeper than its upstream neighbor, regardless of which physical
+        # port number that unit's hub happens to wire its own MCU to. Sorting
+        # on the raw tuple alone can misorder units whose "own MCU" port
+        # number is numerically higher than their "chain-out" port number.
+        sort_key = (len(location_key), location_key)
+        matches.append((sort_key, location, portinfo.device, matched[0], matched[1]))
+
+    matches.sort(key=lambda item: item[0])
+    return matches
 
 
 def resolve_protocol_name(

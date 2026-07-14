@@ -28,7 +28,14 @@ from .runout_monitor import RunoutMonitor
 from .moonraker_lane_sync import MoonrakerLaneSyncAdapter
 from . import commands
 from .config import read_ace_config
-from .protocol import create_protocol_adapter, resolve_protocol_name
+from .protocol import (
+    create_protocol_adapter,
+    get_default_baud_for_protocol,
+    normalize_protocol_name,
+    resolve_protocol_name,
+    sort_ace_candidate_ports,
+    transport_description_matches,
+)
 from .serial_manager import AceSerialManager
 import logging
 import serial
@@ -148,6 +155,17 @@ class AceManager:
 
         self.gcode.respond_info(f"ACE: Creating {self.ace_count} instance(s) with single AceManager")
 
+        # ACE_INSTANCES/INSTANCE_MANAGERS are plain module-level dicts, so they
+        # survive a Klipper RESTART (soft restart reuses the same Python
+        # process/module state, unlike a full `systemctl restart klipper`).
+        # If ace_count is lowered across a RESTART, stale AceInstance objects
+        # from the previous (larger) instance count would otherwise linger in
+        # these registries forever -- still reachable by commands like
+        # ACE_GET_CONNECTION_STATUS -- even though _handle_disconnect already
+        # tore down their serial connections. Clear both before repopulating.
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+
         persistence_mode = self.ace_config.get("persistence_mode", "deferred")
         self.state = PersistentState(self.printer, self.gcode, persistence_mode=persistence_mode)
         self.gcode.respond_info(f"ACE: Persistence mode: {persistence_mode}")
@@ -162,6 +180,11 @@ class AceManager:
         self._ace_pro_enabled = initial_ace_enabled
         self._shared_transport_contexts = {}
 
+        # Resolve which physical ACE unit (by USB daisy-chain position, NOT
+        # by /dev/ttyACMx path or per-protocol description count) backs each
+        # logical instance number, once, before creating any instances.
+        self._topology_resolution = self._resolve_daisy_chain_topology()
+
         # Create all AceInstance objects
         self.instances = []
         for instance_num in range(self.ace_count):
@@ -174,6 +197,8 @@ class AceManager:
                 protocol,
             )
 
+            topology_entry = self._topology_resolution.get(instance_num, {})
+
             instance = AceInstance(
                 instance_num,
                 instance_config,
@@ -181,6 +206,7 @@ class AceManager:
                 ace_enabled=initial_ace_enabled,  # Pass initial state
                 protocol=protocol,
                 active_protocol_name=instance_config["active_protocol_name"],
+                target_usb_location=topology_entry.get("target_location"),
                 **shared_kwargs,
             )
 
@@ -251,9 +277,29 @@ class AceManager:
         self._last_connection_status = {}     # Track per-instance connection state
         self._shared_bus_last_connected_time = {}
         self._shared_bus_retry_timers = {}
-        self._shared_bus_retry_delays = {}
-        self._shared_bus_retry_min_delay = 2.0
-        self._shared_bus_retry_max_delay = 15.0
+        # Flat retry cadence - not exponential. Missing ACE2 units on the
+        # shared bus (all of which the config says must be there) need to
+        # keep getting retried promptly, including mid-print, not fall into
+        # an ever-growing backoff that leaves spools unbound for a minute+.
+        self._shared_bus_retry_interval = 3.0
+
+        # Sustained-failure threshold before an automatic re-detection pass
+        # would consider re-typing an instance's protocol. Far longer than the
+        # ~2-3s ACE1 watchdog window so a flicker never triggers it. Phase 1
+        # (manual ACE_REDETECT) does not require this grace.
+        self.REDETECT_FAILURE_GRACE_S = 30.0
+        # Automatic transport reconciliation (Phase 2): runs from the 2s state
+        # monitor but no more often than this cadence, and only demotes an
+        # over-subscribed shared bus after it has stayed over-subscribed this
+        # long (again ≫ watchdog flicker).
+        self.RECONCILE_INTERVAL_S = 10.0
+        self.OVERSUBSCRIBE_GRACE_S = 30.0
+        self._last_reconcile_time = 0.0
+        # id(bus_session) -> ACE2 units discovered on it last init (ground truth
+        # for over-subscription: bound logical instances must not exceed this).
+        self._last_discovered_unit_count = {}
+        # id(bus_session) -> monotonic time it first became over-subscribed.
+        self._oversubscribed_since = {}
 
         # Register event handlers
         handler = self.printer.register_event_handler
@@ -321,7 +367,12 @@ class AceManager:
 
         # Validate persisted tool state against live sensor readings.
         # Catches stale state from manual filament removal while powered off.
-        # self._validate_startup_tool_state()  # disabled pending timing-free rewrite
+        # Deferred via register_callback: klippy:ready handlers run
+        # sequentially in one greenlet, so the settle-wait inside
+        # _validate_startup_tool_state() must not run inline here or it
+        # would stall every other module's klippy:ready handler. Running it
+        # in its own greenlet keeps the wait but only blocks this task.
+        self.reactor.register_callback(lambda et: self._validate_startup_tool_state())
 
         # Publish initial lane_data snapshot for Orca pull-mode sync.
         self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
@@ -350,8 +401,15 @@ class AceManager:
         self.gcode.respond_info("ACE: Disconnecting")
 
         # Flush any dirty persistent state to disk before we tear down.
+        # If Klipper already shut down (e.g. disconnect fires right after a
+        # klippy:shutdown), the GCode queue is unavailable and the normal
+        # flush()'s SAVE_VARIABLE commands would just raise "Printer is
+        # shutdown" - use the direct, GCode-free write path instead.
         try:
-            self.state.flush()
+            if self.printer.is_shutdown():
+                self.state.flush_direct()
+            else:
+                self.state.flush()
         except Exception:
             logging.exception("ACE: Failed to flush state on disconnect")
 
@@ -386,7 +444,15 @@ class AceManager:
             *without* first yielding to the reactor can therefore produce a
             false "all-clear" result even when filament is physically present.
             ``reactor.pause()`` is called below specifically to drain those
-            pending callbacks before the sensor values are read.
+            pending callbacks before the sensor values are read. This method
+            runs from its own deferred greenlet (see ``_handle_ready``), so
+            the pause only blocks this task, not other klippy:ready handlers.
+
+        .. note:: ``ace_target_index`` (unlike ``print_stats``/``pause_resume``)
+            survives a klippy restart. A non-`-1` value here means a print-time
+            toolchange failure left this tool pinned as a fallback pending a
+            resume/retry, so validation is skipped rather than overwriting
+            ``ace_current_index``/``ace_filament_pos`` out from under it.
         """
         current_index = self.state.get("ace_current_index", -1)
         filament_pos = self.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -397,6 +463,21 @@ class AceManager:
 
         # Position already "bowden" means state considers filament retracted.
         if filament_pos == FILAMENT_STATE_BOWDEN:
+            return
+
+        # An unconfirmed toolchange attempt persists across restarts (see
+        # note above) — leave current_index/filament_pos alone so a pending
+        # resume/retry still sees the pinned fallback tool.
+        if self.state.get("ace_target_index", -1) != -1:
+            self.gcode.respond_info(
+                "ACE: Startup validation skipped — unconfirmed toolchange "
+                f"pending (ace_target_index={self.state.get('ace_target_index')})"
+            )
+            return
+
+        # Don't race an already-running toolchange (e.g. KlipperPLR's
+        # power-loss recovery, which calls T{tool} directly from idle).
+        if self.toolchange_in_progress:
             return
 
         # Do not touch state during an active or paused print — the
@@ -430,6 +511,11 @@ class AceManager:
         # filament_present before we read it.
         self.reactor.pause(self.reactor.monotonic() + 0.5)
 
+        # A toolchange may have started while we were paused above (e.g. a
+        # PLR recovery macro run concurrently) — don't race with it.
+        if self.toolchange_in_progress:
+            return
+
         toolhead_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_has_filament = (
             self.get_switch_state(SENSOR_RDM)
@@ -455,6 +541,61 @@ class AceManager:
             f"Resetting ace_current_index to -1 and ace_filament_pos to "
             f"'bowden'. (Likely cause: filament was manually removed "
             f"while printer was off)"
+        )
+        self.state.set_and_save("ace_current_index", -1)
+        self.state.set_and_save("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+    def reconcile_stale_current_index(self, global_tool, reason="slot reported empty"):
+        """Clear a stale ``ace_current_index`` when its own ACE slot reports empty.
+
+        ``_validate_startup_tool_state`` only runs once at ``klippy:ready`` and
+        only cross-checks physical filament sensors (toolhead/RDM) - it can't
+        catch a persisted "loaded" tool whose ACE slot is confirmed empty by
+        the hardware itself (e.g. the wrong physical unit was bound to this
+        instance at boot, or the spool was removed while the printer was off
+        but the sensors still read stale/present). This is called from each
+        instance's status-update handling whenever a slot transitions to (or
+        is reported as) empty, so it reacts to the ACE's own authoritative
+        slot status as soon as it's available - regardless of `klippy:ready`
+        timing - instead of only at one deferred startup check.
+
+        A slot reporting empty is a direct, authoritative signal - stronger
+        than the toolhead/RDM sensor check - so no sensor read is needed here.
+
+        Args:
+            global_tool: Tool index (T-number) whose slot just reported empty.
+            reason: Short description used in the log message for context.
+        """
+        current_index = self.state.get("ace_current_index", -1)
+        if current_index != global_tool:
+            return
+
+        # Don't race an in-progress toolchange or an unconfirmed toolchange
+        # left pinned for a pending resume/retry (see
+        # _validate_startup_tool_state for the same guards).
+        if self.toolchange_in_progress:
+            return
+        if self.state.get("ace_target_index", -1) != -1:
+            return
+
+        # Do not touch state during an active or paused print - a slot going
+        # empty mid-print may be an expected runout/unload as part of the
+        # print flow (e.g. endless spool), not a stale persisted state.
+        try:
+            print_stats = self.printer.lookup_object("print_stats", None)
+            if print_stats:
+                stats = print_stats.get_status(self.reactor.monotonic())
+                state = (stats.get("state") or "").lower()
+                if state in ("printing", "paused"):
+                    return
+        except Exception:
+            pass  # If print_stats unavailable, assume idle.
+
+        self.gcode.respond_info(
+            f"ACE: \u26a0 T{global_tool} was recorded as loaded "
+            f"(ace_current_index), but its ACE slot now reports EMPTY "
+            f"({reason}). Resetting ace_current_index to -1 and "
+            f"ace_filament_pos to 'bowden'."
         )
         self.state.set_and_save("ace_current_index", -1)
         self.state.set_and_save("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -1738,6 +1879,16 @@ class AceManager:
             self.update_ace_support_active_state()
             self._monitor_transport_reconnects()
 
+            # Automatic transport reconciliation (Phase 2), rate-limited to
+            # RECONCILE_INTERVAL_S: adopt sustained-stuck instances onto an ACE2
+            # bus (discovery-gated) and hand any over-subscribed instance back
+            # to a dedicated ACE1 transport.
+            if self._ace_pro_enabled:
+                now = self.reactor.monotonic()
+                if now - self._last_reconcile_time >= self.RECONCILE_INTERVAL_S:
+                    self._last_reconcile_time = now
+                    self._reconcile_transports(now)
+
             # Check connection health for all instances (if supervision enabled)
             if self._ace_pro_enabled and self._connection_supervision_enabled:
                 self._check_connection_health(eventtime)
@@ -1964,6 +2115,14 @@ class AceManager:
         status = None
         gcode_move = self.printer.lookup_object("gcode_move")
 
+        # ace_target_index tracks an in-flight, unconfirmed toolchange attempt,
+        # distinct from ace_current_index (last CONFIRMED physically loaded
+        # tool).  Set unconditionally at the very start, before any
+        # plausibility/unload/load steps run, so that any exception raised
+        # below leaves a durable record of what was being attempted -- callers
+        # no longer have to re-derive that from ace_filament_pos + sensors.
+        self.state.set("ace_target_index", target_tool)
+
         toolhead_sensor = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_sensor = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
         filament_pos = self.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -2081,6 +2240,9 @@ class AceManager:
                             )
                             target_ace._enable_feed_assist(target_local_slot)
 
+                    # Reselecting an already-loaded tool confirms it -- nothing
+                    # left in flight/unconfirmed.
+                    self.state.set("ace_target_index", -1)
                     return f"Tool {target_tool} (already loaded)"
                 else:
                     # State says loaded but sensor is EMPTY - state is WRONG
@@ -2113,6 +2275,9 @@ class AceManager:
                     "ACE: Toolhead sensor triggered - filament present. Correcting state to 'nozzle'"
                 )
                 self.state.set("ace_filament_pos", FILAMENT_STATE_NOZZLE)
+                # Confirmed loaded (sensor-corrected) -- nothing left in
+                # flight/unconfirmed.
+                self.state.set("ace_target_index", -1)
                 return f"Tool {target_tool} (state corrected)"
             else:
                 # Again path check, if RDM sensor exists it will be used there as well
@@ -2237,6 +2402,8 @@ class AceManager:
             purged_amount = target_ace._feed_filament_into_toolhead(target_tool, check_pre_condition=False)
 
             self.state.set("ace_current_index", target_tool)
+            # Load confirmed -- the attempted toolchange is no longer in flight.
+            self.state.set("ace_target_index", -1)
             self.gcode.run_script_from_command(
                 f"SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE={target_tool}"
             )
@@ -2291,6 +2458,8 @@ class AceManager:
 
         if target_tool == -1:
             self.state.set("ace_current_index", -1)
+            # Unload-only change confirmed complete -- nothing left in flight.
+            self.state.set("ace_target_index", -1)
             self.gcode.run_script_from_command(
                 "SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1"
             )
@@ -2347,6 +2516,7 @@ class AceManager:
             return {
                 "ace_instances": len(self.instances),
                 "current_index": self.state.get("ace_current_index", -1),
+                "target_index": self.state.get("ace_target_index", -1),
                 "endless_spool_enabled": bool(
                     self.state.get("ace_endless_spool_enabled", False)
                 ),
@@ -2361,6 +2531,7 @@ class AceManager:
             return {
                 "ace_instances": len(self.instances),
                 "current_index": -1,
+                "target_index": -1,
                 "endless_spool_enabled": False,
                 "endless_spool_match_mode": "exact",
                 "ace_pro_enabled": False,
@@ -2389,11 +2560,7 @@ class AceManager:
                 raw_value = self.ace_config[param]
                 resolved[param] = parse_instance_choice_config(raw_value, instance_num, param)
 
-        resolved["active_protocol_name"] = resolve_protocol_name(
-            resolved.get("protocol", "auto"),
-            instance_num=instance_num,
-            available_port_descriptions=self._get_available_port_descriptions(),
-        )
+        resolved["active_protocol_name"] = self._resolve_active_protocol_name(instance_num, resolved)
 
         if "baud" in self.ace_config:
             resolved["baud"] = parse_instance_baud_config(
@@ -2403,6 +2570,224 @@ class AceManager:
             )
 
         return resolved
+
+    def _resolve_active_protocol_name(self, instance_num, resolved):
+        """
+        Determine which protocol this instance should use.
+
+        When the user leaves `protocol` on "auto", prefer the topology-first
+        resolution computed once at startup from physical USB daisy-chain
+        order (`_resolve_daisy_chain_topology`). This falls back to the
+        legacy description-count heuristic only when topology resolution
+        found nothing for this instance (e.g. no ACE hardware connected yet)
+        or when the user pinned an explicit protocol name.
+        """
+        configured_protocol = resolved.get("protocol", "auto")
+
+        if normalize_protocol_name(configured_protocol) == "auto":
+            topology_entry = self._topology_resolution.get(instance_num)
+            if topology_entry and topology_entry.get("protocol_name"):
+                return topology_entry["protocol_name"]
+
+        return resolve_protocol_name(
+            configured_protocol,
+            instance_num=instance_num,
+            available_port_descriptions=self._get_available_port_descriptions(),
+        )
+
+    def _scan_ace_candidate_ports_with_retry(
+        self,
+        max_wait_s=1.5,
+        poll_interval_s=0.25,
+        stability_polls=2,
+    ):
+        """
+        Scan for ACE candidate ports, polling briefly until `self.ace_count`
+        candidates are visible before locking in the topology mapping.
+
+        USB serial enumeration is asynchronous with respect to Klipper
+        startup, so a device that is physically present can simply not be
+        listed by `serial.tools.list_ports.comports()` yet on the first
+        attempt. Resolving topology on an incomplete scan silently shifts
+        every instance after the missing device down by one slot (see
+        `_resolve_daisy_chain_topology`).
+
+        `ace_count` counts *logical* instances, but a shared-bus unit (e.g.
+        ACE2 RS-485) backs multiple logical instances through one physical
+        port - so fewer physical candidates than `ace_count` can be
+        completely correct (e.g. ace_count=3 with 1 dedicated ACE1 + one
+        shared port backing 2 ACE2 instances = only 2 physical candidates,
+        ever). We can't stop as soon as we merely see *a* shared-bus
+        candidate though: a dedicated unit earlier in the chain may simply
+        not have enumerated yet, and that's the exact bug this guards
+        against. So besides the `ace_count` fast path, only stop early once
+        the observed candidate set stops changing across consecutive polls
+        (nothing new is coming), rather than on any single shared-bus sighting.
+
+        Kept deliberately short (default budget: 1.5s): ACE1 units reset
+        themselves (~2-3s watchdog) if nothing talks to them, and this scan
+        runs before any AceInstance/serial connection exists, so an already-
+        visible-but-idle ACE1 gets zero communication for the entire time
+        we're polling here. Waiting longer than that watchdog window would
+        risk the unit resetting (and possibly re-enumerating) *during* our
+        own wait, defeating the point and potentially causing more port
+        churn, not less. This can't fully fix startup races slower than the
+        watchdog itself - `_resolve_daisy_chain_topology` may still resolve
+        against an incomplete scan in that case - but it's strictly better
+        than the previous zero-wait behavior without introducing new risk.
+
+        Bounded by an attempt counter rather than wall-clock deltas so this
+        can't spin forever if the reactor's clock isn't advancing (e.g. in
+        tests, or exotic reactor implementations).
+        """
+        max_attempts = max(1, int(max_wait_s / poll_interval_s))
+        candidates = []
+        previous_locations = None
+        stable_count = 0
+        for attempt in range(max_attempts):
+            try:
+                ports = list(serial.tools.list_ports.comports())
+            except Exception:
+                ports = []
+
+            candidates = sort_ace_candidate_ports(ports)
+            if len(candidates) >= self.ace_count:
+                return candidates
+
+            current_locations = tuple(item[1] for item in candidates)
+            # Only trust "stability" once something has actually been found -
+            # two consecutive empty scans just mean enumeration hasn't
+            # started yet, not that it has settled.
+            if current_locations and current_locations == previous_locations:
+                stable_count += 1
+                if stable_count >= stability_polls:
+                    return candidates
+            else:
+                stable_count = 0
+            previous_locations = current_locations
+
+            if attempt == max_attempts - 1:
+                break
+
+            # Best-effort yield between polls. Swallow errors so an
+            # unconfigured/mocked reactor (e.g. in tests) can't turn a
+            # startup convenience delay into a hard crash.
+            try:
+                self.reactor.pause(self.reactor.monotonic() + poll_interval_s)
+            except Exception:
+                pass
+
+        if candidates:
+            self.gcode.respond_info(
+                f"ACE: Only found {len(candidates)}/{self.ace_count} expected "
+                "ACE ports after waiting for enumeration; topology mapping "
+                "may be incomplete until next restart. If instances bind to "
+                "the wrong physical unit, retry once all units are powered "
+                "and connected."
+            )
+        return candidates
+
+    def _resolve_daisy_chain_topology(self):
+        """
+        Resolve which physical ACE unit backs each logical instance number.
+
+        ACE units are physically daisy-chained through a USB hub built into
+        each unit. The order of units in that chain - not `/dev/ttyACMx`
+        (which can point at a different physical unit after every reset,
+        since it's assigned by re-enumeration timing) and not how many ports
+        happen to match one protocol's description (mixed ACE1/ACE2 setups
+        use different USB descriptions) - is what determines "instance 0"
+        vs "instance 1" etc.
+
+        Non-shared-bus units (e.g. ACE1) each consume one physical position
+        in the chain. A shared-bus unit (e.g. ACE2 Pro's RS485 adapter)
+        consumes one physical position but backs all remaining logical
+        instances via device_id addressing over that same port.
+
+        Returns a dict: ``{instance_num: {"protocol_name", "target_location",
+        "shared_bus"}}``. Instances with no corresponding physical port yet
+        (device not connected) are simply absent from the result.
+
+        Since this only runs once at manager init, USB re-enumeration that is
+        still in progress (e.g. right after power-cycling the ACE units, or a
+        `systemctl restart klipper` issued before every device has come back
+        up) can make an earlier unit in the chain temporarily invisible. If
+        that happened and we resolved topology immediately, every instance
+        after the missing one would shift down by one slot - e.g. a shared
+        ACE2 unit meant for instance 2 would get bound to instance 1 instead,
+        which then queries the *wrong physical unit* for its whole session
+        (manifesting as one instance's inventory getting clobbered with
+        another unit's RFID data). Poll briefly for the expected number of
+        candidate ports to show up before locking in the mapping.
+        """
+        candidates = self._scan_ace_candidate_ports_with_retry()
+
+        # Enforce mixed-transport ordering constraints:
+        # dedicated (ACE1) transports must be consumed before shared
+        # (ACE2 RS-485) transport. If USB candidate ordering is interleaved,
+        # normalize it here so logical instance mapping follows physical model.
+        non_shared_candidates = [candidate for candidate in candidates if not candidate[4].shared_bus]
+        shared_candidates = [candidate for candidate in candidates if candidate[4].shared_bus]
+        ordered_candidates = non_shared_candidates + shared_candidates
+
+        if candidates != ordered_candidates and non_shared_candidates and shared_candidates:
+            shared_locations = ", ".join(item[1] for item in shared_candidates)
+            dedicated_locations = ", ".join(item[1] for item in non_shared_candidates)
+            info = (
+                "ACE: Normalized mixed topology ordering to ACE1-first/ACE2-last "
+                f"(dedicated={dedicated_locations}; shared={shared_locations}). "
+                "If mapping is stale, run ACE_RESET_SHARED_BUS_BINDINGS then ACE_RECONNECT."
+            )
+            self.gcode.respond_info(info)
+            logging.info(info)
+
+        resolution = {}
+        next_instance = 0
+        for _sort_key, location, _device, protocol_name, transport_spec in ordered_candidates:
+            if next_instance >= self.ace_count:
+                break
+
+            if transport_spec.shared_bus:
+                # One physical port backs every remaining logical instance.
+                for remaining in range(next_instance, self.ace_count):
+                    resolution[remaining] = {
+                        "protocol_name": protocol_name,
+                        "target_location": location,
+                        "shared_bus": True,
+                    }
+                next_instance = self.ace_count
+                break
+
+            resolution[next_instance] = {
+                "protocol_name": protocol_name,
+                "target_location": location,
+                "shared_bus": False,
+            }
+            next_instance += 1
+
+        # If the scan did not account for every declared logical instance, the
+        # chain is only partially enumerated (e.g. an earlier ACE1 unit is
+        # mid-watchdog-reset and momentarily invisible). Locking in a mapping
+        # now is unsafe: a single visible port carries no marker for whether it
+        # is unit #0 or a later unit whose upstream neighbour just isn't
+        # listed yet, so binding instance 0 to it can permanently pin instance
+        # 0 to the wrong physical unit for the whole session (there is no
+        # re-resolution). Defer entirely instead - each serial manager then
+        # uses claim-protected, location-learning index fallback, which orders
+        # by the same physical position and self-corrects once the full chain
+        # is up. A shared-bus unit legitimately backs all remaining instances,
+        # so its presence already makes the mapping complete.
+        if len(resolution) < self.ace_count:
+            if resolution:
+                self.gcode.respond_info(
+                    "ACE: Deferring topology mapping - only "
+                    f"{len(resolution)}/{self.ace_count} logical instances could "
+                    "be placed from the current scan. Will fall back to "
+                    "location-learning port detection until all units are up."
+                )
+            return {}
+
+        return resolution
 
     def _create_instance_protocol(self, instance_config):
         """Create protocol adapter for this instance."""
@@ -2496,24 +2881,29 @@ class AceManager:
                 self.reactor.unregister_timer(timer)
             except Exception:
                 pass
-        self._shared_bus_retry_delays.pop(bus_key, None)
 
     def _schedule_shared_bus_retry(self, bus_session, reason):
-        """Schedule a bounded backoff retry for ACE2 shared-bus discovery."""
+        """Schedule a flat-interval retry for incomplete ACE2 shared-bus discovery.
+
+        Deliberately not exponential: every logical instance the config
+        declares (`ace_count`) is expected to have a real spool bay behind
+        it, including mid-print. Silently accepting a partial discovery, or
+        backing off to a slow retry cadence, can leave a running print
+        thinking spools are available when the units backing them were
+        never actually rebound after a reconnect.
+        """
         bus_key = id(bus_session)
         if self._shared_bus_retry_timers.get(bus_key) is not None:
             return
 
-        delay = self._shared_bus_retry_delays.get(bus_key, self._shared_bus_retry_min_delay)
-        next_delay = min(delay * 2.0, self._shared_bus_retry_max_delay)
-        self._shared_bus_retry_delays[bus_key] = next_delay
+        delay = self._shared_bus_retry_interval
 
         shared_instances = self._get_instances_for_bus_session(bus_session)
         if not shared_instances:
             return
         lead_instance = sorted(shared_instances, key=lambda item: item.instance_num)[0]
         self.gcode.respond_info(
-            f"ACE[{lead_instance.instance_num}]: ACE2 bus discovery retry in {delay:.1f}s ({reason})"
+            f"ACE[{lead_instance.instance_num}]: ACE2 bus discovery incomplete, retrying in {delay:.1f}s ({reason})"
         )
 
         def _retry_callback(eventtime):
@@ -2672,13 +3062,22 @@ class AceManager:
 
     def _send_shared_bus_request(self, instance, request, timeout_s=5.0):
         """Send one manager-owned request over shared ACE2 transport and wait for reply."""
+        return self._send_bus_request(instance.serial_mgr, request, timeout_s=timeout_s)
+
+    def _send_bus_request(self, serial_mgr, request, timeout_s=5.0):
+        """Send one request over a shared ACE2 serial manager and wait for its reply.
+
+        Uses a real monotonic timeout (not the reactor clock) so it can't
+        deadlock in tests/startup where the mocked reactor clock may not
+        advance while waiting for the callback.
+        """
         response_container = {"done": False, "response": None}
 
         def callback(response):
             response_container["response"] = response
             response_container["done"] = True
 
-        instance.serial_mgr.send_high_prio_request(request, callback)
+        serial_mgr.send_high_prio_request(request, callback)
 
         timeout_at = time.monotonic() + timeout_s
         while not response_container["done"] and time.monotonic() < timeout_at:
@@ -2703,22 +3102,39 @@ class AceManager:
         if protocol is None:
             return 0
 
+        # Try every expected slot - a single missing/slow device (still
+        # booting, momentary bus contention, etc.) must not truncate
+        # discovery of the rest. `ace_count` says exactly how many units are
+        # supposed to be here; anything less than that is incomplete and
+        # must be retried by the caller, never silently accepted.
+        expected_count = len(shared_instances)
         discovered_devices = []
-        for _ in range(len(shared_instances)):
+        misses = 0
+        for _ in range(expected_count):
             response = self._send_shared_bus_request(
                 instance,
                 protocol.build_discover_device_request(),
             )
             if not response or "result" not in response:
-                break
+                misses += 1
+                continue
 
             result = response["result"]
-            device = bus_session.record_discovered_device(
+            device = bus_session.note_present_device(
                 result.get("uid1", 0),
                 result.get("uid2", 0),
                 result.get("uid3", 0),
             )
             discovered_devices.append(device)
+
+        # Record how many distinct ACE2 units actually answered this cycle -
+        # the ground truth used by over-subscription self-heal (Direction B):
+        # if more logical instances are bound to this bus than units exist, the
+        # surplus were mis-assigned (e.g. a missing ACE1 absorbed by the shared
+        # bus at startup) and get handed back to a dedicated transport.
+        self._last_discovered_unit_count[id(bus_session)] = len(
+            list(bus_session.iter_present_devices())
+        )
 
         if not discovered_devices:
             self.gcode.respond_info(
@@ -2726,18 +3142,39 @@ class AceManager:
             )
             return 0
 
-        ordered_instances = sorted(shared_instances, key=lambda item: item.instance_num)
-        ordered_devices = list(bus_session.iter_discovered_devices())
-        for logical_instance, device in zip(ordered_instances, ordered_devices):
-            if device.logical_instance is None:
-                bus_session.bind_logical_instance(
-                    logical_instance.instance_num,
-                    device.identity.uid1,
-                    device.identity.uid2,
-                    device.identity.uid3,
-                )
+        if misses:
+            self.gcode.respond_info(
+                f"ACE[{instance.instance_num}]: ACE2 discovery found "
+                f"{len(discovered_devices)}/{expected_count} expected units "
+                f"({misses} unanswered) - will retry until all are found"
+            )
 
-        for device in bus_session.build_assignment_plan(start_device_id=1):
+        # Fill only still-unbound logical instances, using only units that
+        # actually answered discovery this cycle, paired in deterministic
+        # order. Pairing must never iterate already-bound instances or
+        # already-bound devices: a positional zip over the full lists lets a
+        # newly discovered lower-UID unit displace a unit that a persisted
+        # binding already owns, silently moving an instance onto a different
+        # physical bay (and its inventory).
+        unbound_instances = [
+            logical_instance
+            for logical_instance in sorted(shared_instances, key=lambda item: item.instance_num)
+            if bus_session.get_device_for_instance(logical_instance.instance_num) is None
+        ]
+        unbound_present_devices = [
+            device
+            for device in bus_session.iter_present_devices()
+            if device.logical_instance is None
+        ]
+        for logical_instance, device in zip(unbound_instances, unbound_present_devices):
+            bus_session.bind_logical_instance(
+                logical_instance.instance_num,
+                device.identity.uid1,
+                device.identity.uid2,
+                device.identity.uid3,
+            )
+
+        for device in bus_session.build_assignment_plan(start_device_id=1, present_only=True):
             response = self._send_shared_bus_request(
                 instance,
                 protocol.build_assign_device_id_request(
@@ -2768,11 +3205,12 @@ class AceManager:
         if last_connected_time is not None:
             self._shared_bus_last_connected_time[id(bus_session)] = last_connected_time
 
+        expected_count = len(shared_instances)
         ready_count = self._initialize_shared_bus_transport(instance)
-        if ready_count <= 0:
+        if ready_count < expected_count:
             self._schedule_shared_bus_retry(
                 bus_session,
-                "discovery returned no assignable devices",
+                f"found {ready_count}/{expected_count} expected ACE2 units",
             )
             return
 
@@ -2793,6 +3231,7 @@ class AceManager:
         )
         context = self._shared_transport_contexts.get(transport_key)
         if context is None:
+            target_usb_location = self._topology_resolution.get(instance_num, {}).get("target_location")
             serial_mgr = AceSerialManager(
                 self.gcode,
                 self.reactor,
@@ -2801,6 +3240,7 @@ class AceManager:
                 status_debug_logging=bool(instance_config.get("status_debug_logging", False)),
                 supervision_enabled=bool(instance_config.get("ace_connection_supervision", True)),
                 protocol=protocol,
+                target_usb_location=target_usb_location,
             )
             bus_session = Ace2BusSession(port="", baud=instance_config["baud"])
             context = {
@@ -2819,6 +3259,370 @@ class AceManager:
             self._shared_transport_contexts[transport_key] = context
 
         return dict(context)
+
+    # ========== Mis-typed protocol re-detection (Phase 1: manual) ==========
+    #
+    # Recovers an instance that was frozen on the wrong protocol by an
+    # empty/incomplete startup USB scan - typically an instance stuck on
+    # ace1_json because its ACE2 RS-485 adapter (CH340) enumerated after the
+    # protocol was resolved, so it searches for an "ACE" port forever and never
+    # finds the ACE2.
+    #
+    # The safety-critical rule (INV-1): NEVER bind more logical instances to a
+    # shared bus than DISCOVER_DEVICE actually finds. Port presence alone is not
+    # trusted, because a single scan cannot tell "the ACE1 is mid-watchdog-reset"
+    # from "instance 0 is a second ACE2 on the bus" - that ambiguity is exactly
+    # what caused the reverted klippy:ready auto-rebind to misbind an ACE1 onto
+    # the ACE2 bus. Here every adoption is gated on discovery proving an unbound
+    # ACE2 unit exists, so a flickering ACE1 can never be absorbed.
+
+    def _is_printing_or_paused(self):
+        """True if a print job is active or paused (don't disturb transports)."""
+        try:
+            print_stats = self.printer.lookup_object("print_stats", None)
+            if print_stats:
+                stats = print_stats.get_status(self.reactor.monotonic())
+                return (stats.get("state") or "").lower() in ("printing", "paused")
+        except Exception:
+            pass
+        return False
+
+    def _ace2_adapter_visible(self, ports):
+        """True if a shared-bus ACE2 (e.g. CH340 'USB Single Serial') port is visible."""
+        try:
+            from .protocol_ace2 import AceProtoProtocolAdapter
+            desc = AceProtoProtocolAdapter().get_transport_spec().port_description
+        except Exception:
+            return False
+        for portinfo in ports:
+            if transport_description_matches(desc, getattr(portinfo, "description", "")):
+                return True
+        return False
+
+    def _get_or_create_ace2_shared_context(self, ports):
+        """Return an ACE2 shared-transport context, reusing one if it exists.
+
+        When no instance currently uses an ACE2 shared bus (e.g. every instance
+        fell back to ace1_json at startup), lazily create the shared transport
+        so its adapter can be probed for unbound units.
+        """
+        for context in self._shared_transport_contexts.values():
+            return context
+
+        if not self.instances:
+            return None
+        try:
+            protocol = create_protocol_adapter("ace2_proto")
+        except Exception:
+            return None
+        if not protocol.get_transport_spec().shared_bus:
+            return None
+
+        base_instance = self.instances[-1]
+        instance_config = dict(getattr(base_instance, "ace_config", {}) or {})
+        instance_config["active_protocol_name"] = "ace2_proto"
+        instance_config["baud"] = get_default_baud_for_protocol("ace2_proto")
+
+        kwargs = self._build_shared_transport_kwargs(
+            base_instance.instance_num,
+            instance_config,
+            self._ace_pro_enabled,
+            protocol,
+        )
+        if not kwargs:
+            return None
+        return kwargs
+
+    def _probe_ace2_unbound_units(self, ports):
+        """Discover ACE2 units on the shared bus and count those not yet bound.
+
+        Returns ``(context, unbound_count)``. ``context`` is the shared
+        transport context (serial_mgr + bus_session); ``unbound_count`` is how
+        many discovered ACE2 UIDs are NOT already bound to a logical instance.
+        Returns ``(None, 0)`` if the adapter can't be reached. Read-only w.r.t.
+        bindings - it never binds or assigns anything.
+        """
+        context = self._get_or_create_ace2_shared_context(ports)
+        if context is None:
+            return None, 0
+
+        serial_mgr = context["serial_mgr"]
+        bus_session = context["bus_session"]
+
+        if not serial_mgr.is_connected():
+            baud = get_default_baud_for_protocol("ace2_proto")
+            try:
+                connected = serial_mgr.auto_connect(serial_mgr.instance_num, baud)
+            except Exception:
+                connected = False
+            if not connected or not serial_mgr.is_connected():
+                return None, 0
+            if getattr(serial_mgr, "_port", None):
+                bus_session.port = serial_mgr._port
+
+        protocol = serial_mgr.protocol
+        # Probe a little beyond ace_count so all units (up to a full RS-485
+        # chain) get a chance to answer, plus one to confirm none remain.
+        probe_count = max(2, self.ace_count + 1)
+        discovered_uids = set()
+        for _ in range(probe_count):
+            response = self._send_bus_request(
+                serial_mgr,
+                protocol.build_discover_device_request(),
+            )
+            if response and "result" in response:
+                result = response["result"]
+                discovered_uids.add(
+                    (result.get("uid1", 0), result.get("uid2", 0), result.get("uid3", 0))
+                )
+
+        bound_uids = set(bus_session.export_bindings().values())
+        unbound_count = len(discovered_uids - bound_uids)
+        return context, unbound_count
+
+    def _teardown_orphaned_serial_mgr(self, serial_mgr):
+        """Disconnect a serial manager no instance references any more.
+
+        A re-type swaps ``instance.serial_mgr`` to a different transport but the
+        old manager keeps its own reconnect timer running - if left alone it
+        loops ``No ACE device found`` forever under the instance's label and
+        wastes reactor cycles. Only tear it down when it is truly orphaned:
+        the shared ACE2 manager is still referenced by its other instances and
+        must never be disconnected here.
+        """
+        if serial_mgr is None:
+            return
+        for instance in self.instances:
+            if getattr(instance, "serial_mgr", None) is serial_mgr:
+                return  # still in use (e.g. shared bus) - leave it running
+        try:
+            serial_mgr.disconnect()
+        except Exception as exc:
+            logging.warning("ACE: failed to tear down orphaned serial manager: %s", exc)
+
+    def _retype_instance_to_ace2(self, instance, context):
+        """Swap one stuck instance onto the shared ACE2 transport (no bind yet)."""
+        old_serial_mgr = getattr(instance, "serial_mgr", None)
+        protocol = create_protocol_adapter("ace2_proto")
+        instance.rebind_transport(
+            protocol=protocol,
+            protocol_name="ace2_proto",
+            baud=get_default_baud_for_protocol("ace2_proto"),
+            serial_mgr=context["serial_mgr"],
+            bus_session=context["bus_session"],
+        )
+        if old_serial_mgr is not context["serial_mgr"]:
+            self._teardown_orphaned_serial_mgr(old_serial_mgr)
+
+    def redetect_transports(self, gcmd=None, require_sustained=False, quiet=False,
+                            ports=None, now=None):
+        """Re-detect and recover instances mis-typed by an incomplete startup scan.
+
+        Direction A: adopt an instance stuck on ace1_json onto a shared ACE2
+        bus, but ONLY when ACE2 discovery proves an unbound unit is available
+        (INV-1). Safe to run at any time - it can never over-subscribe the bus,
+        so it cannot repeat the reverted klippy:ready misbind even if an ACE1 is
+        momentarily mid-reset.
+
+        Manual ``ACE_REDETECT`` calls with ``require_sustained=False, quiet=False``
+        (act immediately, chatty). The automatic pass calls with
+        ``require_sustained=True, quiet=True`` (only sustained-stuck instances,
+        and log only when it actually re-types something). Returns the number of
+        instances adopted.
+        """
+        def _log(message, action=False):
+            if quiet and not action:
+                return
+            (gcmd.respond_info if gcmd is not None else self.gcode.respond_info)(message)
+
+        if not self._ace_pro_enabled:
+            _log("ACE: redetect skipped — ACE Pro disabled")
+            return 0
+        if self.toolchange_in_progress:
+            _log("ACE: redetect skipped — toolchange in progress")
+            return 0
+        if self._is_printing_or_paused():
+            _log("ACE: redetect skipped — print active/paused")
+            return 0
+
+        if now is None:
+            now = self.reactor.monotonic()
+        if ports is None:
+            try:
+                ports = list(serial.tools.list_ports.comports())
+            except Exception:
+                ports = []
+
+        stuck = []
+        for instance in self.instances:
+            if getattr(instance, "configured_protocol_name", None) != "auto":
+                continue
+            serial_mgr = getattr(instance, "serial_mgr", None)
+            if serial_mgr is None or serial_mgr.is_connected():
+                continue
+            if getattr(instance, "transport_spec", None) is not None and instance.transport_spec.shared_bus:
+                # Already shared-typed; over-subscription repair is Direction B.
+                continue
+            if require_sustained:
+                grace = getattr(self, "REDETECT_FAILURE_GRACE_S", 30.0)
+                if serial_mgr.sustained_port_miss_s(now) < grace:
+                    continue
+            stuck.append(instance)
+
+        if not stuck:
+            _log("ACE: redetect — no disconnected auto instances to re-type")
+            return 0
+
+        if not self._ace2_adapter_visible(ports):
+            _log("ACE: redetect — no ACE2 (USB Single Serial) adapter visible; leaving instances unchanged")
+            return 0
+
+        context, unbound_count = self._probe_ace2_unbound_units(ports)
+        if context is None:
+            _log("ACE: redetect — could not reach the ACE2 adapter to probe; try again once it is up")
+            return 0
+        if unbound_count <= 0:
+            _log(
+                "ACE: redetect — ACE2 bus reports no unbound units (all discovered ACE2 already "
+                f"assigned). {len(stuck)} stuck instance(s) are likely a missing ACE1, left unchanged"
+            )
+            return 0
+
+        # ACE2 units sit at the deepest daisy-chain positions, so adopt the
+        # highest-numbered stuck instances first, capped by units available.
+        targets = sorted(stuck, key=lambda i: i.instance_num, reverse=True)[:unbound_count]
+        for instance in sorted(targets, key=lambda i: i.instance_num):
+            old = getattr(instance, "protocol_name", "?")
+            self._retype_instance_to_ace2(instance, context)
+            _log(
+                f"ACE[{instance.instance_num}]: re-typed {old} → ace2_proto "
+                f"(adopting a discovered ACE2 unit)",
+                action=True,
+            )
+
+        # Run the normal shared-bus init (discover → bind → assign → runtime)
+        # now that the adopted instances share this bus session.
+        self._on_shared_bus_connected(context["bus_session"])
+        _log(
+            f"ACE: redetect complete — adopted {len(targets)} instance(s) onto the ACE2 shared bus",
+            action=True,
+        )
+        return len(targets)
+
+    # ---- Automatic reconciliation (Phase 2) ----
+
+    def _unique_bus_sessions(self):
+        """Yield each distinct ACE2 bus session backing at least one instance."""
+        seen = set()
+        sessions = []
+        for instance in self.instances:
+            bus_session = getattr(instance, "bus_session", None)
+            if bus_session is None or id(bus_session) in seen:
+                continue
+            seen.add(id(bus_session))
+            sessions.append(bus_session)
+        return sessions
+
+    def _retype_instance_to_ace1(self, instance, ports=None):
+        """Hand one over-subscribed instance back to a dedicated ACE1 transport.
+
+        Unbinds it from the shared bus session (freeing its ACE2 unit for
+        another instance), rebinds it to a fresh dedicated ace1_json transport
+        at its topology-resolved USB location, and starts connecting.
+        """
+        bus_session = getattr(instance, "bus_session", None)
+        old_serial_mgr = getattr(instance, "serial_mgr", None)
+        if bus_session is not None:
+            try:
+                bus_session.unbind_logical_instance(instance.instance_num)
+            except Exception:
+                pass
+
+        protocol = create_protocol_adapter("ace1_json")
+        # Don't reuse the topology target here: for a demoted instance that
+        # entry is the *shared ACE2* location (the bus it's being pulled off),
+        # not a dedicated ACE1 port. Pass None so the new manager finds its ACE1
+        # by index and learns the real location on first connect.
+        entry = self._topology_resolution.get(instance.instance_num, {})
+        target = entry.get("target_location") if not entry.get("shared_bus") else None
+        instance.rebind_transport(
+            protocol=protocol,
+            protocol_name="ace1_json",
+            baud=get_default_baud_for_protocol("ace1_json"),
+            serial_mgr=None,
+            bus_session=None,
+            target_usb_location=target,
+        )
+        # Old manager here is the shared ACE2 one - only torn down if no other
+        # instance still shares it (guarded inside the helper).
+        if old_serial_mgr is not instance.serial_mgr:
+            self._teardown_orphaned_serial_mgr(old_serial_mgr)
+        try:
+            instance.serial_mgr.connect_to_ace(instance.baud, 2)
+        except Exception as exc:
+            logging.warning(
+                "ACE[%s]: connect after ace1 demote failed: %s", instance.instance_num, exc
+            )
+
+    def _reconcile_oversubscribed_buses(self, now, ports):
+        """Self-heal a shared bus with more bound instances than discoverable units.
+
+        This is the exact state an incomplete startup scan can create: an absent
+        ACE1 gets absorbed onto the ACE2 bus ("backs all remaining instances"),
+        so N logical instances sit on a bus that only has K < N real ACE2 units
+        and it retries forever. The surplus (lowest-numbered — ACE2 belongs to
+        the deepest positions) are handed back to a dedicated ACE1 transport.
+        Only acts after the over-subscription has persisted (≫ watchdog flicker)
+        and only when discovery actually found units (K >= 1); K == 0 means the
+        whole bus is unreachable, which reconnect logic handles, not this.
+        """
+        for bus_session in self._unique_bus_sessions():
+            key = id(bus_session)
+            bound = self._get_instances_for_bus_session(bus_session)
+            k = self._last_discovered_unit_count.get(key)
+
+            if not k or len(bound) <= k:
+                self._oversubscribed_since.pop(key, None)
+                continue
+
+            started = self._oversubscribed_since.setdefault(key, now)
+            if now - started < self.OVERSUBSCRIBE_GRACE_S:
+                continue
+            self._oversubscribed_since.pop(key, None)
+
+            surplus = sorted(bound, key=lambda i: i.instance_num)[: len(bound) - k]
+            demoted = []
+            for instance in surplus:
+                self._retype_instance_to_ace1(instance, ports)
+                demoted.append(instance.instance_num)
+
+            if demoted:
+                self.gcode.respond_info(
+                    f"ACE: over-subscribed ACE2 bus ({len(bound)} instances / {k} unit(s)) — "
+                    f"handed instance(s) {demoted} back to ace1_json (dedicated)"
+                )
+                # Re-init the bus so it rebinds the remaining instances to the
+                # freed units and stops the incomplete-discovery retry loop.
+                self._on_shared_bus_connected(bus_session)
+
+    def _reconcile_transports(self, now):
+        """One automatic reconciliation pass (Direction A adopt + Direction B heal)."""
+        if not self._ace_pro_enabled:
+            return
+        if self.toolchange_in_progress or self._is_printing_or_paused():
+            return
+        try:
+            ports = list(serial.tools.list_ports.comports())
+        except Exception:
+            ports = []
+        try:
+            self.redetect_transports(require_sustained=True, quiet=True, ports=ports, now=now)
+        except Exception as exc:
+            logging.warning("ACE: auto-redetect (Direction A) failed: %s", exc)
+        try:
+            self._reconcile_oversubscribed_buses(now, ports)
+        except Exception as exc:
+            logging.warning("ACE: over-subscription self-heal (Direction B) failed: %s", exc)
 
     def check_and_wait_for_spool_ready(self, target_tool, timeout_s=300, check_interval_s=1.0, stable_ready_s=3.0):
         """

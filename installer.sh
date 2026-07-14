@@ -241,6 +241,7 @@ create_or_replace_symlink() {
     local source="$1"
     local target="$2"
     local description="$3"
+    local force="${4:-}"  # "force" = replace without asking, "skip" = skip without asking, empty = ask
     
     if [ ! -e "$source" ]; then
         print_error "$source does not exist, skipping symlink"
@@ -248,21 +249,38 @@ create_or_replace_symlink() {
     fi
     
     if [ -e "$target" ] || is_symlink "$target"; then
-        if is_symlink "$target"; then
-            print_warning "Symlink already exists: $target"
-            local current_target=$(readlink "$target")
-            print_info "  → Currently points to: $current_target"
+        local do_replace
+        if [ "$force" = "force" ]; then
+            do_replace=0
+        elif [ "$force" = "skip" ]; then
+            do_replace=1
         else
-            print_warning "File/directory already exists: $target"
+            # Only show the "already exists" warning when we're actually
+            # about to ask the user - in force/skip mode the decision was
+            # already made once upfront, so repeating it per file just looks
+            # like something is wrong.
+            if is_symlink "$target"; then
+                print_warning "Symlink already exists: $target"
+                local current_target=$(readlink "$target")
+                print_info "  → Currently points to: $current_target"
+            else
+                print_warning "File/directory already exists: $target"
+            fi
+
+            if prompt_yes_no "Replace it?"; then
+                do_replace=0
+            else
+                do_replace=1
+            fi
         fi
-        
-        if prompt_yes_no "Replace it?"; then
+
+        if [ "$do_replace" -eq 0 ]; then
             rm -f "$target"
             ln -sf "$source" "$target"
             print_success "Symlink created: $target → $source"
             return 0
         else
-            print_info "Skipped symlink for $description"
+            print_info "Skipped symlink for $description (already exists)"
             return 1
         fi
     else
@@ -387,26 +405,38 @@ EOF
         print_error "ACE source directory not found: $ACE_SOURCE"
         exit 1
     fi
-    
-    create_or_replace_symlink "$ACE_SOURCE" "$ACE_TARGET" "ACE module"
 
     VP_SOURCE="$SCRIPT_DIR/extras/virtual_pins.py"
     VP_TARGET="$KLIPPER_DIR/klippy/extras/virtual_pins.py"
     
     if [ ! -f "$VP_SOURCE" ]; then
-        print_error "virtual_pins.py not found: $ACE_SOURCE"
+        print_error "virtual_pins.py not found: $VP_SOURCE"
         exit 1
     fi
-    
-    create_or_replace_symlink "$VP_SOURCE" "$VP_TARGET" "virtual_pins module"
 
-    # Optional ACE temperature sensor (safe to link even if unused)
     TEMP_SOURCE="$SCRIPT_DIR/extras/temperature_ace.py"
     TEMP_TARGET="$KLIPPER_DIR/klippy/extras/temperature_ace.py"
 
+    # Single overwrite decision for all ACE extras modules instead of asking
+    # once per file.
+    ACE_EXTRAS_FORCE=""
+    if [ -e "$ACE_TARGET" ] || is_symlink "$ACE_TARGET" || \
+       [ -e "$VP_TARGET" ] || is_symlink "$VP_TARGET" || \
+       { [ -f "$TEMP_SOURCE" ] && { [ -e "$TEMP_TARGET" ] || is_symlink "$TEMP_TARGET"; }; }; then
+        if prompt_yes_no "One or more ACE extras modules already exist. Overwrite all of them?"; then
+            ACE_EXTRAS_FORCE="force"
+        else
+            ACE_EXTRAS_FORCE="skip"
+        fi
+    fi
+
+    create_or_replace_symlink "$ACE_SOURCE" "$ACE_TARGET" "ACE module" "$ACE_EXTRAS_FORCE"
+    create_or_replace_symlink "$VP_SOURCE" "$VP_TARGET" "virtual_pins module" "$ACE_EXTRAS_FORCE"
+
+    # Optional ACE temperature sensor (safe to link even if unused)
     if [ -f "$TEMP_SOURCE" ]; then
         print_info "Linking optional ACE temperature sensor (temperature_ace.py)..."
-        create_or_replace_symlink "$TEMP_SOURCE" "$TEMP_TARGET" "temperature_ace sensor"
+        create_or_replace_symlink "$TEMP_SOURCE" "$TEMP_TARGET" "temperature_ace sensor" "$ACE_EXTRAS_FORCE"
     else
         print_warning "temperature_ace.py not found; skipping sensor symlink"
     fi
@@ -425,13 +455,20 @@ EOF
             ACE_FLUIDD_DEFAULT="$INSTALL_HOME/fluidd"
             ACE_MOONRAKER_CONF_DEFAULT="$INSTALL_HOME/printer_data/config/moonraker.conf"
 
+            # Single overwrite decision for the whole integration (component +
+            # Mainsail + Fluidd dashboard files) instead of asking per file.
+            ACE_STATUS_FORCE="skip"
+            if prompt_yes_no "If any ACE status integration files already exist, overwrite all of them? (No = keep existing files as-is)"; then
+                ACE_STATUS_FORCE="force"
+            fi
+
             # Moonraker component
             ACE_MOONRAKER_DIR=$(prompt_input "Moonraker directory (press ENTER to use default)" "$ACE_MOONRAKER_DEFAULT")
             ACE_MOONRAKER_COMPONENTS="$ACE_MOONRAKER_DIR/moonraker/components"
             if [ -d "$ACE_MOONRAKER_COMPONENTS" ]; then
                 ACE_STATUS_SOURCE="$ACE_STATUS_DIR/moonraker/ace_status.py"
                 ACE_STATUS_TARGET="$ACE_MOONRAKER_COMPONENTS/ace_status.py"
-                create_or_replace_symlink "$ACE_STATUS_SOURCE" "$ACE_STATUS_TARGET" "ACE status Moonraker component"
+                create_or_replace_symlink "$ACE_STATUS_SOURCE" "$ACE_STATUS_TARGET" "ACE status Moonraker component" "$ACE_STATUS_FORCE"
                 MOONRAKER_RESTART_NEEDED=1
 
                 # Ensure moonraker.conf has [ace_status]
@@ -447,7 +484,7 @@ EOF
                 ACE_MAINSAIL_DIR=$(prompt_input "Mainsail install directory" "$ACE_MAINSAIL_DEFAULT")
                 if [ -d "$ACE_MAINSAIL_DIR" ]; then
                     for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js vue.global.prod.js favicon.svg; do
-                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_MAINSAIL_DIR/$ace_file" "Mainsail $ace_file"
+                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_MAINSAIL_DIR/$ace_file" "Mainsail $ace_file" "$ACE_STATUS_FORCE"
                     done
                 else
                     print_warning "Mainsail directory not found: $ACE_MAINSAIL_DIR"
@@ -460,7 +497,7 @@ EOF
                 ACE_FLUIDD_DIR=$(prompt_input "Fluidd install directory" "$ACE_FLUIDD_DEFAULT")
                 if [ -d "$ACE_FLUIDD_DIR" ]; then
                     for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js vue.global.prod.js favicon.svg; do
-                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_FLUIDD_DIR/$ace_file" "Fluidd $ace_file"
+                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_FLUIDD_DIR/$ace_file" "Fluidd $ace_file" "$ACE_STATUS_FORCE"
                     done
                 else
                     print_warning "Fluidd directory not found: $ACE_FLUIDD_DIR"

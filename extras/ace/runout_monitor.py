@@ -13,7 +13,6 @@ import logging
 
 from .config import (
     SENSOR_TOOLHEAD,
-    SENSOR_RDM,
     get_instance_from_tool,
     get_local_slot,
     ACE_INSTANCES,

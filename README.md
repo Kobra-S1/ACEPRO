@@ -750,7 +750,7 @@ This driver provides **37 GCode commands** organized by category:
 | Command | Description |
 |---------|-------------|
 | `T0` - `Tn` | Change to tool (auto-registered based on `ace_count`) |
-| `ACE_GET_CURRENT_INDEX` | Query currently loaded tool index |
+| `ACE_GET_CURRENT_INDEX` | Query currently loaded tool index, plus in-flight/unconfirmed toolchange target |
 | `ACE_CHANGE_TOOL` | Execute tool change with validation |
 
 **Custom Tool Macro Support:**
@@ -888,6 +888,8 @@ The integration handles three ways of identifying spools:
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `ACE_DEBUG_INJECT_SENSOR_STATE` | Inject sensor state for testing | `TOOLHEAD=0\|1 RMS=0\|1` or `RESET=1` |
+| `ACE_DEBUG_SET_CURRENT_INDEX` | Override saved current tool index (also clears the in-flight target) | `[TOOL=<n>]` omit/-1 for none |
+| `ACE_DEBUG_SET_TARGET_INDEX` | Override saved in-flight toolchange target | `[TOOL=<n>]` omit/-1 for none |
 
 **Command Parameter Resolution:**
 - **Priority 1**: `INSTANCE=<n> INDEX=<n>` (explicit slot)
@@ -1270,7 +1272,8 @@ ACE_SET_SLOT T=4 MATERIAL="PLA" COLOR=BLUE TEMP=210
 
 All inventory and state is automatically saved to `saved_variables.cfg`:
 - Slot metadata (material, color, temp, status)
-- Current tool index
+- Current tool index (`ace_current_index`)
+- In-flight toolchange target (`ace_target_index`, -1 when none)
 - Filament position (splitter, bowden, toolhead, nozzle)
 - Endless spool enabled state
 - Match mode configuration
@@ -1329,6 +1332,16 @@ When a toolchange fails:
      - Filament is extruding properly
      - No obstructions remain in path
    - Print will continue from pause point
+
+### Unconfirmed Toolchange Recovery
+
+`ace_target_index` holds the tool of an in-flight or failed toolchange attempt
+(-1 = none), separate from `ace_current_index` (last confirmed loaded tool).
+
+- `ACE_GET_CURRENT_INDEX` reports both indices.
+- KlipperScreen shows `"ACE: Toolchange to T<n> unconfirmed"` when set.
+- RESUME reloads `ace_target_index` instead of `ace_current_index` when they differ.
+- `ACE_DEBUG_SET_TARGET_INDEX TOOL=<n>` (or `TOOL=-1`) sets it manually.
 
 
 ## 🧪 Testing

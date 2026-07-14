@@ -423,6 +423,28 @@ class TestAce2BusSession:
         assert list(session.iter_discovered_devices()) == []
         assert session.get_device_for_instance(1) is None
 
+    def test_unbind_logical_instance_frees_unit_without_touching_others(self):
+        session = Ace2BusSession(port="/dev/ttyUSB0")
+        session.bind_logical_instance(0, 11, 22, 33)
+        session.bind_logical_instance(1, 44, 55, 66)
+
+        session.unbind_logical_instance(0)
+
+        # instance 0's binding is gone and its unit is available again
+        assert session.get_device_for_instance(0) is None
+        assert session.record_discovered_device(11, 22, 33).logical_instance is None
+        # instance 1 is untouched
+        assert session.get_device_for_instance(1).identity.uid_tuple == (44, 55, 66)
+        assert session.export_bindings() == {1: (44, 55, 66)}
+
+    def test_unbind_unknown_instance_is_noop(self):
+        session = Ace2BusSession(port="/dev/ttyUSB0")
+        session.bind_logical_instance(1, 44, 55, 66)
+
+        session.unbind_logical_instance(5)  # never bound -> no error, no change
+
+        assert session.export_bindings() == {1: (44, 55, 66)}
+
 
 class TestTransportDescriptionMatching:
     """Test transport description matching and protocol auto-resolution."""
