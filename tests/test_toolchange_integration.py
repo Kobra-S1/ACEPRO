@@ -171,6 +171,13 @@ class TestToolChangeIntegration(unittest.TestCase):
         elif name == 'extruder':
             mock_extruder = Mock()
             mock_extruder.get_status = Mock(return_value={'temperature': 210})
+            # perform_tool_change checks extruder temperature before loading via
+            # get_heater().get_temp()[0] and min_extrude_temp. Provide a hot
+            # nozzle so the cold-nozzle guard passes through.
+            mock_heater = Mock()
+            mock_heater.get_temp = Mock(return_value=(210.0, 210.0))
+            mock_heater.min_extrude_temp = 170.0
+            mock_extruder.get_heater = Mock(return_value=mock_heater)
             return mock_extruder
         elif name == 'print_stats':
             mock_print_stats = Mock()
@@ -252,7 +259,7 @@ class TestToolChangeIntegration(unittest.TestCase):
                 instance._smart_unload_slot.return_value = True
             
             # Mock smart_unload to properly update filament_pos and clear sensors
-            def mock_smart_unload(tool_index=-1, prepare_toolhead=True):
+            def mock_smart_unload(tool_index=-1, prepare_toolhead=True, keep_heater=False):
                 # Update filament_pos to splitter
                 from ace.config import FILAMENT_STATE_SPLITTER
                 manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_SPLITTER)
@@ -295,7 +302,8 @@ class TestToolChangeIntegration(unittest.TestCase):
         # Verify instance 0 was used
         instance0 = manager.instances[0]
         instance0._feed_filament_into_toolhead.assert_called_once_with(0, check_pre_condition=False)
-        instance0._enable_feed_assist.assert_called_once_with(0)  # Slot 0
+        # _enable_feed_assist is called inside _feed_filament_into_toolhead (not in manager.py)
+        # so it won't appear here as _feed_filament_into_toolhead is mocked in this test
         
         # Verify macros were called
         self.assertTrue(any('_ACE_PRE_TOOLCHANGE' in cmd for cmd in self.gcode_commands))
@@ -326,7 +334,8 @@ class TestToolChangeIntegration(unittest.TestCase):
         # Verify instance 1 was used (T4 = instance 1, slot 0)
         instance1 = manager.instances[1]
         instance1._feed_filament_into_toolhead.assert_called_once_with(4, check_pre_condition=False)
-        instance1._enable_feed_assist.assert_called_once_with(0)  # Local slot 0
+        # _enable_feed_assist is called inside _feed_filament_into_toolhead (not in manager.py)
+        # so it won't appear here as _feed_filament_into_toolhead is mocked in this test
     
     def test_toolchange_ace0_to_ace1(self):
         """
@@ -357,7 +366,8 @@ class TestToolChangeIntegration(unittest.TestCase):
         # Verify load happened on instance 1
         instance1 = manager.instances[1]
         instance1._feed_filament_into_toolhead.assert_called_once_with(5, check_pre_condition=False)
-        instance1._enable_feed_assist.assert_called_once_with(1)  # Local slot 1
+        # _enable_feed_assist is called inside _feed_filament_into_toolhead (not in manager.py)
+        # so it won't appear here as _feed_filament_into_toolhead is mocked in this test
         
         # Verify state updates
         self.assertEqual(self.variables['ace_current_index'], 5)
@@ -392,7 +402,8 @@ class TestToolChangeIntegration(unittest.TestCase):
         # Verify load happened on instance 0
         instance0 = manager.instances[0]
         instance0._feed_filament_into_toolhead.assert_called_once_with(2, check_pre_condition=False)
-        instance0._enable_feed_assist.assert_called_once_with(2)  # Local slot 2
+        # _enable_feed_assist is called inside _feed_filament_into_toolhead (not in manager.py)
+        # so it won't appear here as _feed_filament_into_toolhead is mocked in this test
         
         # Verify state updates
         self.assertEqual(self.variables['ace_current_index'], 2)

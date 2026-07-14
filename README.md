@@ -1,6 +1,6 @@
 <div align="center">
 
-# ACE Pro - A Klipper driver for the Anycubic Color Engine Pro
+# ACE Pro / ACE2 Pro - A Klipper driver for the Anycubic Color Engine Pro (1+2)
 
 </div>
 
@@ -13,6 +13,8 @@ This is a fork of szkrisz' ACEPRO Klipper driver.
 ACE temperature sensor integration adapted from [agrloki/ValgACE](https://github.com/agrloki/ValgACE).
 
 This Anycubic-centric fork has structurally diverged from the original and focuses on:
+- Supports classic ACEPRO as well as the new ACE2 PRO
+- Supports mixed ACE + ACE2 PRO setups
 - Supporting multiple ACE units, assigns ACE instance IDs based on USB topology
 - Adds RFID support (to automatically populate inventory)
 - Adds more Endless-Spool matching modes (exact, material only or just use the next available spool)
@@ -50,10 +52,12 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 
 ### Core Functionality
 - ✅ **Multi-ACE Pro Support**: Multiple ACE units support (tested with 3 ACEPRO units for 12-color printing, but more should be possible)
+- ✅ **ACE and ACE 2 Support**: Classic ACE PRO (Gen1) as also new ACE2 PRO are supported
+- ✅ **Mixed ACE1 and ACE 2 Support**: Both generations (ACE and ACE2) can be used together
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
 - ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
-- ✅ **Tangle Detection (optional)**: Extruder vs encoder monitoring to catch stuck spools mid-print
+- ✅ **Tangle Detection (ACE Gen 1)**: Pauses the print when the ACE pumps continuously against a blocked spool, via the firmware-reported `cont_assist_time` field
 - ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
 - ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
@@ -62,7 +66,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 - ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
 - ✅ **Spoolman Integration**: Automatic spool selection via RFID-to-ID mapping or manual slot assignment
-- 🟠 **OrcaSlicer Filament Sync** *(requires latest Orca Beta)*: Filament type and color can by synced automatically the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
+- 🟠 **OrcaSlicer Filament Sync** *(requires recent Orca version)*: Filament type and color can be synced automatically from the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
 
 ### Standalone Web Dashboard
 
@@ -84,6 +88,8 @@ The browser-based dashboard (adapted from ValgACE) gives you a full ACE view wit
 
 ## 🏗️ Architecture
 
+![Architecture Diagram](architecture.png)
+
 This implementation is organized into separate modules:
 
 ```
@@ -91,11 +97,18 @@ ace/
 ├── __init__.py           # Module initialization
 ├── manager.py            # AceManager - orchestrates all ACE units
 ├── instance.py           # AceInstance - per-unit handler
+├── protocol.py           # Protocol seam: ACE1 JSON & ACE2 protobuf adapters,
+│                         #   command catalog, request builders, wire codecs,
+│                         #   transport rules, baud/port selection
+├── ace2_bus.py           # ACE2 shared-bus session: UID discovery, device-id
+│                         #   binding, assignment planning
+├── serial_manager.py     # Serial transport: connect, frame I/O, request queue
 ├── endless_spool.py      # Automatic filament switching logic
 ├── runout_monitor.py     # Filament runout detection during printing
-├── serial_manager.py     # USB communication protocol
 ├── commands.py           # G-code command handlers
-└── config.py             # Configuration constants and helpers
+├── config.py             # Configuration constants and helpers
+├── persistent_state.py   # Deferred-flush saved_variables wrapper
+└── moonraker_lane_sync.py # OrcaSlicer lane_data sync via Moonraker DB
 
 config/
 ├── ace_K3.cfg            # Kobra 3 ACE configuration
@@ -103,7 +116,7 @@ config/
 ├── printer_K3.cfg        # Kobra 3 printer macros
 ├── printer_KS1.cfg       # Kobra S1 printer macros
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
-└── ace_macros_generic.cfg # Shared ACE helper macros
+├── ace_macros_generic.cfg # Shared ACE helper macros
 └── spoolman_logic.cfg          # Logic for Spoolman ID mapping and tool hooks
 
 extras/
@@ -125,13 +138,16 @@ extras/
 - **Filament Sensors** (required): 
   - Toolhead sensor (close to the hotend) - for runout detection
   - Optional: RMS sensor (return module in Anycubic terms) - for jam detection and path validation
-- **Hotend**: Recommended: Having there a Filament cutter
+- **Hotend**: Recommended: Having a filament cutter
 - **ACE Adapter**: Adapter which converts the Ace-Pro conector to standard USB
 
 
 ### ACE Pro USB Pin Configuration / Adapter
 ![Connector Pinout](/img/connector.png)
 Connect the ACE Pro to a regular USB port and configure the sensor pins according to your board layout.
+If using an ACE2 PRO, you need the KS1/K3 adapter cable which comes with the KS1/K3 ACE2 kit.
+The ACE2 PRO uses RS-485 natively; for connecting it to a KS1 or K3 (and RPi), a converter to USB is required, which Anycubic provides as part of the ACE2 KS1/K3 kit.
+IMPORTANT: If you have a Kobra-X or Anycubic KS1-MAX ACE2 PRO cable, that won't work! You need to buy a KS1/K3 ACE2 conversion cable / RS485-2-USB adapter first.
 ![USB Adapter ((c) Gwebster)](/img/Ace2USB_gwebster.png)
 
 Other variations to get a standard USB connection to the ACE can be found on printables.com:
@@ -237,7 +253,7 @@ G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperatur
 - `bedTemp` - Bed temperature
 - `extruderTemp` - Nozzle temperature for the initial tool
 - `tool` - Initial tool index (from `[initial_tool]` Orca variable)
-- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts.Set to `0` to always purge.
+- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts. Set to `0` to always purge.
 
 2. **Update End G-code**
 
@@ -245,7 +261,7 @@ Update your Orca slicer end machine-gcode to call PRINT_END macro:
 ```
 PRINT_END CUT_TIP=1
 ```
-This will ensure that at print end, ACE Pro driver (if available) gets informed of the print end, as also filament is cut and retracted and printhead moves to park position.
+This will ensure that at print end, the ACE Pro driver (if available) is informed of the print end, the filament is cut and retracted, and the printhead moves to the park position.
 If you prefer to NOT get the filament cut at print end, change CUT_TIP argument to zero:
 ```
 PRINT_END CUT_TIP=0
@@ -297,6 +313,7 @@ icon: settings
 panel: acepro
 ```
 Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry makes the panel visible during an active print.
+
 ## ⚙️ Configuration
 
 ### Configuration File Structure
@@ -393,7 +410,7 @@ For multiple ACE units, simply set `ace_count`:
 ```ini
 [ace]
 ace_count: 2    # Instance 0 (T0-T3) + Instance 1 (T4-T7)
-baud: 115200
+baud: auto      # protocol-aware default (ACE1=115200, ACE2=230400)
 feed_speed: 60
 # ... rest of config shared by all instances
 ```
@@ -408,10 +425,89 @@ Each unit is automatically detected by USB topology and assigned:
 ```ini
 [ace]
 ace_count: 4    # e.g. for four ACE units (16 tools total: T0-T15)
-baud: 115200
+baud: auto
 feed_speed: 60
 retract_speed: 50
 ```
+
+### Tool Index Assignment
+
+Each ACE instance owns 4 tool slots. Tool indices are assigned sequentially based on instance number:
+
+| Instance | Tools | Slots |
+|----------|-------|-------|
+| 0 | T0 – T3 | Slot 0–3 on the first ACE unit |
+| 1 | T4 – T7 | Slot 0–3 on the second ACE unit |
+| 2 | T8 – T11 | Slot 0–3 on the third ACE unit |
+| N | T(N×4) – T(N×4+3) | Slot 0–3 on the Nth ACE unit |
+
+The formula is: **Tool = Instance × 4 + LocalSlot**
+
+Instance numbers are assigned by USB topology order (physical port position on the host). The first ACE detected becomes instance 0, the next becomes instance 1, etc. This is deterministic across reboots as long as you don't change which USB ports the ACE units are plugged into.
+
+Use `ACE_GET_STATUS` to verify which instance maps to which physical unit after first setup.
+
+### Protocol Selection (ACE1 / ACE2 / Mixed)
+
+The driver supports two hardware protocols:
+- **ACE1** (`ace1_json`): Original ACE Pro units — one dedicated USB port per unit, JSON-over-serial wire format, 115200 baud default.
+- **ACE2** (`ace2_proto`): ACE 2 Pro units — multiple units share a single USB-to-RS485 adapter, protobuf wire format, 230400 baud default. Requires bus discovery and device-id assignment (handled automatically by the driver).
+
+Protocol selection is configured via the `protocol` option in `[ace]`:
+
+```ini
+[ace]
+# Auto-detect (default): assigns dedicated ACE1 ports to lower instance
+# numbers, then falls back to ACE2 shared-bus for remaining instances.
+protocol: auto
+
+# Force all instances to ACE1:
+# protocol: ace1
+
+# Force all instances to ACE2:
+# protocol: ace2
+```
+
+**Baud rate** is protocol-aware and normally does not need to be set explicitly:
+- `protocol: auto` or `protocol: ace1` → default baud 115200
+- `protocol: ace2` → default baud 230400
+
+You can still override baud explicitly (including per-instance) if needed:
+```ini
+baud: 115200           # same baud for all instances
+baud: 115200,1:230400  # instance 1 uses 230400
+```
+
+**Mixed ACE1 + ACE2 setup (auto mode):**
+
+If you have e.g. 2 original ACE Pro units and 1 ACE 2 Pro unit, `protocol: auto` will:
+1. Detect ACE1-style USB ports and assign them to lower instance numbers (0, 1)
+2. Detect the ACE2 USB-RS485 adapter and assign remaining instances (2) to ACE2
+
+```ini
+[ace]
+ace_count: 3        # 2x ACE1 + 1x ACE2
+protocol: auto      # auto-detect handles mixed hardware
+# Instance 0: ACE1 (dedicated USB, 115200 baud)
+# Instance 1: ACE1 (dedicated USB, 115200 baud)
+# Instance 2: ACE2 (shared RS-485 bus, 230400 baud)
+```
+
+**Pure ACE2 setup:**
+```ini
+[ace]
+ace_count: 2
+protocol: ace2
+# Both instances share one USB-RS485 adapter
+# Bus discovery and device-id assignment happen automatically
+```
+
+**Protocol aliases:**
+| Config value | Resolves to | Description |
+|---|---|---|
+| `auto` | auto-detect | Default; prefers ACE1 ports, falls back to ACE2 |
+| `ace1` / `ace1_json` / `json` | `ace1_json` | Force ACE1 JSON protocol |
+| `ace2` / `ace2_proto` / `proto` | `ace2_proto` | Force ACE2 protobuf protocol |
 
 ### Sensor Configuration
 
@@ -420,6 +516,8 @@ ACE supports both `filament_switch_sensor <name>` and `filament_tracker <name>` 
 **Filament Runout Sensors:**
 `filament_runout_sensor_name_nozzle` is required.
 `filament_runout_sensor_name_rdm` is optional and helps verify the filament has fully retracted to the hub.
+
+`rdm_overshoot_length` is optional unload tuning (default 50mm): after RDM clears during callback-driven retract, ACE continues retracting by this extra distance before stop.
 
 ```ini
 [ace]
@@ -487,7 +585,7 @@ Link `extras/temperature_ace.py` into Klipper extras (see installation) and rest
 
 ### Other `[ace]` options worth knowing
 
-- `tangle_detection` / `tangle_detection_length`: Enable encoder-vs-extruder tangle checks (default off; length default 15mm).
+- `tangle_detection` / `tangle_pump_time`: Enable ACE-side tangle detection (ACE Gen 1; default off; threshold 4.0 s). Pauses the print when ACE has been pumping continuously past the threshold, i.e. feeding against a blockage at the spool. Reads the firmware-reported `cont_assist_time` field. Toggle live during a print with `ACE_TANGLE_DETECTION ENABLE=0/1`, or uncomment `[output_pin TANGLE_DETECTION]` in the config example to get a Mainsail/Fluidd slider — when the slider is configured it is the source of truth, the command keeps it in sync.
 - `persistence_mode`: `deferred` (default) makes `set_and_save` defer disk writes until a safe `flush`; `immediate` writes to disk right away.
 - `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings).
 
@@ -677,10 +775,16 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_SMART_UNLOAD` | Intelligent unload with multi-slot fallback | `[TOOL=<index>]` |
+| `ACE_SMART_UNLOAD` | Intelligent unload with coordinated retract + RDM-aware validation; turns heater off after success when idle | `[TOOL=<index>]` |
 | `ACE_SMART_LOAD` | Load all non-empty slots to RMS sensor | - |
-| `ACE_FULL_UNLOAD` | Complete unload until slot empty | `TOOL=<index>` or `TOOL=ALL` |
+| `ACE_FULL_UNLOAD` | Complete unload until slot sensor reports empty (active/non-active aware flow) | `TOOL=<index>` or `TOOL=ALL` |
 | `_ACE_HANDLE_PRINT_END` | End-of-print cleanup (disable runout, optionally unload) | `[CUT_TIP=1]` (1=unload+cut, 0=keep loaded) |
+
+Behavior notes:
+- `ACE_FULL_UNLOAD TOOL=<index>` uses two flows:
+   - Active tool (currently loaded): toolhead prep + extruder retract + ACE retract.
+   - Non-active tool: ACE-only retract (no heating/cut path).
+- `ACE_FULL_UNLOAD TOOL=ALL` skips the currently loaded nozzle tool and processes other non-empty slots.
 
 ### Manual Feed/Retract Operations
 
@@ -937,7 +1041,7 @@ When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver 
 4. Endless spool can now match based on preserved metadata
 ```
 
-## � Connection Supervision
+## 🔗 Connection Supervision
 
 Monitors ACE connection stability and automatically pauses prints if connection becomes unstable.
 
@@ -1027,7 +1131,7 @@ If you see the connection issue dialog during a print, follow these steps:
 5. **Repeat if Necessary**
    - Try steps 1-4 multiple times (2-3 attempts) before canceling print
    - Connection may stabilize after a few minutes
-   - If problem persists after 3 attempts, concider canceling the print and investigate
+   - If problem persists after 3 attempts, consider canceling the print and investigating
 
 6. **Resume or Cancel**
    - Once connection shows `stable`, dismiss the dialog and run: `RESUME`
@@ -1054,7 +1158,7 @@ If you're experiencing **repeated USB disconnections** that you didn't have befo
    - Avoid USB hubs with poor power delivery
    - Try different USB ports on the Raspberry Pi
 
-## �🔄 Endless Spool Feature
+## 🔄 Endless Spool Feature
 
 Automatically switches to a matching spool when filament runs out, enabling continuous multi-day prints.
 
@@ -1243,7 +1347,7 @@ ACE_SHOW_INSTANCE_CONFIG            # Display resolved configuration
 
 ### Sensor Validation
 
-For testing sensor functionality, DON'T use it if you don't know what you are doing:
+For testing sensor functionality — do not use if you don't know what you are doing:
 
 ```gcode
 # Manual sensor state injection (for testing)
@@ -1390,7 +1494,6 @@ Use an N-in-1 splitter matching your total tool count:
 - 1 ACE (4 tools) → 4-in-1 splitter
 - 2 ACE (8 tools) → 8-in-1 splitter
 - 3 ACE (12 tools) → 12-in-1 splitter
-- 4 ACE (16 tools) → 16-in-1 splitter
 
 
 
@@ -1399,7 +1502,7 @@ Use an N-in-1 splitter matching your total tool count:
 
 This project builds upon excellent prior work:
 
-- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)** - ACEPRO SV08 driver implementation (szkriz)
+- **[ACEPROSV08](https://github.com/szkrisz/ACEPROSV08)** - ACEPRO SV08 driver implementation (szkrisz)
 - **[ACEResearch](https://github.com/printers-for-people/ACEResearch)** - Original ACE Pro research
 - **[DuckACE](https://github.com/utkabobr/DuckACE)** - Base driver implementation
 

@@ -8,6 +8,8 @@ that don't depend on specific instances.
 import re
 from enum import Enum
 
+from .protocol import get_default_baud_for_protocol
+
 
 # ========== ACE Instance Constants ==========
 
@@ -107,7 +109,10 @@ def read_ace_config(config):
 
     # Non-overridable settings (apply to all instances)
     ace_config["ace_count"] = config.getint("ace_count", 1)
-    ace_config["baud"] = config.getint("baud", 115200)
+    # Keep baud protocol-aware by default. When omitted, resolve per-instance
+    # from the active protocol (ACE1=115200, ACE2=230400).
+    raw_baud = config.get("baud", "auto")
+    ace_config["baud"] = raw_baud
     ace_config["filament_runout_sensor_name_rdm"] = config.get(
         "filament_runout_sensor_name_rdm", None
     )
@@ -120,6 +125,12 @@ def read_ace_config(config):
     ace_config["rfid_inventory_sync_enabled"] = config.getboolean(
         "rfid_inventory_sync_enabled", True
     )
+    ace_config["ace2_feed_check_length"] = config.getint(
+        "ace2_feed_check_length", 110
+    )
+    ace_config["ace2_feed_error_length"] = config.getint(
+        "ace2_feed_error_length", 100
+    )
     # RFID temperature mode: how to calculate print temp from min/max
     # Options: "average" (default), "min", "max"
     ace_config["rfid_temp_mode"] = config.get("rfid_temp_mode", "average").lower()
@@ -128,6 +139,9 @@ def read_ace_config(config):
 
     ace_config["parkposition_to_toolhead_length"] = config.getint("parkposition_to_toolhead_length", 1000)
     ace_config["parkposition_to_rdm_length"] = config.getint("parkposition_to_rdm_length", 150)
+    # Extra retraction (mm) after the RDM sensor clears during unload (safety
+    # margin past the splitter exit). Only used when an RDM sensor is present.
+    ace_config["rdm_overshoot_length"] = config.getfloat("rdm_overshoot_length", 50.0)
     ace_config["toolhead_retraction_speed"] = config.getint("toolhead_retraction_speed", 10)
     ace_config["toolhead_retraction_length"] = config.getint("toolhead_retraction_length", 40)
     ace_config["toolhead_full_purge_length"] = config.getint("toolhead_full_purge_length", 22)
@@ -185,8 +199,8 @@ def read_ace_config(config):
     ace_config["tangle_detection"] = config.getboolean(
         "tangle_detection", False
     )
-    ace_config["tangle_detection_length"] = config.getfloat(
-        "tangle_detection_length", 15.0
+    ace_config["tangle_pump_time"] = config.getfloat(
+        "tangle_pump_time", 4.0
     )
     # Persistence mode controls when set_and_save() actually writes to disk.
     # - deferred:  set_and_save() behaves like set() — RAM + dirty mark only;
@@ -199,6 +213,7 @@ def read_ace_config(config):
     ).strip().lower()
     if ace_config["persistence_mode"] not in ("deferred", "immediate"):
         ace_config["persistence_mode"] = "deferred"
+    ace_config["protocol"] = config.get("protocol", "auto")
     # STORE RAW CONFIG STRINGS (will be parsed per-instance)
     # These support instance-specific overrides via "value" or "value,inst:override"
     ace_config["feed_speed"] = config.get("feed_speed", "60")
@@ -442,6 +457,69 @@ def parse_instance_config(config_value, instance_num, param_name):
         )
 
 
+def parse_instance_choice_config(config_value, instance_num, param_name):
+    """Parse string config values that support per-instance overrides."""
+    value_str = str(config_value).strip()
+
+    if ':' not in value_str:
+        if not value_str:
+            raise ValueError(f"Invalid config value for {param_name}: '{value_str}'")
+        return value_str
+
+    parts = value_str.split(',')
+    instance_map = {}
+    global_default = None
+
+    for part in parts:
+        part = part.strip()
+        if ':' in part:
+            inst_str, val_str = part.split(':', 1)
+            try:
+                inst = int(inst_str.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid instance override for {param_name}: '{part}'"
+                ) from exc
+
+            value = val_str.strip()
+            if not value:
+                raise ValueError(
+                    f"Invalid instance override for {param_name}: '{part}'"
+                )
+            instance_map[inst] = value
+            continue
+
+        if global_default is not None:
+            raise ValueError(
+                f"Multiple global defaults for {param_name}: '{value_str}'"
+            )
+        if not part:
+            raise ValueError(f"Invalid global default for {param_name}: '{part}'")
+        global_default = part
+
+    if instance_num in instance_map:
+        return instance_map[instance_num]
+    if global_default is not None:
+        return global_default
+    raise ValueError(
+        f"No value found for instance {instance_num} in {param_name}: '{value_str}'"
+    )
+
+
+def parse_instance_baud_config(config_value, instance_num, protocol_name):
+    """Parse per-instance baud config with protocol-aware defaults."""
+    raw_value = parse_instance_choice_config(config_value, instance_num, "baud")
+    normalized = str(raw_value).strip().lower()
+
+    if normalized == "auto":
+        return get_default_baud_for_protocol(protocol_name)
+
+    try:
+        return int(str(raw_value).strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid config value for baud: '{raw_value}'") from exc
+
+
 OVERRIDABLE_PARAMS = [
     "feed_speed",
     "retract_speed",
@@ -451,4 +529,9 @@ OVERRIDABLE_PARAMS = [
     "incremental_feeding_speed",
     "heartbeat_interval",
     "max_dryer_temperature"
+]
+
+
+CHOICE_OVERRIDABLE_PARAMS = [
+    "protocol",
 ]

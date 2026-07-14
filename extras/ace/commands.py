@@ -224,6 +224,10 @@ def cmd_ACE_GET_STATUS(gcmd):
         instance_num = gcmd.get_int("INSTANCE", None)
         verbose = gcmd.get_int("VERBOSE", 0)
 
+        def build_status_request(ace_instance):
+            """Build one protocol-correct status request without leaking transport details here."""
+            return ace_instance.protocol.build_get_status_request()
+
         def format_verbose_status(result, inst_num, ace_instance=None):
             """Format all status information in a readable, grouped format."""
             lines = []
@@ -435,7 +439,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                     msg = response.get("msg") if response else "No response"
                     gcmd.respond_info(f"Status query failed: {msg}")
 
-            ace.send_request({"method": "get_status"}, status_callback)
+            ace.send_request(build_status_request(ace), status_callback)
         else:
             if verbose:
                 gcmd.respond_info("=== ACE Status (All Instances - Verbose) ===\n")
@@ -466,7 +470,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                         msg = response.get("msg") if response else "No response"
                         gcmd.respond_info(f"Instance {inst_num}: Status query failed: {msg}")
 
-                ace.send_request({"method": "get_status"}, status_callback)
+                ace.send_request(build_status_request(ace), status_callback)
 
             for_each_instance(query_instance)
 
@@ -767,10 +771,6 @@ def cmd_ACE_START_DRYING(gcmd):
             if temperature <= 0 or temperature > ace.max_dryer_temperature:
                 raise gcmd.error(f"TEMP must be between 1 and {ace.max_dryer_temperature}°C")
 
-            ace._dryer_active = True
-            ace._dryer_temperature = temperature
-            ace._dryer_duration = duration
-
             def callback(response):
                 if response and response.get("code") == 0:
                     if not getattr(ace, "_dryer_start_logged", False):
@@ -780,17 +780,17 @@ def cmd_ACE_START_DRYING(gcmd):
                     msg = response.get("msg", "Unknown error") if response else ""
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer start failed: {msg}")
 
-            request = {"method": "drying", "params": {"temp": temperature, "duration": duration}}
-            ace.send_request(request, callback)
+            ace.start_drying(temperature, duration, callback)
         else:
+            if len(ACE_INSTANCES) > 1:
+                gcmd.respond_info(
+                    "ACE_START_DRYING: INSTANCE not provided - applying to all ACE instances"
+                )
+
             def start_dryer(inst_num, manager, ace):
                 if temperature <= 0 or temperature > ace.max_dryer_temperature:
                     gcmd.respond_info(f"ACE[{inst_num}]: Temp {temperature}°C out of range, skipping")
                     return
-
-                ace._dryer_active = True
-                ace._dryer_temperature = temperature
-                ace._dryer_duration = duration
 
                 def callback(response):
                     if response and response.get("code") == 0:
@@ -801,8 +801,7 @@ def cmd_ACE_START_DRYING(gcmd):
                         msg = response.get("msg", "Unknown error") if response else ""
                         gcmd.respond_info(f"ACE[{inst_num}]: Dryer start failed: {msg}")
 
-                request = {"method": "drying", "params": {"temp": temperature, "duration": duration}}
-                ace.send_request(request, callback)
+                ace.start_drying(temperature, duration, callback)
 
             for_each_instance(start_dryer)
 
@@ -818,10 +817,6 @@ def cmd_ACE_STOP_DRYING(gcmd):
         if instance_num is not None:
             ace = ace_get_instance(gcmd)
 
-            ace._dryer_active = False
-            ace._dryer_temperature = 0
-            ace._dryer_duration = 0
-
             def callback(response):
                 if response and response.get("code") == 0:
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer stopped")
@@ -830,14 +825,14 @@ def cmd_ACE_STOP_DRYING(gcmd):
                     msg = response.get("msg", "Unknown error") if response else ""
                     gcmd.respond_info(f"ACE[{instance_num}]: Dryer stop failed: {msg}")
 
-            request = {"method": "drying_stop"}
-            ace.send_request(request, callback)
+            ace.stop_drying(callback)
         else:
-            def stop_dryer(inst_num, manager, ace):
-                ace._dryer_active = False
-                ace._dryer_temperature = 0
-                ace._dryer_duration = 0
+            if len(ACE_INSTANCES) > 1:
+                gcmd.respond_info(
+                    "ACE_STOP_DRYING: INSTANCE not provided - applying to all ACE instances"
+                )
 
+            def stop_dryer(inst_num, manager, ace):
                 def callback(response):
                     if response and response.get("code") == 0:
                         gcmd.respond_info(f"ACE[{inst_num}]: Dryer stopped")
@@ -845,8 +840,7 @@ def cmd_ACE_STOP_DRYING(gcmd):
                         msg = response.get("msg", "Unknown error") if response else ""
                         gcmd.respond_info(f"ACE[{inst_num}]: Dryer stop failed: {msg}")
 
-                request = {"method": "drying_stop"}
-                ace.send_request(request, callback)
+                ace.stop_drying(callback)
 
             for_each_instance(stop_dryer)
 
@@ -1082,6 +1076,52 @@ def cmd_ACE_QUERY_SLOTS(gcmd):
         gcmd.respond_info("\n".join(lines))
 
 
+def _sync_tangle_detection(manager, enabled):
+    """Set both the python flag and [output_pin TANGLE_DETECTION] (if configured) so the slider never lies about the runtime state."""
+    try:
+        pin = manager.printer.lookup_object(
+            "output_pin TANGLE_DETECTION", None
+        )
+    except Exception:
+        pin = None
+    if pin is not None:
+        manager.gcode.run_script_from_command(
+            f"SET_PIN PIN=TANGLE_DETECTION VALUE={1.0 if enabled else 0.0}"
+        )
+    manager.runout_monitor.set_tangle_detection_enabled(enabled)
+
+
+def cmd_ACE_TANGLE_DETECTION(gcmd):
+    """Toggle tangle detection live.  ENABLE=0/1 (no arg → query)."""
+    manager = ace_get_manager(0)
+    monitor = manager.runout_monitor
+
+    enable_arg = gcmd.get_int("ENABLE", default=None, minval=0, maxval=1)
+    if enable_arg is None:
+        active = monitor._is_tangle_detection_active()
+        state = "enabled" if active else "disabled"
+        gcmd.respond_info(
+            f"ACE: tangle detection {state} "
+            f"(threshold {monitor.tangle_pump_time:.1f}s)"
+        )
+        return
+
+    _sync_tangle_detection(manager, bool(enable_arg))
+    state = "ENABLED" if enable_arg else "DISABLED"
+    gcmd.respond_info(f"ACE: tangle detection {state}")
+    logging.info("ACE: tangle detection %s via gcode", state)
+
+
+def cmd__ACE_TANGLE_DISABLE_AND_RESUME(gcmd):
+    """Internal: disable tangle detection and resume.  Wired to the
+    "Disable & Resume" button on the tangle-detected prompt."""
+    manager = ace_get_manager(0)
+    _sync_tangle_detection(manager, False)
+    gcmd.respond_info("ACE: tangle detection DISABLED, resuming")
+    logging.info("ACE: tangle detection disabled + resume via prompt button")
+    manager.gcode.run_script_from_command("RESUME")
+
+
 def cmd_ACE_ENABLE_ENDLESS_SPOOL(gcmd):
     """Enable endless spool (automatic material matching on runout)."""
     manager = ace_get_manager(0)
@@ -1260,9 +1300,11 @@ def cmd_ACE_DEBUG(gcmd):
         raise gcmd.error(f"Invalid JSON in PARAMS: {params_str}")
 
     def callback(response):
-        gcmd.respond_info(f"Debug response: {json.dumps(response)}")
+        # Some protocol debug payloads contain raw bytes (e.g. raw_fields).
+        # Use default=str so debug output never crashes callback handling.
+        gcmd.respond_info(f"Debug response: {json.dumps(response, default=str)}")
 
-    request = {"method": method, "params": params}
+    request = ace.protocol.build_debug_request(method, params)
     ace.send_request(request, callback)
 
 
@@ -1445,8 +1487,22 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         if is_printing and not is_startup:
             active_tool = tool_index
         else:
-            # If unload already completed, clear active tool in idle/startup mode.
-            active_tool = -1 if filament_pos == FILAMENT_STATE_BOWDEN else fallback_tool
+            # Idle/startup failure. Decide which tool is physically in the path.
+            if filament_pos == FILAMENT_STATE_BOWDEN:
+                # The unload of the previous tool completed (filament_pos only
+                # becomes "bowden" after a successful retract). If the sensors
+                # still report filament, the tool we just tried to LOAD is stuck
+                # in the path, so it must become the current tool — otherwise the
+                # next toolchange loses track of it and cycles blindly through
+                # parked slots (which can pull an innocent slot out of the ACE).
+                if manager.is_filament_path_free_instant():
+                    active_tool = -1
+                else:
+                    active_tool = tool_index
+            else:
+                # The unload did not complete (filament_pos still "nozzle"/
+                # "splitter") — the previous tool is still in the path.
+                active_tool = fallback_tool
 
         manager.state.set(
             "ace_current_index",
@@ -2195,6 +2251,10 @@ ACE_COMMANDS = [
      "Show resolved config for ACE instance(s). [INSTANCE=<num>]"),
     ("ACE_FLUSH", cmd_ACE_FLUSH,
      "Persist any pending variable changes to disk immediately"),
+    ("ACE_TANGLE_DETECTION", cmd_ACE_TANGLE_DETECTION,
+     "Toggle tangle detection live.  ENABLE=0/1 (no arg → query state)"),
+    ("_ACE_TANGLE_DISABLE_AND_RESUME", cmd__ACE_TANGLE_DISABLE_AND_RESUME,
+     "Internal: prompt button — disable tangle detection and resume"),
 ]
 
 

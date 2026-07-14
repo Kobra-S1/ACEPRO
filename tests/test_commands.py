@@ -6,8 +6,9 @@ without critical errors. Uses mocks for hardware dependencies.
 """
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, MagicMock, patch, ANY
 import ace.commands
+from ace.protocol_ace2 import ACE2_COMMANDS_BY_NAME
 from ace.config import ACE_INSTANCES, INSTANCE_MANAGERS
 
 
@@ -62,6 +63,10 @@ def mock_ace_instance():
         for _ in range(4)
     ]
     instance.send_request = Mock()
+    instance.protocol = Mock()
+    instance.protocol.build_debug_request = Mock(
+        side_effect=lambda method, params: {"method": method, "params": params}
+    )
     instance.serial_mgr = Mock()
     instance.serial_mgr.reconnect = Mock()
     instance._feed = Mock()
@@ -73,6 +78,23 @@ def mock_ace_instance():
     instance._dryer_active = False
     instance._dryer_temperature = 0
     instance._dryer_duration = 0
+
+    def start_drying(temp, duration, callback=None):
+        instance._dryer_active = True
+        instance._dryer_temperature = temp
+        instance._dryer_duration = duration
+        request = {"method": "drying", "params": {"temp": temp, "duration": duration}}
+        instance.send_request(request, callback)
+
+    def stop_drying(callback=None):
+        instance._dryer_active = False
+        instance._dryer_temperature = 0
+        instance._dryer_duration = 0
+        request = {"method": "drying_stop"}
+        instance.send_request(request, callback)
+
+    instance.start_drying = Mock(side_effect=start_drying)
+    instance.stop_drying = Mock(side_effect=stop_drying)
     instance.reset_persistent_inventory = Mock()
     instance.reset_feed_assist_state = Mock()
     return instance
@@ -879,25 +901,25 @@ class TestCommandSmoke:
         """Test ACE_START_DRYING for single instance."""
         mock_gcmd.get_int = Mock(side_effect=[0, 50, 240])
         ace.commands.cmd_ACE_START_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].start_drying.called
 
     def test_cmd_ACE_START_DRYING_all(self, mock_gcmd, setup_mocks):
         """Test ACE_START_DRYING for all instances."""
         mock_gcmd.get_int = Mock(side_effect=[None, 50, 240])
         ace.commands.cmd_ACE_START_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].start_drying.called
 
     def test_cmd_ACE_STOP_DRYING_single(self, mock_gcmd, setup_mocks):
         """Test ACE_STOP_DRYING for single instance."""
         mock_gcmd.get_int = Mock(return_value=0)
         ace.commands.cmd_ACE_STOP_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].stop_drying.called
 
     def test_cmd_ACE_STOP_DRYING_all(self, mock_gcmd, setup_mocks):
         """Test ACE_STOP_DRYING for all instances."""
         mock_gcmd.get_int = Mock(return_value=None)
         ace.commands.cmd_ACE_STOP_DRYING(mock_gcmd)
-        assert ACE_INSTANCES[0].send_request.called
+        assert ACE_INSTANCES[0].stop_drying.called
 
 
 class TestDryingCommands:
@@ -1122,36 +1144,20 @@ class TestDryingCommands:
         assert ACE_INSTANCES[0]._dryer_start_logged is False
 
     def test_start_drying_sends_correct_request(self, mock_gcmd, setup_mocks):
-        """Test START_DRYING sends properly formatted request."""
+        """Test START_DRYING delegates temperature and duration to the instance."""
         mock_gcmd.get_int = Mock(side_effect=[0, 60, 300])
-        
-        captured_request = None
-        def capture_request(request, callback):
-            nonlocal captured_request
-            captured_request = request
-        
-        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_request)
+
         ace.commands.cmd_ACE_START_DRYING(mock_gcmd)
-        
-        assert captured_request is not None
-        assert captured_request["method"] == "drying"
-        assert captured_request["params"]["temp"] == 60
-        assert captured_request["params"]["duration"] == 300
+
+        ACE_INSTANCES[0].start_drying.assert_called_once_with(60, 300, ANY)
 
     def test_stop_drying_sends_correct_request(self, mock_gcmd, setup_mocks):
-        """Test STOP_DRYING sends properly formatted request."""
+        """Test STOP_DRYING delegates to the instance stop method."""
         mock_gcmd.get_int = Mock(return_value=0)
-        
-        captured_request = None
-        def capture_request(request, callback):
-            nonlocal captured_request
-            captured_request = request
-        
-        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_request)
+
         ace.commands.cmd_ACE_STOP_DRYING(mock_gcmd)
-        
-        assert captured_request is not None
-        assert captured_request["method"] == "drying_stop"
+
+        ACE_INSTANCES[0].stop_drying.assert_called_once_with(ANY)
 
 
     def test_cmd_ACE_ENABLE_FEED_ASSIST(self, mock_gcmd, setup_mocks):
@@ -1210,13 +1216,130 @@ class TestDryingCommands:
         ace.commands.cmd_ACE_ENDLESS_SPOOL_STATUS(mock_gcmd)
         assert mock_gcmd.respond_info.called
 
+    def test_cmd_ACE_TANGLE_DETECTION_query(self, mock_gcmd, setup_mocks):
+        """No ENABLE arg → respond with current state."""
+        monitor = Mock()
+        monitor._is_tangle_detection_active = Mock(return_value=True)
+        monitor.tangle_pump_time = 4.0
+        INSTANCE_MANAGERS[0].runout_monitor = monitor
+        mock_gcmd.get_int = Mock(return_value=None)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        assert mock_gcmd.respond_info.called
+        monitor.set_tangle_detection_enabled.assert_not_called()
+
+    def test_cmd_ACE_TANGLE_DETECTION_enable_no_pin(self, mock_gcmd, setup_mocks):
+        monitor = Mock()
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: d)
+        manager.gcode.run_script_from_command.reset_mock()
+        mock_gcmd.get_int = Mock(return_value=1)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        monitor.set_tangle_detection_enabled.assert_called_once_with(True)
+        # No pin → no SET_PIN emission
+        for c in manager.gcode.run_script_from_command.call_args_list:
+            assert "SET_PIN" not in str(c)
+
+    def test_cmd_ACE_TANGLE_DETECTION_disable_no_pin(self, mock_gcmd, setup_mocks):
+        monitor = Mock()
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: d)
+        manager.gcode.run_script_from_command.reset_mock()
+        mock_gcmd.get_int = Mock(return_value=0)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        monitor.set_tangle_detection_enabled.assert_called_once_with(False)
+
+    def test_cmd_ACE_TANGLE_DETECTION_with_pin_emits_SET_PIN(self, mock_gcmd, setup_mocks):
+        """When output_pin TANGLE_DETECTION exists, the slider gets flipped."""
+        monitor = Mock()
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        pin = Mock()
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: (
+            pin if n == "output_pin TANGLE_DETECTION" else d
+        ))
+        manager.gcode.run_script_from_command.reset_mock()
+        mock_gcmd.get_int = Mock(return_value=0)
+        ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
+        set_pin_calls = [
+            c for c in manager.gcode.run_script_from_command.call_args_list
+            if "SET_PIN PIN=TANGLE_DETECTION" in str(c)
+        ]
+        assert set_pin_calls, "expected SET_PIN emission to mirror slider"
+        assert "VALUE=0.0" in str(set_pin_calls[0])
+        monitor.set_tangle_detection_enabled.assert_called_once_with(False)
+
+    def test_cmd_ACE_TANGLE_DISABLE_AND_RESUME(self, mock_gcmd, setup_mocks):
+        """Prompt button helper: disables detection + runs RESUME."""
+        monitor = Mock()
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: d)
+        manager.gcode.run_script_from_command.reset_mock()
+        ace.commands.cmd__ACE_TANGLE_DISABLE_AND_RESUME(mock_gcmd)
+        monitor.set_tangle_detection_enabled.assert_called_once_with(False)
+        resume_calls = [
+            c for c in manager.gcode.run_script_from_command.call_args_list
+            if str(c) == "call('RESUME')"
+        ]
+        assert resume_calls, "expected RESUME to be issued"
+
+    def test_cmd_ACE_TANGLE_DISABLE_AND_RESUME_with_pin(self, mock_gcmd, setup_mocks):
+        """Prompt button must ALSO flip the slider so dashboard stays truthful."""
+        monitor = Mock()
+        manager = INSTANCE_MANAGERS[0]
+        manager.runout_monitor = monitor
+        pin = Mock()
+        manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: (
+            pin if n == "output_pin TANGLE_DETECTION" else d
+        ))
+        manager.gcode.run_script_from_command.reset_mock()
+        ace.commands.cmd__ACE_TANGLE_DISABLE_AND_RESUME(mock_gcmd)
+        calls = [str(c) for c in manager.gcode.run_script_from_command.call_args_list]
+        assert any("SET_PIN PIN=TANGLE_DETECTION" in c and "VALUE=0.0" in c
+                   for c in calls), "prompt button must lower the slider"
+        assert any(c == "call('RESUME')" for c in calls)
+
     def test_cmd_ACE_DEBUG(self, mock_gcmd, setup_mocks):
         """Test ACE_DEBUG command."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})
         mock_gcmd.get = Mock(side_effect=["get_status", "{}"])
         
         ace.commands.cmd_ACE_DEBUG(mock_gcmd)
+        ACE_INSTANCES[0].protocol.build_debug_request.assert_called_once_with(
+            "get_status", {}
+        )
         assert ACE_INSTANCES[0].send_request.called
+
+    def test_cmd_ACE_DEBUG_bytes_response(self, mock_gcmd, setup_mocks):
+        """Test ACE_DEBUG callback safely serializes bytes in response."""
+        mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})
+        mock_gcmd.get = Mock(side_effect=["get_status", "{}"])
+
+        captured_callback = None
+
+        def capture_callback(_request, callback):
+            nonlocal captured_callback
+            captured_callback = callback
+
+        ACE_INSTANCES[0].send_request = Mock(side_effect=capture_callback)
+
+        ace.commands.cmd_ACE_DEBUG(mock_gcmd)
+        assert captured_callback is not None
+
+        captured_callback({"raw_fields": {1: [(2, b"V1.1.24")]}})
+
+        assert mock_gcmd.respond_info.called
+        assert "Debug response:" in mock_gcmd.respond_info.call_args[0][0]
+
+    def test_protocol_catalog_contains_ace2_status_command(self, setup_mocks):
+        """Test the proto-derived ACE2 catalog exposes key operational commands."""
+        status_spec = ACE2_COMMANDS_BY_NAME["GET_STATUS"]
+
+        assert status_spec.code == 6
+        assert status_spec.tier == "operational"
+        assert status_spec.response_type == "StatusResponse"
 
     def test_cmd_ACE_SMART_UNLOAD(self, mock_gcmd, setup_mocks):
         """Test ACE_SMART_UNLOAD."""
@@ -2132,14 +2255,83 @@ class TestToolChangeIntegration:
             return default
         INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
 
+        # Path is clear after the unload (nothing stuck) -> active tool is cleared.
+        INSTANCE_MANAGERS[0].is_filament_path_free_instant = Mock(return_value=True)
+
         with patch('ace.commands.get_printer', return_value=mock_printer):
             with pytest.raises(Exception):
                 ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
 
-            # Idle/startup + bowden state: clear active tool.
+            # Idle/startup + bowden state + path clear: clear active tool.
             INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", -1)
             calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
             assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1" in c for c in calls)
+
+    def test_cmd_ACE_CHANGE_TOOL_failure_not_printing_blocked_path_marks_load_tool(self, mock_gcmd, setup_mocks):
+        """Idle/startup failure with a still-blocked path must mark the tool we
+        tried to LOAD as current (it is stuck in the path), not clear it to -1.
+
+        Scenario: T0 was unloaded successfully (filament_pos -> "bowden"), then
+        the T1 load failed leaving T1 stuck between RDM and toolhead. The path
+        sensors still report filament, so ace_current_index must become T1
+        (tool_index) so the next toolchange targets the correct slot via a
+        direct CASE-1 unload instead of cycling blindly through parked slots.
+        """
+        mock_gcmd.get_int = Mock(return_value=1)
+        mock_gcmd.error = Exception
+
+        # Mock printer objects
+        mock_printer = Mock()
+        mock_toolhead = Mock()
+        mock_kinematics = Mock()
+        mock_reactor = Mock()
+        mock_gcode = Mock()
+        mock_print_stats = Mock()
+
+        # Mock homed
+        mock_kinematics.get_status = Mock(return_value={'homed_axes': 'xyz'})
+        mock_toolhead.get_kinematics = Mock(return_value=mock_kinematics)
+        mock_reactor.monotonic = Mock(return_value=1.0)
+        mock_printer.get_reactor = Mock(return_value=mock_reactor)
+
+        # Mock print_stats to indicate NOT printing
+        mock_print_stats.get_status = Mock(return_value={'state': 'ready'})
+
+        def lookup_side_effect(obj, default=None):
+            if obj == 'toolhead':
+                return mock_toolhead
+            elif obj == 'gcode':
+                return mock_gcode
+            elif obj == 'print_stats':
+                return mock_print_stats
+            return default if default is not None else Mock()
+
+        mock_printer.lookup_object = Mock(side_effect=lookup_side_effect)
+
+        # Load of T1 fails after T0 was unloaded successfully.
+        INSTANCE_MANAGERS[0].perform_tool_change = Mock(side_effect=Exception("Load failed after unload"))
+
+        # State after the failed load: old tool (T0) still recorded as current,
+        # filament_pos reset to "bowden" by the successful T0 unload.
+        def state_get_side_effect(varname, default=None):
+            if varname == "ace_current_index":
+                return 0
+            if varname == "ace_filament_pos":
+                return "bowden"
+            return default
+        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
+
+        # Path is still blocked (e.g. RDM still triggered by the stuck T1).
+        INSTANCE_MANAGERS[0].is_filament_path_free_instant = Mock(return_value=False)
+
+        with patch('ace.commands.get_printer', return_value=mock_printer):
+            with pytest.raises(Exception):
+                ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, 1)
+
+            # The tool we tried to load (T1) is stuck -> it must be current, not -1.
+            INSTANCE_MANAGERS[0].state.set.assert_called_with("ace_current_index", 1)
+            calls = [call[0][0] for call in mock_gcode.run_script_from_command.call_args_list]
+            assert any("SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=1" in c for c in calls)
 
     def test_cmd_ACE_CHANGE_TOOL_failure_updates_state_before_dialog(self, mock_gcmd, setup_mocks):
         """Test that tool state is updated even when tool change fails during printing."""

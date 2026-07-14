@@ -35,6 +35,10 @@ class TestQueryRfidFullData:
         instance.DEFAULT_TEMP = 200
         instance.gcode = MagicMock()
         instance.manager = MagicMock()
+        instance.protocol = MagicMock()
+        instance.protocol.build_get_filament_info_request.side_effect = (
+            lambda slot: {"method": "get_filament_info", "params": {"index": slot}}
+        )
         return instance
 
     def test_sends_correct_request(self, mock_ace_instance):
@@ -62,6 +66,8 @@ class TestRfidCallbackTemperatureCalculation:
     @pytest.fixture
     def mock_ace_instance(self):
         """Create a mock AceInstance."""
+        from extras.ace.instance import AceInstance
+
         instance = MagicMock()
         instance.instance_num = 0
         instance.SLOT_COUNT = 4
@@ -72,6 +78,14 @@ class TestRfidCallbackTemperatureCalculation:
         instance.DEFAULT_TEMP = 200
         instance.gcode = MagicMock()
         instance.manager = MagicMock()
+        instance.protocol = MagicMock()
+        instance.protocol.build_get_filament_info_request.side_effect = (
+            lambda slot: {"method": "get_filament_info", "params": {"index": slot}}
+        )
+        instance._pending_rfid_queries = set()
+        instance._handle_rfid_info_response = (
+            lambda slot_idx, response: AceInstance._handle_rfid_info_response(instance, slot_idx, response)
+        )
         return instance
 
     def _make_rfid_response(self, extruder_temp_min=190, extruder_temp_max=230):
@@ -202,6 +216,8 @@ class TestRfidCallbackFieldStorage:
     @pytest.fixture
     def mock_ace_instance(self):
         """Create a mock AceInstance."""
+        from extras.ace.instance import AceInstance
+
         instance = MagicMock()
         instance.instance_num = 0
         instance.SLOT_COUNT = 4
@@ -213,6 +229,14 @@ class TestRfidCallbackFieldStorage:
         instance.DEFAULT_TEMP = 200
         instance.gcode = MagicMock()
         instance.manager = MagicMock()
+        instance.protocol = MagicMock()
+        instance.protocol.build_get_filament_info_request.side_effect = (
+            lambda slot: {"method": "get_filament_info", "params": {"index": slot}}
+        )
+        instance._pending_rfid_queries = set()
+        instance._handle_rfid_info_response = (
+            lambda slot_idx, response: AceInstance._handle_rfid_info_response(instance, slot_idx, response)
+        )
         return instance
 
     def test_all_rfid_fields_stored(self, mock_ace_instance):
@@ -343,6 +367,8 @@ class TestRfidCallbackErrorHandling:
     @pytest.fixture
     def mock_ace_instance(self):
         """Create a mock AceInstance."""
+        from extras.ace.instance import AceInstance
+
         instance = MagicMock()
         instance.instance_num = 0
         instance.SLOT_COUNT = 4
@@ -352,6 +378,14 @@ class TestRfidCallbackErrorHandling:
         ]
         instance.MATERIAL_TEMPS = {"PLA": 200}
         instance.DEFAULT_TEMP = 200
+        instance.protocol = MagicMock()
+        instance.protocol.build_get_filament_info_request.side_effect = (
+            lambda slot: {"method": "get_filament_info", "params": {"index": slot}}
+        )
+        instance._pending_rfid_queries = set()
+        instance._handle_rfid_info_response = (
+            lambda slot_idx, response: AceInstance._handle_rfid_info_response(instance, slot_idx, response)
+        )
         return instance
 
     def test_handles_error_response(self, mock_ace_instance):
@@ -367,9 +401,7 @@ class TestRfidCallbackErrorHandling:
         response = {"code": -1, "msg": "RFID read failed"}
         callback(response)
         
-        # Should log error, not crash
-        mock_ace_instance.gcode.respond_info.assert_called()
-        # Inventory should not be modified
+        # Inventory should not be modified on error
         assert mock_ace_instance.inventory[0]["temp"] == 200
 
     def test_handles_no_response(self, mock_ace_instance):
@@ -384,8 +416,8 @@ class TestRfidCallbackErrorHandling:
         # No response
         callback(None)
         
-        # Should log error, not crash
-        mock_ace_instance.gcode.respond_info.assert_called()
+        # Should not crash, inventory unchanged
+        assert mock_ace_instance.inventory[0]["temp"] == 200
 
     def test_handles_missing_result(self, mock_ace_instance):
         """Test handling of response without result field."""

@@ -7,12 +7,15 @@ import pytest
 from ace.config import (
     AceSlotStateMachineState,
     ACE_SLOT_STATE_MACHINE_STATE_BY_CODE,
+    CHOICE_OVERRIDABLE_PARAMS,
     get_tool_offset,
     get_instance_from_tool,
     get_local_slot,
     normalize_ace_slot_state,
+    parse_instance_baud_config,
     parse_instance_number,
     parse_instance_config,
+    parse_instance_choice_config,
     create_empty_inventory_slot,
     create_inventory,
     SLOTS_PER_ACE,
@@ -442,6 +445,49 @@ class TestOverridableParams:
         for param in OVERRIDABLE_PARAMS:
             assert isinstance(param, str)
             assert len(param) > 0
+
+    def test_protocol_is_choice_overridable(self):
+        """Protocol should be overridable with string-valued config syntax."""
+        assert "protocol" in CHOICE_OVERRIDABLE_PARAMS
+
+
+class TestParseInstanceChoiceConfig:
+    """Test string-based per-instance configuration parsing."""
+
+    def test_simple_choice_value(self):
+        """Simple string values should apply to all instances."""
+        assert parse_instance_choice_config("auto", 0, "protocol") == "auto"
+        assert parse_instance_choice_config("ace1_json", 2, "protocol") == "ace1_json"
+
+    def test_choice_with_override(self):
+        """Instance-specific overrides should replace the global default."""
+        config = "auto,1:ace1_json"
+        assert parse_instance_choice_config(config, 0, "protocol") == "auto"
+        assert parse_instance_choice_config(config, 1, "protocol") == "ace1_json"
+
+    def test_missing_choice_without_default_raises(self):
+        """Missing instance values without a default should fail."""
+        with pytest.raises(ValueError, match="No value found for instance 2"):
+            parse_instance_choice_config("0:auto,1:ace1_json", 2, "protocol")
+
+
+class TestParseInstanceBaudConfig:
+    """Test per-instance baud resolution for mixed protocol setups."""
+
+    def test_explicit_baud_value(self):
+        """Explicit numeric baud should be returned as an integer."""
+        assert parse_instance_baud_config("115200", 0, "ace1_json") == 115200
+
+    def test_auto_baud_uses_protocol_default(self):
+        """Auto baud should map to the protocol-specific default."""
+        assert parse_instance_baud_config("auto", 0, "ace1_json") == 115200
+        assert parse_instance_baud_config("auto", 0, "ace2_proto") == 230400
+
+    def test_baud_override_can_mix_protocol_defaults(self):
+        """Per-instance baud overrides should support mixed ACE1 and ACE2 chains."""
+        config = "auto,1:230400"
+        assert parse_instance_baud_config(config, 0, "ace1_json") == 115200
+        assert parse_instance_baud_config(config, 1, "ace2_proto") == 230400
 
 
 class TestGetAceInstanceAndSlot:

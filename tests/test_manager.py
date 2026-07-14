@@ -342,12 +342,13 @@ class TestHandleReady(unittest.TestCase):
         self.mock_config.get.side_effect = get
         self.mock_config.getboolean.side_effect = getboolean
 
-    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled):
+    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled, **kwargs):
         inst = Mock()
         inst.instance_num = instance_num
         inst.SLOT_COUNT = SLOTS_PER_ACE
         inst.tool_offset = instance_num * SLOTS_PER_ACE
-        inst.serial_mgr = Mock(connect_to_ace=Mock(), disconnect=Mock())
+        inst.baud = instance_config["baud"]
+        inst.serial_mgr = kwargs.get("serial_mgr", Mock(connect_to_ace=Mock(), disconnect=Mock()))
         inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
         inst.filament_runout_sensor_name_rdm = "return_module"
         return inst
@@ -371,6 +372,16 @@ class TestHandleReady(unittest.TestCase):
         manager._setup_sensors.assert_called_once()
         manager._start_monitoring.assert_called_once()
 
+    def test_enabled_path_uses_instance_specific_baud(self):
+        manager = self._build_manager()
+        manager.instances[0].baud = 230400
+        manager._setup_sensors = Mock()
+        manager._start_monitoring = Mock()
+
+        manager._handle_ready()
+
+        manager.instances[0].serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
+
     def test_disabled_path_skips_connections(self):
         self.variables["ace_global_enabled"] = False
         manager = self._build_manager()
@@ -384,6 +395,353 @@ class TestHandleReady(unittest.TestCase):
         manager._setup_sensors.assert_not_called()
         manager._start_monitoring.assert_called_once()
 
+
+class TestSharedAce2Transport(unittest.TestCase):
+    """Coverage for ACE2 shared-bus transport ownership in AceManager."""
+
+    def setUp(self):
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+
+        self.mock_config = Mock()
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+        self.mock_toolhead = Mock()
+        self.created_serial_managers = []
+
+        self.mock_config.get_printer.return_value = self.mock_printer
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_reactor.monotonic.return_value = 0.0
+        self.mock_reactor.register_timer = Mock(return_value=None)
+        self.mock_reactor.pause = Mock()
+
+        self.variables = {
+            "ace_global_enabled": True,
+            "ace_current_index": -1,
+            "ace_filament_pos": FILAMENT_STATE_BOWDEN,
+        }
+        self.mock_save_vars.allVariables = self.variables
+
+        def lookup(name, default=None):
+            if name == "gcode":
+                return self.mock_gcode
+            if name == "save_variables":
+                return self.mock_save_vars
+            if name == "toolhead":
+                return self.mock_toolhead
+            if name == "output_pin ACE_Pro":
+                pin = Mock()
+                pin.get_status = Mock(return_value={"value": 1})
+                return pin
+            return default
+
+        self.mock_printer.lookup_object.side_effect = lookup
+
+        def getint(key, default=None):
+            vals = {"ace_count": 2}
+            val = vals.get(key, default)
+            return int(val) if val is not None else default
+
+        def getfloat(key, default=None):
+            val = {"purge_multiplier": "1.0"}.get(key, default)
+            return float(val) if val is not None else default
+
+        def get(key, default=None):
+            return {
+                "filament_runout_sensor_name_rdm": "return_module",
+                "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+                "protocol": "ace2",
+                "baud": "auto",
+            }.get(key, default)
+
+        def getboolean(key, default=None):
+            return {
+                "feed_assist_active_after_ace_connect": True,
+                "rfid_inventory_sync_enabled": True,
+                "ace_connection_supervision": True,
+                "moonraker_lane_sync_enabled": False,
+            }.get(key, default if default is not None else False)
+
+        self.mock_config.getint.side_effect = getint
+        self.mock_config.getfloat.side_effect = getfloat
+        self.mock_config.get.side_effect = get
+        self.mock_config.getboolean.side_effect = getboolean
+
+    def _serial_manager_factory(self, *args, **kwargs):
+        serial_mgr = Mock(connect_to_ace=Mock(), disconnect=Mock(), send_high_prio_request=Mock())
+        serial_mgr._port = "/dev/ttyUSB0"
+        serial_mgr.protocol = kwargs.get("protocol")
+        serial_mgr.ensure_connect_timer = Mock()
+        serial_mgr.is_connected = Mock(return_value=False)
+        serial_mgr.get_connection_status = Mock(return_value={"last_connected_time": 0.0})
+        self.created_serial_managers.append(serial_mgr)
+        return serial_mgr
+
+    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled, **kwargs):
+        inst = Mock()
+        inst.instance_num = instance_num
+        inst.SLOT_COUNT = SLOTS_PER_ACE
+        inst.tool_offset = instance_num * SLOTS_PER_ACE
+        inst.baud = instance_config["baud"]
+        inst.serial_mgr = kwargs.get("serial_mgr")
+        inst.bus_session = kwargs.get("bus_session")
+        inst.protocol = kwargs.get("protocol")
+        inst.rfid_inventory_sync_enabled = True
+        inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        inst.filament_runout_sensor_name_rdm = "return_module"
+        return inst
+
+    def _build_manager(self):
+        with patch("ace.manager.AceInstance", side_effect=self._instance_factory), \
+             patch("ace.manager.AceSerialManager", side_effect=self._serial_manager_factory), \
+             patch("ace.manager.EndlessSpool"), \
+             patch("ace.manager.RunoutMonitor"):
+            return AceManager(self.mock_config, dummy_ace_count=2)
+
+    def test_manager_reuses_shared_transport_for_ace2_instances(self):
+        manager = self._build_manager()
+
+        self.assertEqual(len(self.created_serial_managers), 1)
+        self.assertIs(manager.instances[0].serial_mgr, manager.instances[1].serial_mgr)
+        self.assertIs(manager.instances[0].bus_session, manager.instances[1].bus_session)
+        self.assertEqual(manager.instances[0].baud, 230400)
+        self.assertEqual(manager.instances[1].baud, 230400)
+
+    def test_handle_ready_connects_shared_transport_once(self):
+        manager = self._build_manager()
+        manager._setup_sensors = Mock()
+        manager._start_monitoring = Mock()
+        manager._initialize_shared_bus_transport = Mock()
+        manager._queue_shared_bus_instance_setup = Mock()
+        manager._start_shared_bus_runtime = Mock()
+
+        manager._handle_ready()
+
+        shared_serial_mgr = manager.instances[0].serial_mgr
+        shared_serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
+        self.assertEqual(manager.instances[0].bus_session.port, "/dev/ttyUSB0")
+        manager._initialize_shared_bus_transport.assert_not_called()
+        manager._queue_shared_bus_instance_setup.assert_not_called()
+        manager._start_shared_bus_runtime.assert_not_called()
+        manager._setup_sensors.assert_called_once()
+        manager._start_monitoring.assert_called_once()
+
+    def test_initialize_shared_bus_transport_discovers_and_assigns_devices(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"code": 0, "msg": "SUCCESS"},
+            {"code": 0, "msg": "SUCCESS"},
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        manager._initialize_shared_bus_transport(manager.instances[0])
+
+        requests = [call_args[0][0] for call_args in shared_serial_mgr.send_high_prio_request.call_args_list]
+        assert requests == [
+            {"command": "DISCOVER_DEVICE", "params": {}},
+            {"command": "DISCOVER_DEVICE", "params": {}},
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 11, "uid2": 22, "uid3": 33, "device_id": 1},
+            },
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 44, "uid2": 55, "uid3": 66, "device_id": 2},
+            },
+        ]
+
+        device0 = manager.instances[0].bus_session.get_device_for_instance(0)
+        device1 = manager.instances[0].bus_session.get_device_for_instance(1)
+        assert device0.identity.uid_tuple == (11, 22, 33)
+        assert device0.device_id == 1
+        assert device1.identity.uid_tuple == (44, 55, 66)
+        assert device1.device_id == 2
+        assert self.variables["ace2_bus_bindings_0_1"] == {
+            0: (11, 22, 33),
+            1: (44, 55, 66),
+        }
+
+    def test_initialize_shared_bus_transport_restores_persisted_binding_order(self):
+        self.variables["ace2_bus_bindings_0_1"] = {
+            "0": [44, 55, 66],
+            "1": [11, 22, 33],
+        }
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"code": 0, "msg": "SUCCESS"},
+            {"code": 0, "msg": "SUCCESS"},
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        manager._initialize_shared_bus_transport(manager.instances[0])
+
+        requests = [call_args[0][0] for call_args in shared_serial_mgr.send_high_prio_request.call_args_list]
+        assert requests[2:] == [
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 44, "uid2": 55, "uid3": 66, "device_id": 1},
+            },
+            {
+                "command": "ASSIGN_DEVICE_ID",
+                "params": {"uid1": 11, "uid2": 22, "uid3": 33, "device_id": 2},
+            },
+        ]
+
+        device0 = manager.instances[0].bus_session.get_device_for_instance(0)
+        device1 = manager.instances[0].bus_session.get_device_for_instance(1)
+        assert device0.identity.uid_tuple == (44, 55, 66)
+        assert device1.identity.uid_tuple == (11, 22, 33)
+
+    def test_initialize_shared_bus_transport_logs_when_discovery_finds_no_devices(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        shared_serial_mgr.send_high_prio_request.side_effect = (
+            lambda request, callback: callback(None)
+        )
+
+        ready_count = manager._initialize_shared_bus_transport(manager.instances[0])
+
+        self.mock_gcode.respond_info.assert_any_call(
+            "ACE[0]: ACE2 discovery returned no devices on shared bus"
+        )
+        self.assertEqual(ready_count, 0)
+
+    def test_send_shared_bus_request_times_out_when_callback_never_fires(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+        shared_serial_mgr.send_high_prio_request.side_effect = lambda request, callback: None
+
+        response = manager._send_shared_bus_request(
+            manager.instances[0],
+            {"command": "DISCOVER_DEVICE", "params": {}},
+            timeout_s=0.01,
+        )
+
+        assert response is None
+        assert self.mock_reactor.pause.called
+
+    def test_initialize_shared_bus_transport_discards_stale_runtime_devices_before_restore(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+        bus_session.bind_logical_instance(0, 99, 99, 99)
+        self.variables["ace2_bus_bindings_0_1"] = {
+            0: (11, 22, 33),
+            1: (44, 55, 66),
+        }
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        responses = iter([
+            {"result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            {"result": {"uid1": 44, "uid2": 55, "uid3": 66}},
+            {"code": 0, "msg": "SUCCESS"},
+            {"code": 0, "msg": "SUCCESS"},
+        ])
+
+        def send_high_prio_request(request, callback):
+            callback(next(responses))
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        manager._initialize_shared_bus_transport(manager.instances[0])
+
+        discovered = [device.identity.uid_tuple for device in bus_session.iter_discovered_devices()]
+        assert discovered == [(11, 22, 33), (44, 55, 66)]
+
+    def test_monitor_transport_reconnects_calls_ensure_connect_timer_once_per_transport(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        manager._monitor_transport_reconnects()
+
+        shared_serial_mgr.ensure_connect_timer.assert_called_once_with()
+
+    def test_monitor_transport_reconnects_reinitializes_once_per_connection_generation(self):
+        manager = self._build_manager()
+        shared_serial_mgr = manager.instances[0].serial_mgr
+        bus_session = manager.instances[0].bus_session
+        manager._on_shared_bus_connected = Mock()
+
+        shared_serial_mgr.is_connected.return_value = True
+        shared_serial_mgr.get_connection_status.return_value = {"last_connected_time": 12.0}
+
+        manager._monitor_transport_reconnects()
+        manager._monitor_transport_reconnects()
+
+        manager._on_shared_bus_connected.assert_called_once_with(bus_session)
+
+        shared_serial_mgr.get_connection_status.return_value = {"last_connected_time": 13.0}
+        manager._monitor_transport_reconnects()
+
+        self.assertEqual(manager._on_shared_bus_connected.call_count, 2)
+
+    def test_queue_shared_bus_instance_setup_enqueues_expected_requests(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 1)
+        bus_session.bind_logical_instance(1, 44, 55, 66)
+        bus_session.assign_device_id(44, 55, 66, 2)
+
+        manager._queue_shared_bus_instance_setup(bus_session)
+
+        instance0_calls = manager.instances[0].send_high_prio_request.call_args_list
+        instance1_calls = manager.instances[1].send_high_prio_request.call_args_list
+        self.assertEqual(len(instance0_calls), 3)
+        self.assertEqual(len(instance1_calls), 3)
+
+        for calls in (instance0_calls, instance1_calls):
+            request0 = calls[0][0][0]
+            request1 = calls[1][0][0]
+            request2 = calls[2][0][0]
+            self.assertEqual(
+                request0,
+                {"command": "SET_RFID_ENABLE", "params": {"index": 0, "enable": True}},
+            )
+            self.assertEqual(
+                request1,
+                {"command": "SET_RFID_ENABLE", "params": {"index": 2, "enable": True}},
+            )
+            self.assertEqual(
+                request2,
+                {
+                    "command": "SET_FEED_CHECK",
+                    "params": {"check_length": 110, "error_length": 100},
+                },
+            )
+
+    def test_on_shared_bus_connected_schedules_retry_when_no_devices_discovered(self):
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+
+        manager._initialize_shared_bus_transport = Mock(return_value=0)
+        manager._queue_shared_bus_instance_setup = Mock()
+        manager._start_shared_bus_runtime = Mock()
+
+        manager._on_shared_bus_connected(bus_session)
+
+        manager._queue_shared_bus_instance_setup.assert_not_called()
+        manager._start_shared_bus_runtime.assert_not_called()
+        self.assertIn(id(bus_session), manager._shared_bus_retry_timers)
 
 class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
     """Coverage for prepare_toolhead_for_filament_retraction."""
@@ -456,7 +814,7 @@ class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
         self.mock_config.get.side_effect = get
         self.mock_config.getboolean.side_effect = getboolean
 
-    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled):
+    def _instance_factory(self, instance_num, instance_config, printer, ace_enabled, **kwargs):
         inst = Mock()
         inst.instance_num = instance_num
         inst.SLOT_COUNT = SLOTS_PER_ACE
@@ -800,8 +1158,25 @@ class TestConfigResolution(unittest.TestCase):
         self.assertIsInstance(resolved_inst0['retract_speed'], (int, float))
         self.assertIsInstance(resolved_inst1['retract_speed'], (int, float))
         
-        # Non-overridable params should be same
+        # Default baud stays identical when no per-instance override is configured
         self.assertEqual(resolved_inst0['baud'], resolved_inst1['baud'])
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_resolve_instance_config_auto_baud_defaults_for_mixed_protocols(self, mock_endless_spool, mock_ace_instance):
+        """Omitted baud should use protocol-aware defaults in mixed ACE1+ACE2 mode."""
+        manager = AceManager(self.mock_config)
+        manager._get_available_port_descriptions = Mock(
+            return_value=["ACE", "USB Single Serial"]
+        )
+
+        resolved_inst0 = manager._resolve_instance_config(0)
+        resolved_inst1 = manager._resolve_instance_config(1)
+
+        self.assertEqual(resolved_inst0['active_protocol_name'], 'ace1_json')
+        self.assertEqual(resolved_inst1['active_protocol_name'], 'ace2_proto')
+        self.assertEqual(resolved_inst0['baud'], 115200)
+        self.assertEqual(resolved_inst1['baud'], 230400)
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -813,8 +1188,7 @@ class TestConfigResolution(unittest.TestCase):
         resolved_inst1 = manager._resolve_instance_config(1)
         
         # Singleton params should be identical (not instance-specific)
-        # Note: baud is stored as int, ace_count as int, others might be strings or numbers
-        singleton_params = ['baud', 'ace_count', 'parkposition_to_toolhead_length']
+        singleton_params = ['ace_count', 'parkposition_to_toolhead_length']
         for param in singleton_params:
             if param in resolved_inst0 and param in resolved_inst1:
                 self.assertEqual(resolved_inst0[param], resolved_inst1[param],
@@ -840,7 +1214,7 @@ class TestConfigResolution(unittest.TestCase):
             # Set different values for each overridable param
             overrides = {
                 'serial': '/dev/ttyACM0,/dev/ttyACM1',
-                'baud': '115200',
+                'baud': '115200,1:230400',
                 'feed_speed': '60,1:80',  # Instance 1 faster
                 'retract_speed': '50,1:45',  # Instance 1 slower
                 'total_max_feeding_length': '1000,1:1200',
@@ -870,6 +1244,7 @@ class TestConfigResolution(unittest.TestCase):
         
         # Verify all overridable params were resolved
         expected_inst0 = {
+            'baud': 115200,
             'feed_speed': 60,
             'retract_speed': 50,
             'total_max_feeding_length': 1000,
@@ -881,6 +1256,7 @@ class TestConfigResolution(unittest.TestCase):
         }
         
         expected_inst1 = {
+            'baud': 230400,
             'feed_speed': 80,
             'retract_speed': 45,
             'total_max_feeding_length': 1200,
@@ -1507,9 +1883,137 @@ class TestPerformToolChange(unittest.TestCase):
             manager.check_and_wait_for_spool_ready = Mock(return_value=True)
             
             result = manager.perform_tool_change(current_tool=-1, target_tool=1)
-            
+
             # Should have called smart_unload to clear path
             manager.smart_unload.assert_called_once()
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_plausibility_unload_heats_cold_nozzle_before_smart_unload(self, mock_endless_spool, mock_ace_instance):
+        """Bug 1: when the plausibility-mismatch path unloads with the toolhead
+        sensor triggered, the cold-nozzle guard must run BEFORE smart_unload, so
+        the extruder moves it performs do not hit 'Extrude below minimum temp'."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        # Toolhead triggered + state 'bowden' -> plausibility mismatch fires.
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
+
+        call_order = []
+        manager._ensure_hot_for_recovery_unload = Mock(
+            side_effect=lambda *a, **k: call_order.append('heat'))
+
+        def fake_unload(*a, **k):
+            call_order.append('unload')
+            return True
+        manager.smart_unload = Mock(side_effect=fake_unload)
+
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {1: {'status': 'loaded', 'temp': 0}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 1)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+
+            manager.perform_tool_change(current_tool=3, target_tool=1)
+
+        manager._ensure_hot_for_recovery_unload.assert_called_once()
+        manager.smart_unload.assert_called_once()
+        # The heat guard must run before the unload.
+        self.assertEqual(call_order[:2], ['heat', 'unload'])
+
+    def _inject_extruder(self, manager, cur_temp, min_temp=170.0):
+        """Make printer.lookup_object('extruder') return a heater at cur_temp."""
+        heater = Mock()
+        heater.get_temp = Mock(return_value=(cur_temp, cur_temp))
+        heater.min_extrude_temp = min_temp
+        extruder = Mock()
+        extruder.get_heater = Mock(return_value=heater)
+        orig = self._mock_lookup_object
+        manager.printer.lookup_object = Mock(
+            side_effect=lambda name, default=None: extruder if name == 'extruder' else orig(name, default))
+        return extruder
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_plausibility_unload_heats_when_only_rdm_triggered_and_cold(self, mock_endless_spool, mock_ace_instance):
+        """Hardware regression: a failed load that times out before the toolhead
+        leaves RDM triggered but the toolhead CLEAR.  The cold-nozzle guard is no
+        longer gated on the toolhead sensor, so it must still fire and heat the
+        nozzle BEFORE smart_unload runs (otherwise the recovery unload crashes
+        with 'Extrude below minimum temp')."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        # Toolhead CLEAR, only RDM triggered -> the real-world failure mode.
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: True}
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+
+        # Cold nozzle (144 < 170) seen by both the recovery guard and load guard.
+        self._inject_extruder(manager, cur_temp=144.0, min_temp=170.0)
+
+        timeline = []
+        self.mock_gcode.run_script_from_command = Mock(
+            side_effect=lambda cmd, *a, **k: timeline.append(cmd))
+        manager.smart_unload = Mock(
+            side_effect=lambda *a, **k: timeline.append("SMART_UNLOAD") or True)
+
+        def fake_get_ace(tool, *a, **k):
+            inst = Mock()
+            inst.instance_num = 0
+            temp = {3: 250, 0: 240}.get(tool, 0)
+            inst.inventory = {tool: {'status': 'ready', 'temp': temp}}
+            inst._feed_filament_into_toolhead = Mock(return_value=5.0)
+            inst._enable_feed_assist = Mock()
+            return (inst, tool)
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool', side_effect=fake_get_ace):
+            manager.perform_tool_change(current_tool=3, target_tool=0)
+
+        # Recovery heat uses the stuck tool's (T3) material temp = 250 ...
+        self.assertIn("M109 S250", timeline)
+        self.assertIn("SMART_UNLOAD", timeline)
+        # ... and must be issued BEFORE the unload.
+        self.assertLess(timeline.index("M109 S250"), timeline.index("SMART_UNLOAD"))
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_plausibility_unload_skips_heat_when_only_rdm_triggered_and_hot(self, mock_endless_spool, mock_ace_instance):
+        """Same RDM-only scenario but with a hot nozzle: the guard is a no-op,
+        no M109 is issued and smart_unload runs straight away."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: True}
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+
+        # Hot nozzle (250 >= 170).
+        self._inject_extruder(manager, cur_temp=250.0, min_temp=170.0)
+
+        timeline = []
+        self.mock_gcode.run_script_from_command = Mock(
+            side_effect=lambda cmd, *a, **k: timeline.append(cmd))
+        manager.smart_unload = Mock(
+            side_effect=lambda *a, **k: timeline.append("SMART_UNLOAD") or True)
+
+        def fake_get_ace(tool, *a, **k):
+            inst = Mock()
+            inst.instance_num = 0
+            inst.inventory = {tool: {'status': 'ready', 'temp': 240}}
+            inst._feed_filament_into_toolhead = Mock(return_value=5.0)
+            inst._enable_feed_assist = Mock()
+            return (inst, tool)
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool', side_effect=fake_get_ace):
+            manager.perform_tool_change(current_tool=3, target_tool=0)
+
+        self.assertIn("SMART_UNLOAD", timeline)
+        self.assertEqual([c for c in timeline if "M109" in c], [],
+                         "Hot nozzle must not trigger any M109")
+
 #TODO: SPLITTER
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -1597,8 +2101,9 @@ class TestPerformToolChange(unittest.TestCase):
             
             result = manager.perform_tool_change(current_tool=1, target_tool=2)
             
-            # Should have called smart_unload for current tool
-            manager.smart_unload.assert_called_with(tool_index=1)
+            # Should have called smart_unload for current tool with keep_heater=True
+            # (heater stays on during toolchange so new filament can load immediately)
+            manager.smart_unload.assert_called_with(tool_index=1, keep_heater=True)
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -1673,8 +2178,9 @@ class TestPerformToolChange(unittest.TestCase):
         
         result = manager.perform_tool_change(current_tool=1, target_tool=-1)
         
-        # Should have unloaded but not loaded
-        manager.smart_unload.assert_called_once_with(tool_index=1)
+        # Should have unloaded but not loaded — keep_heater=True because
+        # perform_tool_change always passes it (POST macro handles heater shutdown)
+        manager.smart_unload.assert_called_once_with(tool_index=1, keep_heater=True)
         self.assertEqual(self.variables['ace_current_index'], -1)
         self.assertIn("Unloaded", result)
 
@@ -1703,7 +2209,8 @@ class TestPerformToolChange(unittest.TestCase):
             
             # Should have loaded new tool
             mock_instance._feed_filament_into_toolhead.assert_called_once()
-            mock_instance._enable_feed_assist.assert_called_once_with(2)
+            # _enable_feed_assist is now called inside _feed_filament_into_toolhead, not in manager.py
+            mock_instance._enable_feed_assist.assert_not_called()
             self.assertEqual(self.variables['ace_current_index'], 2)
             # Should have passed purged amount to POST macro (note: values are floats with .0)
             self.mock_gcode.run_script_from_command.assert_any_call(
@@ -2562,12 +3069,11 @@ class TestSmartUnload(unittest.TestCase):
                          "Safety retract length should be parkposition_to_rdm_length when RDM is present")
         manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    def test_known_tool_toolhead_clear_rdm_triggered_full_retract(self):
-        """Toolhead clear but RDM still triggered: fall through to full parkposition_to_toolhead_length retract.
-
-        Covers the case where the toolhead sensor clears (e.g. filament tip
-        passed back past the toolhead sensor) but the RDM sensor still detects
-        filament in the bowden tube.  Full retract length required.
+    def test_known_tool_toolhead_clear_rdm_triggered_uses_rdm_monitoring(self):
+        """Toolhead clear but RDM still triggered: with an RDM sensor the unload
+        must be RDM-monitored (rmd_triggered_unload_slot) so it stops as soon as
+        the path clears, instead of blindly retracting the full toolhead length
+        (which can pull a parked slot back over the ACE entry sensor).
         """
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
@@ -2576,21 +3082,113 @@ class TestSmartUnload(unittest.TestCase):
             slot["status"] = "ready"
         # Toolhead clear
         manager.get_instant_switch_state = Mock(return_value=False)
-        # First call: RDM still triggered → path NOT fully free → do full retract
+        # First call: RDM still triggered → path NOT fully free → monitored retract
         # Second call: post-retract validation → path is now free
         manager.is_filament_path_free_instant = Mock(side_effect=[False, True])
         manager.has_rdm_sensor = Mock(return_value=True)
+        instance.rdm_overshoot_length = 50.0
+        instance.rmd_triggered_unload_slot = Mock(return_value=True)
 
         result = manager.smart_unload(tool_index=1, prepare_toolhead=False)
 
         self.assertTrue(result)
-        # Must use the full toolhead distance, NOT the short RDM-only safety length
+        # RDM present → must monitor the RDM during retraction, not blind-retract.
+        instance._smart_unload_slot.assert_not_called()
+        instance.rmd_triggered_unload_slot.assert_called_once()
+        args, kwargs = instance.rmd_triggered_unload_slot.call_args
+        # manager passed as first positional arg (for sensor access)
+        self.assertIs(args[0], manager)
+        # safety cap = full park-to-toolhead distance, plus configured overshoot
+        self.assertEqual(kwargs.get("length"), instance.parkposition_to_toolhead_length)
+        self.assertEqual(kwargs.get("overshoot_length"), instance.rdm_overshoot_length)
+        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+    def test_known_tool_toolhead_clear_rdm_triggered_no_rdm_uses_fixed_retract(self):
+        """Without an RDM sensor there is nothing to monitor between ACE and
+        toolhead, so a fixed-length _smart_unload_slot retract remains the
+        fallback for the toolhead-clear/path-blocked case.
+        """
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        manager.get_instant_switch_state = Mock(return_value=False)
+        # Path not free, then free after retract.
+        manager.is_filament_path_free_instant = Mock(side_effect=[False, True])
+        manager.has_rdm_sensor = Mock(return_value=False)
+        instance.rmd_triggered_unload_slot = Mock(return_value=True)
+
+        result = manager.smart_unload(tool_index=1, prepare_toolhead=False)
+
+        self.assertTrue(result)
+        instance.rmd_triggered_unload_slot.assert_not_called()
         args, kwargs = instance._smart_unload_slot.call_args
         actual_length = kwargs.get("length", args[1] if len(args) > 1 else None)
-        expected_length = instance.parkposition_to_toolhead_length  # 500 in test setup
-        self.assertEqual(actual_length, expected_length,
-                         "Full retract length required when RDM sensor is still triggered")
+        self.assertEqual(actual_length, instance.parkposition_to_toolhead_length)
         manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+    # ----- Bug 1: cold-nozzle guard for recovery (plausibility) unloads -----
+
+    def _make_extruder(self, cur_temp, min_temp=170.0):
+        """Build a mock extruder whose heater reports the given temperatures."""
+        heater = Mock()
+        heater.get_temp = Mock(return_value=(cur_temp, cur_temp))
+        heater.min_extrude_temp = min_temp
+        extruder = Mock()
+        extruder.get_heater = Mock(return_value=heater)
+        return extruder
+
+    def _manager_with_extruder(self, extruder):
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.reactor = Mock()
+        manager.reactor.monotonic = Mock(return_value=0.0)
+        manager.gcode = Mock()
+        manager.printer = Mock()
+        manager.printer.lookup_object = Mock(return_value=extruder)
+        return manager
+
+    def _m109_calls(self, manager):
+        return [
+            c[0][0] for c in manager.gcode.run_script_from_command.call_args_list
+            if "M109" in c[0][0]
+        ]
+
+    def test_recovery_heat_skipped_when_already_hot(self):
+        """No M109 when the nozzle is already at/above min_extrude_temp."""
+        manager = self._manager_with_extruder(self._make_extruder(250.0, min_temp=170.0))
+        manager._ensure_hot_for_recovery_unload(current_tool=-1, target_temp=240)
+        self.assertEqual(self._m109_calls(manager), [])
+
+    def test_recovery_heat_uses_target_temp_when_cold(self):
+        """Cold nozzle + unknown current tool -> heat to the target temp."""
+        manager = self._manager_with_extruder(self._make_extruder(20.0, min_temp=170.0))
+        manager._ensure_hot_for_recovery_unload(current_tool=-1, target_temp=240)
+        self.assertIn("M109 S240", self._m109_calls(manager))
+
+    def test_recovery_heat_falls_back_to_min_extrude_temp(self):
+        """Cold nozzle with no tool/target temp -> clear the cold-extrude guard
+        by heating to min_extrude_temp instead of crashing."""
+        manager = self._manager_with_extruder(self._make_extruder(20.0, min_temp=185.0))
+        manager._ensure_hot_for_recovery_unload(current_tool=-1, target_temp=0)
+        self.assertIn("M109 S185", self._m109_calls(manager))
+
+    def test_recovery_heat_prefers_current_tool_inventory_temp(self):
+        """The stuck filament is the current tool's material -> prefer its
+        inventory temp over the incoming target temp."""
+        manager = self._manager_with_extruder(self._make_extruder(20.0, min_temp=170.0))
+        cur_ace = Mock()
+        cur_ace.inventory = [{"temp": 0}, {"temp": 230}, {"temp": 0}, {"temp": 0}]
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool', return_value=(cur_ace, 1)):
+            manager._ensure_hot_for_recovery_unload(current_tool=1, target_temp=240)
+        self.assertIn("M109 S230", self._m109_calls(manager))
+
+    def test_recovery_heat_noop_without_extruder(self):
+        """No extruder object -> guard is a safe no-op (no crash, no M109)."""
+        manager = self._manager_with_extruder(None)
+        manager._ensure_hot_for_recovery_unload(current_tool=-1, target_temp=240)
+        self.assertEqual(self._m109_calls(manager), [])
 
     def test_known_tool_empty_slot_raises(self):
         instance = self._make_instance()
@@ -2621,6 +3219,59 @@ class TestSmartUnload(unittest.TestCase):
         self.assertTrue(result)
         instance._smart_unload_slot.assert_called_once()
         manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+
+    def test_keep_heater_false_turns_off_heater(self):
+        """When keep_heater=False (standalone unload), heater is turned off."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager.get_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager._turn_off_heater_if_idle = Mock()
+
+        result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=False)
+
+        self.assertTrue(result)
+        manager._turn_off_heater_if_idle.assert_called_once()
+
+    def test_keep_heater_true_preserves_heater(self):
+        """When keep_heater=True (toolchange), heater stays on for next load."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager.get_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager._turn_off_heater_if_idle = Mock()
+
+        result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=True)
+
+        self.assertTrue(result)
+        manager._turn_off_heater_if_idle.assert_not_called()
+
+    def test_keep_heater_true_sensor_triggered_path(self):
+        """keep_heater=True also works on sensor-triggered coordinated retraction path."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        for slot in manager.instances[0].inventory:
+            slot["status"] = "ready"
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager.get_switch_state = Mock(return_value=True)
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager._extruder_move = Mock()
+        manager._wait_toolhead_move_finished = Mock()
+        manager._turn_off_heater_if_idle = Mock()
+
+        result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=True)
+
+        self.assertTrue(result)
+        manager._turn_off_heater_if_idle.assert_not_called()
 
     def test_known_tool_invalid_instance_raises(self):
         instance = self._make_instance()
@@ -2683,6 +3334,153 @@ class TestSmartUnload(unittest.TestCase):
 
         with self.assertRaises(Exception):
             manager.smart_unload(tool_index=99, prepare_toolhead=False)
+
+
+class TestTurnOffHeaterIfIdle(unittest.TestCase):
+    """Tests for _turn_off_heater_if_idle — heater control after unload."""
+
+    def setUp(self):
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+
+        self.mock_config = Mock()
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+
+        self.mock_config.get_printer.return_value = self.mock_printer
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_reactor.monotonic.return_value = 0.0
+        self.mock_reactor.register_timer = Mock(return_value=None)
+        self.mock_reactor.pause = Mock()
+
+        self.variables = {
+            "ace_global_enabled": True,
+            "ace_current_index": -1,
+            "ace_filament_pos": FILAMENT_STATE_BOWDEN,
+        }
+        self.mock_save_vars.allVariables = self.variables
+
+        def lookup(name, default=None):
+            if name == "gcode":
+                return self.mock_gcode
+            if name == "save_variables":
+                return self.mock_save_vars
+            if name == "output_pin ACE_Pro":
+                pin = Mock()
+                pin.get_status = Mock(return_value={'value': 1})
+                return pin
+            return default
+
+        self.mock_printer.lookup_object.side_effect = lookup
+
+        def getint(key, default=None):
+            vals = {"ace_count": 1, "feed_speed": "100", "retract_speed": "100"}
+            val = vals.get(key, default)
+            return int(val) if val is not None else default
+
+        def getfloat(key, default=None):
+            vals = {
+                "feed_speed": "100.0",
+                "retract_speed": "100.0",
+                "toolhead_retraction_speed": "300.0",
+                "toolhead_retraction_length": "10.0",
+                "default_color_change_purge_length": "50.0",
+                "default_color_change_purge_speed": "400.0",
+                "timeout_multiplier": "2.0",
+                "total_max_feeding_length": "1000.0",
+                "parkposition_to_toolhead_length": "500.0",
+                "toolchange_load_length": "480.0",
+                "parkposition_to_rdm_length": "350.0",
+                "incremental_feeding_length": "10.0",
+                "incremental_feeding_speed": "50.0",
+                "extruder_feeding_length": "50.0",
+                "extruder_feeding_speed": "5.0",
+                "toolhead_slow_loading_speed": "10.0",
+                "heartbeat_interval": "1.0",
+                "max_dryer_temperature": "70.0",
+                "toolhead_full_purge_length": "100.0",
+                "feed_assist_active_after_ace_connect": "1",
+            }
+            val = vals.get(key, default)
+            return float(val) if val is not None else default
+
+        self.mock_config.getint.side_effect = getint
+        self.mock_config.getfloat.side_effect = getfloat
+        self.mock_config.get.side_effect = lambda k, default=None: {
+            "filament_runout_sensor_name_rdm": "return_module",
+            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+        }.get(k, default)
+
+    def _build_manager(self):
+        instance = Mock()
+        instance.instance_num = 0
+        instance.SLOT_COUNT = SLOTS_PER_ACE
+        instance.tool_offset = 0
+        instance.inventory = [{"status": "ready"}] * 4
+        with patch('ace.manager.AceInstance', return_value=instance), \
+             patch('ace.manager.EndlessSpool'), \
+             patch('ace.manager.RunoutMonitor'):
+            return AceManager(self.mock_config, dummy_ace_count=1)
+
+    def test_heater_off_when_idle(self):
+        """Heater should turn off when printer is not printing."""
+        manager = self._build_manager()
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "standby"}
+        manager.printer.lookup_object = Mock(return_value=mock_print_stats)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_called_once_with("M104 S0")
+
+    def test_heater_stays_on_when_printing(self):
+        """Heater should stay on when printer is actively printing."""
+        manager = self._build_manager()
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "printing"}
+        manager.printer.lookup_object = Mock(return_value=mock_print_stats)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_not_called()
+
+    def test_heater_stays_on_when_paused(self):
+        """Heater should stay on when printer is paused."""
+        manager = self._build_manager()
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "paused"}
+        manager.printer.lookup_object = Mock(return_value=mock_print_stats)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_not_called()
+
+    def test_heater_off_when_print_stats_unavailable(self):
+        """Heater should turn off when print_stats object is not available."""
+        manager = self._build_manager()
+        manager.printer.lookup_object = Mock(return_value=None)
+
+        manager._turn_off_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_called_once_with("M104 S0")
+
+    def test_exception_logged_not_raised(self):
+        """Exceptions should be caught and logged, not raised."""
+        manager = self._build_manager()
+        manager.printer.lookup_object = Mock(side_effect=Exception("lookup failed"))
+
+        # Should not raise
+        manager._turn_off_heater_if_idle()
+
+        # Should log warning
+        manager.gcode.respond_info.assert_called()
+        warning_logged = any(
+            "could not turn off heater" in str(c)
+            for c in manager.gcode.respond_info.call_args_list
+        )
+        self.assertTrue(warning_logged, "Should log warning about failed heater control")
 
 
 class TestUpdateAceSupportActiveState(unittest.TestCase):
@@ -3506,11 +4304,13 @@ class TestMonitorAceState(unittest.TestCase):
         manager._ace_pro_enabled = True
         manager._connection_supervision_enabled = True
         manager.update_ace_support_active_state = Mock()
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(5.0)
 
         manager.update_ace_support_active_state.assert_called_once()
+        manager._monitor_transport_reconnects.assert_called_once_with()
         manager._check_connection_health.assert_called_once_with(5.0)
         self.assertEqual(next_time, 7.0)
 
@@ -3519,21 +4319,25 @@ class TestMonitorAceState(unittest.TestCase):
         manager._ace_pro_enabled = False
         manager._connection_supervision_enabled = True
         manager.update_ace_support_active_state = Mock()
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(10.0)
 
         manager.update_ace_support_active_state.assert_called_once()
+        manager._monitor_transport_reconnects.assert_called_once_with()
         manager._check_connection_health.assert_not_called()
         self.assertEqual(next_time, 12.0)
 
     def test_exception_logged_and_returns_next_interval(self):
         manager = self._build_manager()
         manager.update_ace_support_active_state = Mock(side_effect=RuntimeError("boom"))
+        manager._monitor_transport_reconnects = Mock()
         manager._check_connection_health = Mock()
 
         next_time = manager._monitor_ace_state(2.5)
 
+        manager._monitor_transport_reconnects.assert_not_called()
         manager._check_connection_health.assert_not_called()
         self.assertEqual(next_time, 4.5)
 
@@ -3654,31 +4458,62 @@ class TestFullUnloadSlot(unittest.TestCase):
         instance._retract.assert_not_called()
         manager.state.set_and_save.assert_not_called()
 
-    def test_full_unload_rdm_success(self):
+    def test_full_unload_non_active_success(self):
+        """Non-active tool: slot sensor confirms empty during retract."""
         instance = self._make_instance()
+        instance._last_retract_early_stopped = True
         manager = self._build_manager(lambda *a, **k: instance)
-        manager.state.set = Mock()
-        manager.get_switch_state = Mock(side_effect=[False, False])  # both sensors clear after retract
-        manager.has_rdm_sensor = Mock(return_value=True)
 
         result = manager.full_unload_slot(0)
 
         self.assertTrue(result)
-        instance._retract.assert_called_once_with(0, length=instance.total_max_feeding_length, speed=instance.retract_speed)
-        manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        instance._retract.assert_called_once_with(
+            0, length=instance.total_max_feeding_length, speed=instance.retract_speed
+        )
 
-    def test_full_unload_toolhead_only_blocked(self):
+    def test_full_unload_non_active_failure(self):
+        """Non-active tool: slot sensor never reports empty."""
         instance = self._make_instance()
+        instance._last_retract_early_stopped = False
         manager = self._build_manager(lambda *a, **k: instance)
-        manager.state.set_and_save = Mock()
-        manager.get_instant_switch_state = Mock(return_value=True)  # toolhead still blocked
-        manager.has_rdm_sensor = Mock(return_value=False)
 
         result = manager.full_unload_slot(0)
 
         self.assertFalse(result)
         instance._retract.assert_called_once()
-        manager.state.set_and_save.assert_not_called()
+
+    def test_full_unload_active_success(self):
+        """Active tool: toolhead prepared, retract succeeds, state reset, heater off."""
+        instance = self._make_instance()
+        instance._last_retract_early_stopped = True
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager._extruder_move = Mock()
+        manager.state.set = Mock()
+        self.variables["ace_current_index"] = 0
+
+        result = manager.full_unload_slot(0)
+
+        self.assertTrue(result)
+        manager.prepare_toolhead_for_filament_retraction.assert_called_once_with(tool_index=0)
+        instance._retract.assert_called_once()
+        manager.state.set.assert_any_call("ace_current_index", -1)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        self.mock_gcode.run_script_from_command.assert_any_call("M104 S0")
+
+    def test_full_unload_active_failure_heater_off(self):
+        """Active tool: retract fails but heater still turned off (finally block)."""
+        instance = self._make_instance()
+        instance._last_retract_early_stopped = False
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager._extruder_move = Mock()
+        self.variables["ace_current_index"] = 0
+
+        result = manager.full_unload_slot(0)
+
+        self.assertFalse(result)
+        self.mock_gcode.run_script_from_command.assert_any_call("M104 S0")
 
     def test_full_unload_invalid_tool(self):
         instance = self._make_instance()
@@ -4347,6 +5182,8 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         inst.wait_ready = Mock()
         inst._retract = Mock()
         inst._stop_feed = Mock()
+        inst._stop_retract = Mock()
+        inst.rdm_overshoot_length = 50.0
         return inst
 
     def test_use_extruder_identifies_and_unloads(self):
@@ -4391,7 +5228,9 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         instance._smart_unload_slot.assert_called_once_with(0, length=40)
         manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
-    def test_ace_only_sensor_clears_and_stops_feed(self):
+    def test_ace_only_sensor_clears_identifies_tool(self):
+        """CASE 3: when the sensor clears during the monitored retraction, the
+        early_stop_callback marks the slot identified and the unload succeeds."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
         manager.state.set = Mock()
@@ -4402,24 +5241,20 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
             {"status": "empty"},
         ]
         manager.instances[0]._info = {"slots": [{"status": "ready"}, {"status": "empty"}, {"status": "empty"}, {"status": "empty"}]}
-        def sensor_state(_=None):
-            # First call triggered, subsequent calls clear
-            first = getattr(sensor_state, "first", True)
-            if first:
-                sensor_state.first = False
-                return True
-            return False
-        sensor_state.first = True
-        manager.get_switch_state = Mock(side_effect=sensor_state)
-        manager.is_filament_path_free = Mock(return_value=True)
 
-        # monotonic increments to allow delay to elapse
-        t = [0.0]
-        def fake_monotonic():
-            t[0] += 0.6
-            return t[0]
-        manager.reactor.monotonic = Mock(side_effect=fake_monotonic)
+        # Sensor reads CLEAR when polled during retraction.
+        manager.get_instant_switch_state = Mock(return_value=False)
+
+        # The mocked _retract drives the early_stop_callback the way the real
+        # _retract polls it during the unwind.
+        def fake_retract(slot, length, speed, early_stop_callback=None):
+            if early_stop_callback is not None:
+                early_stop_callback()
+        instance._retract.side_effect = fake_retract
+
+        manager.reactor.monotonic = Mock(return_value=0.0)
         manager.reactor.pause = Mock()
+        manager.is_filament_path_free = Mock(return_value=True)
 
         result = manager._cycle_slots_with_sensor_check(
             current_tool_index=-1,
@@ -4434,7 +5269,7 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         )
 
         self.assertTrue(result)
-        instance._stop_feed.assert_called_once_with(0)
+        instance._retract.assert_called_once()
         manager.state.set.assert_called_with("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
     def test_ace_only_disables_feed_assist_before_retraction(self):
@@ -4747,8 +5582,9 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         self.assertFalse(result)
         instance._smart_unload_slot.assert_called_once()
 
-    def test_ace_only_timeout_waiting_for_sensor_change(self):
-        """Test timeout scenario in ACE-only mode when sensor never changes."""
+    def test_ace_only_sensor_never_clears_is_wrong_slot(self):
+        """CASE 3: when the sensor stays triggered through the retraction the
+        slot is not identified (wrong slot) and the cycle reports failure."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
         manager.instances[0].inventory = [
@@ -4757,16 +5593,16 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
             {"status": "empty"},
             {"status": "empty"},
         ]
-        
-        # Sensor always triggered (never clears)
+
+        # Sensor stays TRIGGERED while polled -> callback never marks cleared.
         manager.get_instant_switch_state = Mock(return_value=True)
-        
-        # Time advances to trigger timeout
-        time_val = [0.0]
-        def advance_time():
-            time_val[0] += 5.0  # Jump 5 seconds each call to trigger timeout
-            return time_val[0]
-        manager.reactor.monotonic = Mock(side_effect=advance_time)
+
+        def fake_retract(slot, length, speed, early_stop_callback=None):
+            if early_stop_callback is not None:
+                early_stop_callback()
+        instance._retract.side_effect = fake_retract
+
+        manager.reactor.monotonic = Mock(return_value=0.0)
         manager.reactor.pause = Mock()
         manager.is_filament_path_free_instant = Mock(return_value=False)
 
@@ -4783,12 +5619,15 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         )
 
         self.assertFalse(result)
-        # Verify timeout message was logged
-        timeout_logged = any("Timeout waiting for" in str(call) for call in self.mock_gcode.respond_info.call_args_list)
-        self.assertTrue(timeout_logged, "Timeout message should be logged")
+        # New code reports the slot as "wrong slot" (the old timeout loop is gone).
+        wrong_slot_logged = any(
+            "wrong slot" in str(call) for call in self.mock_gcode.respond_info.call_args_list
+        )
+        self.assertTrue(wrong_slot_logged, "Wrong-slot message should be logged")
 
     def test_ace_only_error_during_retract_continues_to_next_slot(self):
-        """Test error during _retract in ACE-only mode continues to next slot."""
+        """CASE 3: an exception during one slot's retraction is caught (with a
+        _stop_retract) and cycling continues to the next slot."""
         instance = self._make_instance()
         manager = self._build_manager(lambda *a, **k: instance)
         manager.instances[0].inventory = [
@@ -4797,30 +5636,20 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
             {"status": "empty"},
             {"status": "empty"},
         ]
-        
-        # First _retract raises error, second succeeds
+
+        # First slot's retraction raises; the second slot's retraction polls the
+        # callback with a cleared sensor and identifies the tool.
         call_count = [0]
-        def retract_with_error(*args, **kwargs):
+        def retract_with_error(slot, length, speed, early_stop_callback=None):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise Exception("ACE retract failed")
+            if early_stop_callback is not None:
+                early_stop_callback()
         instance._retract.side_effect = retract_with_error
-        
-        # Sensor clears on second attempt
-        sensor_cleared = [False]
-        time_val = [0.0]
-        def sensor_state(_):
-            if call_count[0] >= 2:  # Second slot
-                sensor_cleared[0] = True
-                return False
-            return True
-        
-        def advance_time():
-            time_val[0] += 0.6
-            return time_val[0]
-        
-        manager.get_switch_state = Mock(side_effect=sensor_state)
-        manager.reactor.monotonic = Mock(side_effect=advance_time)
+
+        manager.get_instant_switch_state = Mock(return_value=False)
+        manager.reactor.monotonic = Mock(return_value=0.0)
         manager.reactor.pause = Mock()
         manager.is_filament_path_free = Mock(return_value=True)
 
@@ -4838,6 +5667,7 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(instance._retract.call_count, 2)
+        instance._stop_retract.assert_called_once()
 
     def test_path_blocked_after_successful_identification_returns_false(self):
         """Test that False is returned when path is still blocked after successful unload."""
@@ -4906,9 +5736,12 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         # Should still find and unload slot 0
         instance._smart_unload_slot.assert_called_once_with(0, length=40)
 
-    def test_ace_only_uses_sensor_to_parking_length_for_delay(self):
-        """Test ACE-only mode uses sensor_to_parking_length to calculate delay after trigger."""
+    def test_ace_only_limits_test_length_for_wrong_slot_protection(self):
+        """CASE 3: the per-slot test retraction is limited to
+        full_unload - sensor_to_parking + overshoot so a wrong slot is not
+        pulled completely out of the ACE unit."""
         instance = self._make_instance()
+        instance.rdm_overshoot_length = 10.0
         manager = self._build_manager(lambda *a, **k: instance)
         manager.instances[0].inventory = [
             {"status": "ready"},
@@ -4916,45 +5749,35 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
             {"status": "empty"},
             {"status": "empty"},
         ]
-        
-        sensor_cleared = [False]
-        def sensor_state(_):
-            # Clear after first check
-            if not sensor_cleared[0]:
-                sensor_cleared[0] = True
-                return True
-            return False
-        manager.get_switch_state = Mock(side_effect=sensor_state)
-        
-        # Track timing for delay calculation
-        time_val = [0.0]
-        pause_delays = []
-        def advance_time():
-            time_val[0] += 0.6
-            return time_val[0]
-        
-        def track_pause(until_time):
-            pause_delays.append(until_time - time_val[0])
-            return Mock()
-        
-        manager.reactor.monotonic = Mock(side_effect=advance_time)
-        manager.reactor.pause = Mock(side_effect=track_pause)
+
+        manager.get_instant_switch_state = Mock(return_value=False)
+
+        captured = {}
+        def fake_retract(slot, length, speed, early_stop_callback=None):
+            captured["length"] = length
+            if early_stop_callback is not None:
+                early_stop_callback()
+        instance._retract.side_effect = fake_retract
+
+        manager.reactor.monotonic = Mock(return_value=0.0)
+        manager.reactor.pause = Mock()
         manager.is_filament_path_free = Mock(return_value=True)
 
         result = manager._cycle_slots_with_sensor_check(
             current_tool_index=-1,
             attempted_tool_index=-1,
             retract_length=5,
-            retract_speed=10,  # 10 mm/s
+            retract_speed=10,
             retract_speed_mmmin=600,
             full_unload_length=50,
             sensor_name=SENSOR_RDM,
             use_extruder=False,
-            sensor_to_parking_length=20,  # 20mm at 10mm/s = 2 second delay
+            sensor_to_parking_length=20,
         )
 
         self.assertTrue(result)
-        instance._stop_feed.assert_called_once()
+        # full_unload(50) - sensor_to_parking(20) + overshoot(10) = 40
+        self.assertEqual(captured["length"], 40)
 
 
 class TestSetupSensors(unittest.TestCase):

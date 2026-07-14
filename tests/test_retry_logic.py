@@ -59,6 +59,7 @@ class TestFeedRetryLogic(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rfid_temp_mode': 'average',
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -203,6 +204,7 @@ class TestRetractRetryLogic(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rfid_temp_mode': 'average',
+            'rdm_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):

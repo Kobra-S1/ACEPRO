@@ -305,11 +305,12 @@ class TestFeedAssistTopologyTracking:
             "max_dryer_temperature": 70.0,
             "toolhead_full_purge_length": 150.0,
             "timeout_multiplier": 1.0,
+            "rdm_overshoot_length": 50.0,
         }
-        
+
         instance = AceInstance(0, ace_config, mock_printer)
         return instance
-    
+
     def test_feed_assist_topology_stored_on_enable(self, mock_instance):
         """Test that topology position is stored when feed assist is enabled."""
         # Mock serial manager to return a topology position
@@ -371,6 +372,7 @@ class TestFeedAssistRestoration:
             "toolhead_full_purge_length": 150.0,
             "timeout_multiplier": 1.0,
             "feed_assist_active_after_ace_connect": True,
+            "rdm_overshoot_length": 50.0,
         }
         
         instance = AceInstance(0, ace_config, mock_printer)
@@ -468,6 +470,7 @@ class TestReconnectionScenarios:
             "toolhead_full_purge_length": 150.0,
             "timeout_multiplier": 1.0,
             "feed_assist_active_after_ace_connect": True,
+            "rdm_overshoot_length": 50.0,
         }
         
         instance = AceInstance(0, ace_config, mock_printer)
@@ -542,6 +545,7 @@ class TestReconnectionScenarios:
             "toolhead_full_purge_length": 150.0,
             "timeout_multiplier": 1.0,
             "feed_assist_active_after_ace_connect": True,
+            "rdm_overshoot_length": 50.0,
         }
         
         # Instance 0 was at topology 2, instance 1 was at topology 3

@@ -23,6 +23,7 @@ from .config import (
     create_status_dict,
     normalize_ace_slot_state,
 )
+from .protocol import create_protocol_adapter, normalize_protocol_name, resolve_protocol_name
 from .serial_manager import AceSerialManager
 
 
@@ -53,7 +54,17 @@ class AceInstance:
         "PC": 260,
     }
 
-    def __init__(self, instance_num, ace_config, printer, ace_enabled=True):
+    def __init__(
+        self,
+        instance_num,
+        ace_config,
+        printer,
+        ace_enabled=True,
+        protocol=None,
+        active_protocol_name=None,
+        serial_mgr=None,
+        bus_session=None,
+    ):
         """
         Initialize ACE instance.
 
@@ -80,6 +91,7 @@ class AceInstance:
         self.parkposition_to_toolhead_length = float(ace_config["parkposition_to_toolhead_length"])
         self.toolchange_load_length = float(ace_config["toolchange_load_length"])
         self.parkposition_to_rdm_length = float(ace_config["parkposition_to_rdm_length"])
+        self.rdm_overshoot_length = float(ace_config["rdm_overshoot_length"])
         self.incremental_feeding_length = float(ace_config["incremental_feeding_length"])
         self.incremental_feeding_speed = float(ace_config["incremental_feeding_speed"])
         self.extruder_feeding_length = float(ace_config["extruder_feeding_length"])
@@ -103,26 +115,63 @@ class AceInstance:
         self._feed_assist_topology_position = None  # Track chain position (0, 1, 2...)
         self._pending_feed_assist_restore = -1  # Slot to restore after first heartbeat
         self._pending_rfid_refresh = False  # Flag to refresh all RFID data after reconnect
+        self._last_retract_early_stopped = False  # Slot sensor confirmed empty during _retract() (or slot was already empty)
         self._dryer_active = False
         self._dryer_temperature = 0
         self._dryer_duration = 0
         self._pending_rfid_queries = set()  # Track slots with in-flight RFID queries
+        self.status_failure_threshold = max(
+            1,
+            int(ace_config.get("status_failure_threshold", 4)),
+        )
+        self._status_failure_streak = 0
+        self._status_recovery_in_progress = False
 
         self.status_debug_logging = bool(ace_config.get("status_debug_logging", False))
         self.supervision_enabled = bool(ace_config.get("ace_connection_supervision", True))
+        self.configured_protocol_name = normalize_protocol_name(
+            ace_config.get("protocol", "auto")
+        )
+        self.protocol_name = active_protocol_name or resolve_protocol_name(self.configured_protocol_name)
+        self.protocol = protocol or create_protocol_adapter(self.protocol_name)
+        self.transport_spec = self.protocol.get_transport_spec()
+        self.bus_session = bus_session
 
-        self.serial_mgr = AceSerialManager(
+        self.serial_mgr = serial_mgr or AceSerialManager(
             self.gcode,
             self.reactor,
             instance_num,
             ace_enabled=ace_enabled,
             status_debug_logging=self.status_debug_logging,
-            supervision_enabled=self.supervision_enabled
+            supervision_enabled=self.supervision_enabled,
+            protocol=self.protocol,
         )
         self.tool_offset = get_tool_offset(self.instance_num)
-        self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)
+        if not self.transport_spec.shared_bus:
+            self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)
         self.serial_mgr.set_on_connect_callback(self._on_ace_connect)
         self._dryer_start_logged = False  # prevent duplicate dryer start messages
+        self._shared_bus_heartbeat_timer = None
+
+    def _prepare_request(self, request):
+        """Normalize request and attach ACE2 shared-bus target when known."""
+        prepared_request = self.protocol.normalize_request(request)
+        if not self.transport_spec.shared_bus or self.bus_session is None:
+            return prepared_request
+
+        command_name = str(prepared_request.get("command", "")).strip().upper()
+        if command_name in {"DISCOVER_DEVICE", "ASSIGN_DEVICE_ID"}:
+            return prepared_request
+
+        device = self.bus_session.get_device_for_instance(self.instance_num)
+        if device is None or device.device_id is None:
+            raise RuntimeError(
+                f"ACE[{self.instance_num}]: Shared-bus request '{command_name or 'UNKNOWN'}' "
+                "requires an assigned target device_id"
+            )
+
+        prepared_request["target_device_id"] = device.device_id
+        return prepared_request
 
     @property
     def manager(self):
@@ -163,11 +212,179 @@ class AceInstance:
 
     def send_request(self, request, callback):
         """Queue a normal request."""
-        self.serial_mgr.send_request(request, callback)
+        self.serial_mgr.send_request(
+            self._prepare_request(request),
+            callback,
+        )
 
     def send_high_prio_request(self, request, callback):
         """Queue high-priority request."""
-        self.serial_mgr.send_high_prio_request(request, callback)
+        self.serial_mgr.send_high_prio_request(
+            self._prepare_request(request),
+            callback,
+        )
+
+    def _send_shared_bus_heartbeat_request(self):
+        """Send one targeted ACE2 status poll over shared transport."""
+        if not self.transport_spec.shared_bus or not self.serial_mgr.is_connected():
+            return
+
+        request = self.protocol.build_get_status_request()
+        self.send_high_prio_request(request, self._on_heartbeat_response)
+
+    def _shared_bus_heartbeat_tick(self, eventtime):
+        """Periodically poll one ACE2 logical instance on shared transport."""
+        try:
+            self._send_shared_bus_heartbeat_request()
+        except Exception as exc:
+            logging.warning(
+                "ACE[%s]: Shared-bus heartbeat error: %s",
+                self.instance_num,
+                exc,
+            )
+        return eventtime + self.heartbeat_interval
+
+    def start_shared_bus_heartbeat(self):
+        """Start or refresh shared-bus status polling after bus init completes."""
+        if not self.transport_spec.shared_bus:
+            return
+
+        self._send_shared_bus_heartbeat_request()
+        if self._shared_bus_heartbeat_timer is None:
+            self._shared_bus_heartbeat_timer = self.reactor.register_timer(
+                self._shared_bus_heartbeat_tick,
+                self.reactor.NOW,
+            )
+
+    def request_shared_bus_info_refresh(self):
+        """Refresh device info through targeted ACE2 get_info after bus init."""
+        if not self.transport_spec.shared_bus or not self.serial_mgr.is_connected():
+            return
+
+        request = self.protocol.build_get_info_request()
+        self.send_high_prio_request(request, self.serial_mgr.handle_info_response)
+
+    def _handle_rfid_info_response(self, slot_idx, response):
+        """Apply a get_filament_info response to the local inventory."""
+        self._pending_rfid_queries.discard(slot_idx)
+
+        if response and response.get("code") == 0 and "result" in response:
+            result = response["result"]
+
+            # Check if actual RFID tag is present (not just non-RFID spool)
+            rfid_state = result.get("rfid", 0)
+
+            # Don't overwrite manual data for non-RFID spools or empty slots.
+            if rfid_state != RFID_STATE_IDENTIFIED:
+                logging.info(
+                    f"ACE[{self.instance_num}]: Slot {slot_idx} - No RFID tag (rfid={rfid_state}), "
+                    f"skipping inventory update to preserve manual data"
+                )
+                return
+
+            sku = result.get("sku", "")
+            brand = result.get("brand", "")
+            material = result.get("type", "")
+            icon_type = result.get("icon_type")
+            colors_array = result.get("colors")
+            rfid_color = None
+            if colors_array and len(colors_array) > 0:
+                first_color = (
+                    colors_array[0]
+                    if isinstance(colors_array[0], (list, tuple))
+                    else colors_array
+                )
+                if len(first_color) >= 3:
+                    rfid_color = [first_color[0], first_color[1], first_color[2]]
+            else:
+                direct_color = result.get("color")
+                if (direct_color and len(direct_color) >= 3
+                        and any(component > 0 for component in direct_color[:3])):
+                    rfid_color = [direct_color[0], direct_color[1], direct_color[2]]
+            extruder_temp = result.get("extruder_temp", {})
+            hotbed_temp = result.get("hotbed_temp", {})
+            diameter = result.get("diameter")
+            total = result.get("total")
+            current = result.get("current")
+
+            temp_min = extruder_temp.get("min", 0)
+            temp_max = extruder_temp.get("max", 0)
+            temp_mode = self.ace_config.get("rfid_temp_mode", "average")
+
+            if temp_min > 0 or temp_max > 0:
+                if temp_mode == "min" and temp_min > 0:
+                    rfid_temp = temp_min
+                elif temp_mode == "max" and temp_max > 0:
+                    rfid_temp = temp_max
+                elif temp_min > 0 and temp_max > 0:
+                    rfid_temp = (temp_min + temp_max) // 2
+                elif temp_max > 0:
+                    rfid_temp = temp_max
+                else:
+                    rfid_temp = temp_min
+            else:
+                rfid_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
+
+            if 0 <= slot_idx < self.SLOT_COUNT:
+                inv = self.inventory[slot_idx]
+
+                if material:
+                    inv["material"] = material
+
+                old_temp = inv.get("temp", 0)
+                if rfid_temp != old_temp:
+                    inv["temp"] = rfid_temp
+
+                if rfid_color:
+                    inv["color"] = rfid_color
+
+                if sku:
+                    inv["sku"] = sku
+                if brand:
+                    inv["brand"] = brand
+                if icon_type is not None:
+                    inv["icon_type"] = icon_type
+                if extruder_temp:
+                    inv["extruder_temp"] = extruder_temp
+                if hotbed_temp:
+                    inv["hotbed_temp"] = hotbed_temp
+                if diameter is not None:
+                    inv["diameter"] = diameter
+                if total is not None:
+                    inv["total"] = total
+                if current is not None:
+                    inv["current"] = current
+
+                color_str = (
+                    f"RGB({rfid_color[0]},{rfid_color[1]},{rfid_color[2]})"
+                    if rfid_color else "none"
+                )
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: Slot {slot_idx} RFID full data -> "
+                    f"sku={sku}, temp={rfid_temp}°C (min={temp_min}, max={temp_max}), "
+                    f"color={color_str}, hotbed={hotbed_temp}, brand={brand}"
+                )
+
+                if self.manager:
+                    self.manager._sync_inventory_to_persistent(self.instance_num, flush=False)
+        else:
+            msg = response.get("msg", "Unknown") if response else "No response"
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: get_filament_info failed for slot {slot_idx}: {msg}"
+            )
+
+    def handle_shared_bus_filament_info_response(self, response):
+        """Replay a late shared-bus get_filament_info reply if the slot is still pending."""
+        if not self.transport_spec.shared_bus:
+            return False
+
+        result = response.get("result") or {}
+        slot_idx = result.get("index")
+        if not isinstance(slot_idx, int) or slot_idx not in self._pending_rfid_queries:
+            return False
+
+        self._handle_rfid_info_response(slot_idx, response)
+        return True
 
     def wait_ready(self, on_wait_cycle=None, timeout_s=60.0):
         """Wait for ACE unit to be ready with a hard timeout."""
@@ -182,7 +399,7 @@ class AceInstance:
 
             if waited >= 25.0:
                 self.send_high_prio_request(
-                    request={"method": "get_status"},
+                    request=self.protocol.build_get_status_request(),
                     callback=self._status_update_callback
                 )
                 waited = 0.0
@@ -256,12 +473,23 @@ class AceInstance:
                 )
 
         self.wait_ready()
-        request = {"method": "start_feed_assist", "params": {"index": slot_index}}
+        request = self.protocol.build_start_feed_assist_request(slot_index)
         self.send_request(request, callback)
-        self.wait_ready()
+        # ACE1: stays 'ready' during feed assist, so wait confirms the command was processed.
+        # ACE2: transitions to 'busy' the moment feed assist starts and never returns to
+        # 'ready' until STOP_FEED_ASSIST is received.  Calling wait_ready() here on ACE2
+        # would block forever.
+        if not self.protocol.feed_assist_causes_busy():
+            self.wait_ready()
 
     def _disable_feed_assist(self, slot_index):
         """Disable feed assist."""
+        if slot_index < 0:
+            # Feed assist is never active on a negative slot index; nothing to disable.
+            # This guards against callers that pass _feed_assist_index directly when
+            # feed assist was already off (-1), which would otherwise bypass the check
+            # below and send a spurious STOP_FEED_OR_ROLLBACK command.
+            return
         if self._feed_assist_index != slot_index:
             logging.warning(
                 f"ACE[{self.instance_num}]: Feed assist not active on slot {slot_index}"
@@ -286,11 +514,21 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Feed assist disable failed: {msg}"
                 )
 
-        self.wait_ready()
-        request = {"method": "stop_feed_assist", "params": {"index": slot_index}}
+        # ACE1: stays 'ready' during feed assist, so this pre-send wait guards against
+        # sending STOP while the device is processing something else.
+        # ACE2: is 'busy' *because* feed assist is active.  The only way to make it ready
+        # again is to send STOP_FEED_ASSIST, so waiting for 'ready' first is a deadlock.
+        if not self.protocol.feed_assist_causes_busy():
+            self.wait_ready()
+        request = self.protocol.build_stop_feed_assist_request(slot_index)
         self.send_request(request, callback)
         self.dwell(1.0)
-        self.wait_ready()
+        # ACE2: the device only leaves 'busy' once it has processed STOP_FEED_ASSIST,
+        # and the cached status is refreshed via the 1 Hz heartbeat.  If a heartbeat
+        # times out around print-end, wait_ready() can stall for up to 60s before
+        # giving up
+        if not self.protocol.feed_assist_causes_busy():
+            self.wait_ready()
 
     def _feed(self, slot, length, speed, callback=None):
         """Feed filament from slot."""
@@ -308,10 +546,7 @@ class AceInstance:
                     msg = f"ACE[{self.instance_num}]: Feed error: {response.get('msg')}"
                     self.gcode.respond_info(msg)
 
-        request = {
-            "method": "feed_filament",
-            "params": {"index": slot, "length": length, "speed": speed}
-        }
+        request = self.protocol.build_feed_filament_request(slot, length, speed)
         self.gcode.respond_info(f"ACE[{self.instance_num}]: Sending request: {request}")
         self.send_request(request, callback)
 
@@ -328,7 +563,7 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Stop feed successful: {response}"
                 )
 
-        request = {"method": "stop_feed_filament", "params": {"index": slot}}
+        request = self.protocol.build_stop_feed_filament_request(slot)
         self.send_high_prio_request(request, callback)
 
     def _make_sensor_trigger_monitor(self, sensor_type):
@@ -375,7 +610,7 @@ class AceInstance:
 
         return monitor
 
-    def _retract(self, slot, length, speed, on_retract_started=None, on_wait_for_ready=None):
+    def _retract(self, slot, length, speed, on_retract_started=None, on_wait_for_ready=None, early_stop_callback=None):
         """
         Retract filament from slot with automatic retry on FORBIDDEN errors.
 
@@ -394,9 +629,11 @@ class AceInstance:
         retry_delay_s = 2.0
 
         self.wait_ready()
+        self._last_retract_early_stopped = False
 
         # If the slot already reports empty, there is nothing to retract.
         if self._is_slot_empty(slot):
+            self._last_retract_early_stopped = True
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Retract skipped - slot {slot} is empty"
             )
@@ -416,10 +653,7 @@ class AceInstance:
                     f"  ACE status before: {ace_status_before}"
                 )
 
-            request = {
-                "method": "unwind_filament",
-                "params": {"index": slot, "length": length, "speed": speed}
-            }
+            request = self.protocol.build_unwind_filament_request(slot, length, speed)
 
             response_container = {"response": None, "done": False}
 
@@ -428,6 +662,7 @@ class AceInstance:
                     return
                 if self._is_slot_empty(slot):
                     early_stop_state["triggered"] = True
+                    self._last_retract_early_stopped = True
                     early_stop_state["elapsed"] = time.time() - retract_start_time
                     self.gcode.respond_info(
                         f"ACE[{self.instance_num}]: Retract stopped after "
@@ -439,7 +674,7 @@ class AceInstance:
                 response_container["response"] = response
                 response_container["done"] = True
 
-            self.serial_mgr.send_request(request, callback)
+            self.send_request(request, callback)
 
             timeout = time.time() + 5.0
             while not response_container["done"] and time.time() < timeout:
@@ -496,12 +731,22 @@ class AceInstance:
                     if early_stop_state["triggered"]:
                         self.wait_ready()
                         return {"code": 0, "msg": "Retract stopped early: slot empty"}
+                    if early_stop_callback is not None:
+                        stop_reason = early_stop_callback()
+                        if stop_reason:
+                            self._stop_retract(slot)
+                            self.wait_ready()
+                            return {"code": 0, "msg": f"Retract stopped early: {stop_reason}"}
                     self.reactor.pause(self.reactor.monotonic() + 0.2)
 
                 def wait_cycle():
                     if on_wait_for_ready is not None:
                         on_wait_for_ready()
                     check_slot_empty()
+                    if early_stop_callback is not None:
+                        stop_reason = early_stop_callback()
+                        if stop_reason:
+                            self._stop_retract(slot)
 
                 self.wait_ready(on_wait_cycle=wait_cycle)
 
@@ -560,24 +805,27 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Stop retract successful: {response}"
                 )
 
-        request = {"method": "stop_unwind_filament", "params": {"index": slot}}
+        request = self.protocol.build_stop_unwind_filament_request(slot)
         self.send_request(request, callback)
 
     def _feed_to_toolhead_with_extruder_assist(self, local_slot, feed_length, feed_speed,
                                                extruder_feeding_length, extruder_feeding_speed):
         """
-        Feed filament to toolhead using feed_sync + extruder assist.
+        Feed filament to toolhead using ACE feed + extruder assist.
 
-        This is the LEGACY implementation that:
-        - Uses _feed_sync (blocking) to start ACE feed
-        - Polls toolhead sensor while pushing extruder in timed chunks
-        - Stops feed when sensor triggers
+        Starts ACE feed, polls toolhead sensor until triggered (or timeout),
+        then slows to extruder_feeding_speed and drives the extruder to seat
+        the filament, finally switches to feed_assist mode.
 
         Args:
             local_slot: Slot index to feed from
+            feed_length: Total length to feed (mm)
+            feed_speed: Initial ACE feed speed (mm/s)
+            extruder_feeding_length: Extruder assist distance (mm)
+            extruder_feeding_speed: Slow speed for final extruder push (mm/s)
 
         Returns:
-            float: Total extruder distance pushed during assist
+            float: Extruder distance pushed during assist
 
         Raises:
             ValueError: If feed command fails or sensor times out
@@ -648,7 +896,9 @@ class AceInstance:
             f"ACE[{self.instance_num}]: Switching from feeding to feed_assist mode"
         )
         self._enable_feed_assist(local_slot)
-        self.wait_ready()
+        # _enable_feed_assist already contains its own post-send wait_ready() (guarded by
+        # feed_assist_causes_busy), so a second wait here is redundant for ACE1 and would
+        # deadlock on ACE2.
 
         return self.extruder_feeding_length
 
@@ -746,10 +996,7 @@ class AceInstance:
             f"{retract_speed}mm/s (slot {slot})"
         )
 
-        request = {
-            "method": "update_unwinding_speed",
-            "params": {"index": slot, "speed": retract_speed}
-        }
+        request = self.protocol.build_update_unwinding_speed_request(slot, retract_speed)
         response_container = {"response": None}
 
         def callback(response):
@@ -785,22 +1032,19 @@ class AceInstance:
 
         return True
 
-    def _change_feed_speed(self, slot, retract_speed):
+    def _change_feed_speed(self, slot, feed_speed):
         """
-        Request to update active feed speed while feeding  is running.
+        Request to update active feed speed while feeding is running.
 
         Returns:
             bool: True if firmware acknowledged, False otherwise
         """
         logging.info(
             f"ACE[{self.instance_num}]: Requesting feed speed change to "
-            f"{retract_speed}mm/s (slot {slot})"
+            f"{feed_speed}mm/s (slot {slot})"
         )
 
-        request = {
-            "method": "update_feeding_speed",
-            "params": {"index": slot, "speed": retract_speed}
-        }
+        request = self.protocol.build_update_feeding_speed_request(slot, feed_speed)
         response_container = {"response": None}
 
         def callback(response):
@@ -861,10 +1105,7 @@ class AceInstance:
             #         f"code={code}, msg='{msg}'"
             #     )
 
-        request = {
-            "method": "feed_filament",
-            "params": {"index": slot, "length": length, "speed": speed}
-        }
+        request = self.protocol.build_feed_filament_request(slot, length, speed)
         # self.gcode.respond_info(
         #     f"ACE[{self.instance_num}]: Sending sync request: {request}"
         # )
@@ -911,48 +1152,108 @@ class AceInstance:
         return None
 
     def rmd_triggered_unload_slot(self, manager, slot, length, overshoot_length):
-        """Unload slot with RDM sensor monitoring and overshoot compensation."""
-        if manager.has_rdm_sensor():
-            f_index = self._get_current_feed_assist_index()
-            self._disable_feed_assist(slot)
+        """Unload slot with RDM sensor monitoring during retraction.
 
-            timeout_seconds = (length / self.retract_speed) * self.timeout_multiplier
-            start_time = time.time()
-            sensor_clear_time = None
-            # Start retraction
-            self._retract(slot, length, self.retract_speed)
+        Monitors the RDM sensor via _retract(early_stop_callback=...) and
+        stops retraction as soon as the filament clears, plus overshoot.
 
-            poll_interval = 0.02
+        Args:
+            manager: AceManager instance (for sensor access)
+            slot: Local slot index (0-3)
+            length: Maximum retract distance (mm) — safety limit
+            overshoot_length: Extra mm to retract after sensor clears
+        Returns:
+            True if sensor cleared and retract stopped, False on timeout
+        """
+        if not manager.has_rdm_sensor():
+            return False
 
-            while (time.time() - start_time) < timeout_seconds:
-                if manager.is_filament_path_free():
-                    if sensor_clear_time is None:
-                        sensor_clear_time = time.time() - start_time
-                        overshoot_time = (overshoot_length / self.retract_speed) * self.timeout_multiplier
+        f_index = self._get_current_feed_assist_index()
+        self._disable_feed_assist(slot)
 
-                        self.gcode.respond_info(
-                            f"ACE[{self.instance_num}]: Sensor cleared "
-                            f"after {sensor_clear_time:.2f}s, "
-                            f"waiting {overshoot_time:.2f}s for overshoot"
-                        )
+        # Shared state for the callback
+        rdm_state = {
+            "cleared": False,
+            "clear_time": None,
+            "start_time": time.time(),
+            "last_log": 0,
+        }
 
-                        self.dwell(overshoot_time)
+        def rdm_early_stop_check():
+            """Called every ~200ms from _retract()'s dwell loop.
+            Returns a truthy string to trigger early stop, or None to continue."""
+            elapsed = time.time() - rdm_state["start_time"]
 
-                    self._stop_retract(slot)
+            rdm_has_filament = manager.get_instant_switch_state(SENSOR_RDM)
 
-                    elapsed = time.time() - start_time
-                    self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: RMD triggered unload slot {slot} "
-                        f"completed in {elapsed:.2f}s"
+            # Log sensor state every 2 seconds
+            if elapsed - rdm_state["last_log"] >= 2.0:
+                state_str = "TRIGGERED" if rdm_has_filament else "CLEAR"
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: [{elapsed:.1f}s] RDM={state_str}"
+                )
+                rdm_state["last_log"] = elapsed
+
+            if not rdm_has_filament and not rdm_state["cleared"]:
+                rdm_state["cleared"] = True
+                rdm_state["clear_time"] = elapsed
+
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: RDM CLEAR after {elapsed:.1f}s — "
+                    f"applying {overshoot_length}mm overshoot"
+                )
+
+                # Overshoot: let the motor run a bit longer before stopping
+                overshoot_time = overshoot_length / self.retract_speed
+                if overshoot_time > 0:
+                    self.reactor.pause(
+                        self.reactor.monotonic() + overshoot_time
                     )
-                    self._update_feed_assist(f_index)
-                    return True
+                return f"RDM clear at {elapsed:.1f}s"
 
-                self.dwell(poll_interval)
+            return None
 
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: RDM-triggered unload — "
+            f"slot {slot}, max {length}mm @ {self.retract_speed}mm/s, "
+            f"overshoot {overshoot_length}mm"
+        )
+
+        try:
+            result = self._retract(
+                slot, length, self.retract_speed,
+                early_stop_callback=rdm_early_stop_check,
+            )
+        except Exception as e:
             self._stop_retract(slot)
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Retract error: {e}"
+            )
             self._update_feed_assist(f_index)
-        return False
+            # If the sensor already cleared, the physical unload succeeded
+            # even if wait_ready timed out afterward
+            return rdm_state["cleared"]
+
+        self._update_feed_assist(f_index)
+
+        # Slot was already empty before retraction started
+        if result and "slot empty" in result.get("msg", ""):
+            return True
+
+        if rdm_state["cleared"]:
+            total = time.time() - rdm_state["start_time"]
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: RMD triggered unload slot {slot} "
+                f"completed in {total:.1f}s "
+                f"(sensor cleared at {rdm_state['clear_time']:.1f}s)"
+            )
+            return True
+        else:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: RDM triggered unload — "
+                f"sensor never cleared during {length}mm retract!"
+            )
+            return False
 
     def _smart_unload_slot(self, slot, length=100, on_retract_started=None):
         """
@@ -1138,129 +1439,28 @@ class AceInstance:
         self._pending_rfid_queries.add(slot_idx)
 
         def rfid_callback(response):
-            # Always clear pending flag when callback completes
-            self._pending_rfid_queries.discard(slot_idx)
+            self._handle_rfid_info_response(slot_idx, response)
 
-            # LOG RAW get_filament_info RESPONSE
-            # self.gcode.respond_info(
-            #     f"ACE[{self.instance_num}]: Slot {slot_idx} get_filament_info RAW response: {response}"
-            # )
-
-            if response and response.get("code") == 0 and "result" in response:
-                result = response["result"]
-
-                # Check if actual RFID tag is present (not just non-RFID spool)
-                rfid_state = result.get("rfid", 0)
-
-                # Only process if RFID tag detected (rfid=2 = RFID_STATE_IDENTIFIED)
-                # Don't overwrite manual data for non-RFID spools (rfid=1) or empty slots (rfid=0)
-                if rfid_state != RFID_STATE_IDENTIFIED:
-                    logging.info(
-                        f"ACE[{self.instance_num}]: Slot {slot_idx} - No RFID tag (rfid={rfid_state}), "
-                        f"skipping inventory update to preserve manual data"
-                    )
-                    return
-
-                # Extract all RFID fields
-                sku = result.get("sku", "")
-                brand = result.get("brand", "")
-                material = result.get("type", "")
-                icon_type = result.get("icon_type")
-                colors_array = result.get("colors")  # [[R, G, B, A]] — newer firmware
-                rfid_color = None
-                if colors_array and len(colors_array) > 0:
-                    # Extract RGB from first color entry (ignore alpha)
-                    first_color = colors_array[0] if isinstance(colors_array[0], (list, tuple)) else colors_array
-                    if len(first_color) >= 3:
-                        rfid_color = [first_color[0], first_color[1], first_color[2]]
-                else:
-                    # Older firmware / some SKUs: fall back to plain color field [R, G, B]
-                    direct_color = result.get("color")
-                    if (direct_color and len(direct_color) >= 3
-                            and any(c > 0 for c in direct_color[:3])):
-                        rfid_color = [direct_color[0], direct_color[1], direct_color[2]]
-                extruder_temp = result.get("extruder_temp", {})
-                hotbed_temp = result.get("hotbed_temp", {})
-                diameter = result.get("diameter")
-                total = result.get("total")
-                current = result.get("current")
-
-                # Calculate temperature from RFID based on rfid_temp_mode config
-                temp_min = extruder_temp.get("min", 0)
-                temp_max = extruder_temp.get("max", 0)
-                temp_mode = self.ace_config.get("rfid_temp_mode", "average")
-
-                if temp_min > 0 or temp_max > 0:
-                    if temp_mode == "min" and temp_min > 0:
-                        rfid_temp = temp_min
-                    elif temp_mode == "max" and temp_max > 0:
-                        rfid_temp = temp_max
-                    elif temp_min > 0 and temp_max > 0:
-                        rfid_temp = (temp_min + temp_max) // 2
-                    elif temp_max > 0:
-                        rfid_temp = temp_max
-                    else:
-                        rfid_temp = temp_min
-                else:
-                    rfid_temp = self.MATERIAL_TEMPS.get(material, self.DEFAULT_TEMP)
-
-                # Update inventory with full RFID data
-                if 0 <= slot_idx < self.SLOT_COUNT:
-                    inv = self.inventory[slot_idx]
-
-                    # Update material from RFID callback (authoritative)
-                    if material:
-                        inv["material"] = material
-
-                    # Update temperature from RFID
-                    old_temp = inv.get("temp", 0)
-                    if rfid_temp != old_temp:
-                        inv["temp"] = rfid_temp
-
-                    # Update color from RFID
-                    if rfid_color:
-                        inv["color"] = rfid_color
-
-                    # Store all RFID metadata
-                    if sku:
-                        inv["sku"] = sku
-                    if brand:
-                        inv["brand"] = brand
-                    if icon_type is not None:
-                        inv["icon_type"] = icon_type
-                    if extruder_temp:
-                        inv["extruder_temp"] = extruder_temp
-                    if hotbed_temp:
-                        inv["hotbed_temp"] = hotbed_temp
-                    if diameter is not None:
-                        inv["diameter"] = diameter
-                    if total is not None:
-                        inv["total"] = total
-                    if current is not None:
-                        inv["current"] = current
-
-                    # Log the full RFID data
-                    color_str = f"RGB({rfid_color[0]},{rfid_color[1]},{rfid_color[2]})" if rfid_color else "none"
-                    self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: Slot {slot_idx} RFID full data -> "
-                        f"sku={sku}, temp={rfid_temp}°C (min={temp_min}, max={temp_max}), "
-                        f"color={color_str}, hotbed={hotbed_temp}, brand={brand}"
-                    )
-
-                    # Sync to persistent storage (deferred; flushed at print end)
-                    if self.manager:
-                        self.manager._sync_inventory_to_persistent(self.instance_num, flush=False)
-
-                    # Emit JSON update for UI
-                    # self._emit_inventory_update()
-            else:
-                msg = response.get("msg", "Unknown") if response else "No response"
-                self.gcode.respond_info(
-                    f"ACE[{self.instance_num}]: get_filament_info failed for slot {slot_idx}: {msg}"
-                )
-
-        request = {"method": "get_filament_info", "params": {"index": slot_idx}}
+        request = self.protocol.build_get_filament_info_request(slot_idx)
         self.send_request(request, rfid_callback)
+
+    def start_drying(self, temperature, duration, callback=None):
+        """Start the ACE dryer using the active protocol adapter."""
+        self._dryer_active = True
+        self._dryer_temperature = temperature
+        self._dryer_duration = duration
+
+        request = self.protocol.build_start_drying_request(temperature, duration)
+        self.send_request(request, callback or (lambda response: None))
+
+    def stop_drying(self, callback=None):
+        """Stop the ACE dryer using the active protocol adapter."""
+        self._dryer_active = False
+        self._dryer_temperature = 0
+        self._dryer_duration = 0
+
+        request = self.protocol.build_stop_drying_request()
+        self.send_request(request, callback or (lambda response: None))
 
     def _emit_inventory_update(self):
         """Emit JSON inventory update for KlipperScreen."""
@@ -1543,9 +1743,11 @@ class AceInstance:
     def _on_heartbeat_response(self, response):
         """Handle heartbeat response."""
         if response is None:
+            self._record_status_failure("no response")
             return
 
         if response.get("code") == 0 and "result" in response:
+            self._reset_status_failure_tracking()
             self._status_update_callback(response)
 
             # Restore pending feed assist after first successful heartbeat
@@ -1555,6 +1757,49 @@ class AceInstance:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Heartbeat response error: {msg}"
             )
+            self._record_status_failure(str(msg))
+
+    def _reset_status_failure_tracking(self):
+        """Clear heartbeat/status failure tracking after successful communication."""
+        self._status_failure_streak = 0
+        self._status_recovery_in_progress = False
+
+    def _record_status_failure(self, reason):
+        """Track one failed heartbeat/status response and trigger reconnect if needed."""
+        self._status_failure_streak += 1
+        if self._status_failure_streak < self.status_failure_threshold:
+            return
+        if self._status_recovery_in_progress:
+            return
+
+        self._status_recovery_in_progress = True
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: Heartbeat/status failed "
+            f"{self._status_failure_streak} times ({reason}) - reconnecting"
+        )
+
+        reconnect = getattr(self.serial_mgr, "reconnect", None)
+        if callable(reconnect):
+            try:
+                reconnect()
+                return
+            except Exception as exc:
+                logging.warning(
+                    "ACE[%s]: reconnect() after status failures failed: %s",
+                    self.instance_num,
+                    exc,
+                )
+
+        disconnect = getattr(self.serial_mgr, "disconnect", None)
+        if callable(disconnect):
+            try:
+                disconnect()
+            except Exception as exc:
+                logging.warning(
+                    "ACE[%s]: disconnect() after status failures failed: %s",
+                    self.instance_num,
+                    exc,
+                )
 
     def _maybe_restore_pending_feed_assist(self):
         """
@@ -1591,7 +1836,7 @@ class AceInstance:
             # Use short timeout - if ACE is busy (e.g., RFID read/preload), skip restoration
             # Feed assist can be restored later or manually if needed
             self.wait_ready(timeout_s=5.0)
-            request = {"method": "start_feed_assist", "params": {"index": slot}}
+            request = self.protocol.build_start_feed_assist_request(slot)
             self.send_request(
                 request,
                 lambda response: self._on_feed_assist_restore_response(response, slot)
@@ -1617,6 +1862,8 @@ class AceInstance:
         Defers feed assist restoration and RFID refresh until after first
         successful status update to ensure connection is stable.
         """
+        self._reset_status_failure_tracking()
+
         # Set flag to refresh RFID data on next status update
         # This ensures we have current data if spools were changed during disconnect
         self._pending_rfid_refresh = True
@@ -1662,16 +1909,36 @@ class AceInstance:
         # Debug logging reserved for status_debug_logging; keep silent by default
 
         status = copy.deepcopy(self._info)
+        status.pop("raw_fields", None)
         status["instance"] = self.instance_num
+        status["protocol"] = self.protocol_name
         status["rfid_sync_enabled"] = bool(self.rfid_inventory_sync_enabled)
         status["feed_assist_slot"] = self._get_current_feed_assist_index()
 
         # Attach device info from last get_info response, if available
         device_info = getattr(self.serial_mgr, "device_info", {})
         if isinstance(device_info, dict):
+            normalized_info = {}
             for key in ("model", "firmware", "boot_firmware", "structure_version"):
                 if key in device_info and device_info[key] is not None:
-                    status.setdefault(key, device_info[key])
+                    normalized_info[key] = device_info[key]
+
+            # ACE2 get_info currently reports version and boot_version keys.
+            if "firmware" not in normalized_info and device_info.get("version"):
+                normalized_info["firmware"] = device_info["version"]
+            if "boot_firmware" not in normalized_info and device_info.get("boot_version"):
+                normalized_info["boot_firmware"] = device_info["boot_version"]
+
+            for key, value in normalized_info.items():
+                status.setdefault(key, value)
+
+        # Protocol-aware fallback label when the device does not report model metadata.
+        if not status.get("model") and self.protocol_name == "ace2_proto":
+            port_description = getattr(self.serial_mgr, "_port_description", None)
+            if port_description:
+                status["model"] = f"ACE2 ({port_description})"
+            else:
+                status["model"] = "ACE2 (Shared Bus)"
         # Attach connection info (port / usb path) for diagnostics
         port = getattr(self.serial_mgr, "serial_name", None) or getattr(self.serial_mgr, "_port", None)
         usb_path = getattr(self.serial_mgr, "_usb_location", None)
