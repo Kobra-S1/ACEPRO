@@ -1,19 +1,19 @@
-# Targets KlipperScreen screen.py at commit 4afd4be ("refactor: rename api
-# layer since klippy is incorrect", merged 2026-06-15) and later, where
-# self._ws.klippy was renamed to self._ws.api and strings use double quotes.
-# For older checkouts see ace_global_subscription_transitional.patch and
-# ace_global_subscription_legacy.patch.
+# Targets KlipperScreen screen.py before commit c28504d ("refactor: use ruff
+# for linting, setup an autolint action", merged 2026-05-15): strings use
+# single quotes and the websocket handle is self._ws.klippy.
+# For newer checkouts see ace_global_subscription_transitional.patch and
+# ace_global_subscription.patch.
 --- a/screen.py
 +++ b/screen.py
-@@ -381,8 +381,87 @@
+@@ -317,8 +317,87 @@
          for led in self.printer.get_leds():
-             requested_updates["objects"][led] = ["color_data"]
+             requested_updates['objects'][led] = ["color_data"]
  
 +        ace_objects = self._ace_subscription_objects()
 +        if ace_objects:
-+            requested_updates["objects"].update(ace_objects)
++            requested_updates['objects'].update(ace_objects)
 +
-         self._ws.api.object_subscription(requested_updates)
+         self._ws.klippy.object_subscription(requested_updates)
  
 +    def _ace_subscription_objects(self):
 +        objects = {}

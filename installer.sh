@@ -722,27 +722,51 @@ EOF
     fi
 
     # Optional: patch KlipperScreen core to subscribe to ACE objects
-    KLIPPERSCREEN_PATCH="$SCRIPT_DIR/patches/ace_global_subscription.patch"
-    if [ -d "$KLIPPERSCREEN_ROOT_DIR" ] && [ -f "$KLIPPERSCREEN_PATCH" ]; then
+    #
+    # KlipperScreen's screen.py has changed shape across upstream commits
+    # (quote style via ruff reformatting, self._ws.klippy -> self._ws.api
+    # rename), so a single fixed patch doesn't apply across all versions.
+    # Try each variant, newest first, and apply the first one that matches
+    # the user's checkout via a dry-run.
+    KLIPPERSCREEN_PATCH_CANDIDATES=(
+        "$SCRIPT_DIR/patches/ace_global_subscription.patch"
+        "$SCRIPT_DIR/patches/ace_global_subscription_transitional.patch"
+        "$SCRIPT_DIR/patches/ace_global_subscription_legacy.patch"
+    )
+    KLIPPERSCREEN_SCREEN_PY="$KLIPPERSCREEN_ROOT_DIR/screen.py"
+
+    if [ -d "$KLIPPERSCREEN_ROOT_DIR" ]; then
         echo ""
-        print_info "ACE patch available for KlipperScreen core subscription."
-        if prompt_yes_no "Apply ACE KlipperScreen patch now?"; then
-            print_info "Checking ACE patch applicability..."
-            if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward --dry-run < "$KLIPPERSCREEN_PATCH"; then
-                print_info "Applying ACE patch to $KLIPPERSCREEN_ROOT_DIR"
-                if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward < "$KLIPPERSCREEN_PATCH"; then
-                    print_success "KlipperScreen patch applied"
+        if [ -f "$KLIPPERSCREEN_SCREEN_PY" ] && grep -q "_ace_subscription_objects" "$KLIPPERSCREEN_SCREEN_PY"; then
+            print_success "ACE KlipperScreen patch already applied (found _ace_subscription_objects in screen.py)"
+        else
+            print_info "ACE patch available for KlipperScreen core subscription."
+            if prompt_yes_no "Apply ACE KlipperScreen patch now?"; then
+                KLIPPERSCREEN_MATCHED_PATCH=""
+                for candidate in "${KLIPPERSCREEN_PATCH_CANDIDATES[@]}"; do
+                    [ -f "$candidate" ] || continue
+                    print_info "Checking applicability of $(basename "$candidate")..."
+                    if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward --fuzz=0 --dry-run < "$candidate" >/dev/null 2>&1; then
+                        KLIPPERSCREEN_MATCHED_PATCH="$candidate"
+                        break
+                    fi
+                done
+
+                if [ -n "$KLIPPERSCREEN_MATCHED_PATCH" ]; then
+                    print_info "Applying $(basename "$KLIPPERSCREEN_MATCHED_PATCH") to $KLIPPERSCREEN_ROOT_DIR"
+                    if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward --fuzz=0 < "$KLIPPERSCREEN_MATCHED_PATCH"; then
+                        print_success "KlipperScreen patch applied ($(basename "$KLIPPERSCREEN_MATCHED_PATCH"))"
+                    else
+                        print_warning "Patch failed during apply (unexpected). Please review output."
+                    fi
                 else
-                    print_warning "Patch failed during apply (unexpected). Please review output."
+                    print_warning "No patch variant applied cleanly against this KlipperScreen checkout. Skipping."
+                    print_info "Your KlipperScreen version may be newer/older than any known variant; see patches/ to apply manually."
                 fi
             else
-                print_warning "Patch did not apply cleanly (likely already applied or conflicting changes). Skipping."
+                print_info "Skipped KlipperScreen patch (you can apply one from $SCRIPT_DIR/patches/ manually later)"
             fi
-        else
-            print_info "Skipped KlipperScreen patch (you can apply $KLIPPERSCREEN_PATCH manually later)"
         fi
-    elif [ ! -f "$KLIPPERSCREEN_PATCH" ]; then
-        print_warning "KlipperScreen patch file not found: $KLIPPERSCREEN_PATCH"
     fi
 
     # Ensure KlipperScreen.conf has font_size = small and ACE Pro menu entry
