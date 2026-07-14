@@ -447,6 +447,18 @@ body {
     background: rgba(71, 85, 105, 0.14);
 }
 
+.target-tool-indicator {
+    margin: 6px 0 10px 0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid #9ca3af;
+    color: #e5e7eb;
+    background: rgba(156, 163, 175, 0.14);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.25px;
+}
+
 .instance-header {
     font-weight: 700;
     color: #e6e9ed;
@@ -519,6 +531,43 @@ body {
     }
 }
 
+.slot-card.target-tool {
+    border-color: #9ca3af !important;
+    border-width: 3px;
+    box-shadow:
+        0 0 0 4px rgba(156, 163, 175, 0.22),
+        0 0 16px rgba(156, 163, 175, 0.26),
+        0 10px 18px rgba(0, 0, 0, 0.35);
+    animation: targetSlotPulse 1.7s ease-in-out infinite;
+}
+
+.slot-card.ready.target-tool,
+.slot-card.empty.target-tool,
+.slot-card.busy.target-tool {
+    border-color: #9ca3af !important;
+}
+
+@keyframes targetSlotPulse {
+    0% {
+        box-shadow:
+            0 0 0 4px rgba(156, 163, 175, 0.12),
+            0 0 10px rgba(156, 163, 175, 0.14),
+            0 10px 18px rgba(0, 0, 0, 0.35);
+    }
+    50% {
+        box-shadow:
+            0 0 0 4px rgba(156, 163, 175, 0.28),
+            0 0 20px rgba(156, 163, 175, 0.30),
+            0 10px 18px rgba(0, 0, 0, 0.35);
+    }
+    100% {
+        box-shadow:
+            0 0 0 4px rgba(156, 163, 175, 0.12),
+            0 0 10px rgba(156, 163, 175, 0.14),
+            0 10px 18px rgba(0, 0, 0, 0.35);
+    }
+}
+
 .slot-card .locked {
     opacity: 0.6;
     pointer-events: none;
@@ -578,6 +627,22 @@ body {
     letter-spacing: 0.7px;
     text-transform: uppercase;
     box-shadow: 0 0 10px rgba(34, 211, 238, 0.35);
+}
+
+.target-tool-badge {
+    display: inline-block;
+    margin-left: auto;
+    margin-right: 8px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid #9ca3af;
+    background: rgba(156, 163, 175, 0.2);
+    color: #e5e7eb;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    box-shadow: 0 0 10px rgba(156, 163, 175, 0.3);
 }
 
 .slot-status-badge.ready {

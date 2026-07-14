@@ -1,5 +1,6 @@
 import logging
 import json
+import time
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -60,6 +61,7 @@ class Panel(ScreenPanel):
 
         # Global state
         self.current_loaded_slot = -1
+        self.target_tool_index = -1  # -1 = no toolchange in flight/unconfirmed
         self.endless_spool_enabled = False
         self.dryer_enabled = False
         self.ace_pro_enabled = True   # assume enabled until first RPC update
@@ -69,6 +71,7 @@ class Panel(ScreenPanel):
         self.current_instance = 0  # Currently displayed instance
         self.selected_dryer_instance = "ALL"  # Selected dryer instance: 0, 1, or "ALL"
         self.rfid_sync_enabled = True  # Track RFID sync toggle locally
+        self._pending_toggle_states = {}
 
         # Initialize attributes used in various methods
         self._activation_timeout_id = None
@@ -141,22 +144,46 @@ class Panel(ScreenPanel):
         return False  # do not repeat
 
     def _poll_connection_status(self):
-        """Query connection_state for each ACE instance directly from Klipper."""
+        """Query connection_state + slot inventory for each ACE instance.
+
+        This is the only periodic (every 3s) live refresh for ACE data.
+        Backend inventory/slot changes (e.g. a new spool becoming "ready"
+        after insertion, or a runout marking a slot "empty") are NOT part
+        of KlipperScreen's global push subscription (same reasoning as
+        ace_state - see acepro.py history), so without this the on-screen
+        slot inventory would only ever update when the panel is (re)opened
+        or the user manually hits "Refresh All". Reuses the same
+        ace_fields/_process_rpc_status path as a manual refresh so slots,
+        dryer status, and ace_state (current/target index, endless spool,
+        etc.) all stay live too, not just connection_state.
+        """
         try:
-            direct_ws = getattr(
-                getattr(getattr(self, "_screen", None), "_ws", None),
-                "klippy", None
-            )
-            direct_ws = getattr(direct_ws, "_ws", None)
+            direct_ws = getattr(getattr(self, "_screen", None), "_ws", None)
             if not callable(getattr(direct_ws, "send_method", None)):
                 return True
 
-            objects = {f"ace_instance_{i}": ["connection_state"] for i in self.ace_instances}
+            ace_fields = [
+                "slots",
+                "status",
+                "dryer",
+                "dryer_status",
+                "temp",
+                "enable_rfid",
+                "fan_speed",
+                "feed_assist_count",
+                "cont_assist_time",
+                "connection_state",
+            ]
+            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"]}
+            for instance_id in self.ace_instances:
+                objects[f"ace_instance_{instance_id}"] = ace_fields
 
             def _cb(response, *_):
                 try:
                     result = (response or {}).get("result", {})
                     status = (result or {}).get("status", {})
+                    if isinstance(status, dict):
+                        self._process_rpc_status(status)
                     for instance_id in self.ace_instances:
                         key = f"ace_instance_{instance_id}"
                         val = (status.get(key) or {}).get("connection_state")
@@ -245,14 +272,27 @@ class Panel(ScreenPanel):
                 logging.error("ACE: _ws not available for gcode")
                 return False
 
-            if not hasattr(self._screen._ws, 'klippy'):
-                logging.error("ACE: klippy not available for gcode")
+
+            ws = self._screen._ws
+            api = getattr(ws, 'api', None)
+            if callable(getattr(api, 'gcode_script', None)):
+                logging.info(f"ACE: Sending gcode via api.gcode_script: {gcode_command}")
+                sent = api.gcode_script(gcode_command)
+            elif callable(getattr(ws, 'send_method', None)):
+                logging.info(f"ACE: Sending gcode via direct websocket: {gcode_command}")
+                sent = ws.send_method("printer.gcode.script", {"script": gcode_command})
+            else:
+                logging.error("ACE: No gcode send path available")
                 return False
 
-            self._screen._ws.klippy.gcode_script(gcode_command)
-            return True
+            if sent:
+                logging.info(f"ACE: Sent gcode: {gcode_command}")
+                return True
+
+            logging.error(f"ACE: Gcode command not sent: {gcode_command}")
+            return False
         except Exception as e:
-            logging.error(f"ACE: Error sending gcode '{gcode_command}': {e}")
+            logging.error(f"ACE: Error sending gcode '{gcode_command}': {e}", exc_info=True)
             self._screen.show_popup_message(
                 "Connection error. Check Klipper status."
             )
@@ -265,7 +305,7 @@ class Panel(ScreenPanel):
         """
         try:
             ws = getattr(self, "_screen", None)
-            klippy = getattr(getattr(ws, "_ws", None), "klippy", None)
+            klippy = getattr(ws, "_ws", None)
             query_fn = None
             logging.debug(
                 f"ACE: Klippy RPC methods (query/object): "
@@ -279,8 +319,10 @@ class Panel(ScreenPanel):
 
             if not callable(query_fn):
                 logging.debug("ACE: JSON-RPC query method not available; trying direct websocket query")
-                # Try direct printer.objects.query via websocket send_method
-                direct_ws = getattr(klippy, "_ws", None)
+                # screen._ws IS the KlippyWebsocket/KlippyUDS instance itself
+                # (it has no nested .klippy attribute) - send_method lives on it
+                # directly.
+                direct_ws = klippy
                 if callable(getattr(direct_ws, "send_method", None)):
                     ace_fields = [
                         "slots",
@@ -293,7 +335,7 @@ class Panel(ScreenPanel):
                         "feed_assist_count",
                         "cont_assist_time",
                     ]
-                    objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"]}
+                    objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"]}
                     for instance_id in self.ace_instances:
                         key = f"ace_instance_{instance_id}"
                         objects[key] = ace_fields
@@ -361,7 +403,7 @@ class Panel(ScreenPanel):
                 "feed_assist_count",
                 "cont_assist_time",
             ]
-            objects = {"ace_state": ["ace_instances", "current_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"]}
+            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"]}
             for instance_id in self.ace_instances:
                 key = f"ace_instance_{instance_id}"
                 objects[key] = ace_fields
@@ -381,6 +423,24 @@ class Panel(ScreenPanel):
 
         return False
 
+    def _mark_pending_toggle_state(self, state_key, desired_value):
+        self._pending_toggle_states[state_key] = {
+            "value": desired_value,
+            "time": time.monotonic(),
+        }
+
+    def _should_ignore_toggle_update(self, state_key, reported_value, grace_seconds=6):
+        pending = self._pending_toggle_states.get(state_key)
+        if not pending:
+            return False
+        if pending.get("value") == reported_value:
+            self._pending_toggle_states.pop(state_key, None)
+            return False
+        if time.monotonic() - pending.get("time", 0) < grace_seconds:
+            return True
+        self._pending_toggle_states.pop(state_key, None)
+        return False
+
     def _process_rpc_status(self, status_payload):
         """Process Moonraker objects.query payload to update UI without gcode chatter."""
         try:
@@ -397,22 +457,39 @@ class Panel(ScreenPanel):
                     logging.info(f"ACE: (RPC) Updated current_loaded_slot: {old_slot} → {current_index}")
                     self.update_slot_loaded_states()
 
+                # Unconfirmed toolchange tracking: distinct from current_index,
+                # a non -1 value here means a toolchange attempt is still in
+                # flight or was left unconfirmed by a failure.
+                if "target_index" in ace_state:
+                    target_index = ace_state.get("target_index", -1)
+                    if target_index != self.target_tool_index:
+                        old_target = self.target_tool_index
+                        self.target_tool_index = target_index
+                        logging.info(f"ACE: (RPC) Updated target_tool_index: {old_target} → {target_index}")
+                        self.update_slot_loaded_states()
+
                 # Endless spool toggle
                 endless_enabled = ace_state.get("endless_spool_enabled")
                 if isinstance(endless_enabled, bool) and hasattr(self, "endless_spool_switch"):
-                    try:
-                        self.endless_spool_switch.handler_block_by_func(self.on_endless_spool_toggled)
-                        self.endless_spool_switch.set_active(endless_enabled)
-                        self.endless_spool_switch.handler_unblock_by_func(self.on_endless_spool_toggled)
-                        self.endless_spool_status.set_markup(
-                            '<span foreground="green"><b>On</b></span>' if endless_enabled
-                            else '<span foreground="gray">Off</span>'
+                    if self._should_ignore_toggle_update("endless_spool_enabled", endless_enabled):
+                        logging.debug(
+                            "ACE: ignoring temporary endless spool state %s while waiting for confirmation",
+                            endless_enabled,
                         )
-                        self.endless_spool_enabled = endless_enabled
-                        self._update_match_mode_sensitivity()
-                    except Exception:
-                        # Switch not connected yet; skip quietly
-                        pass
+                    else:
+                        try:
+                            self.endless_spool_switch.handler_block_by_func(self.on_endless_spool_toggled)
+                            self.endless_spool_switch.set_active(endless_enabled)
+                            self.endless_spool_switch.handler_unblock_by_func(self.on_endless_spool_toggled)
+                            self.endless_spool_status.set_markup(
+                                '<span foreground="green"><b>On</b></span>' if endless_enabled
+                                else '<span foreground="gray">Off</span>'
+                            )
+                            self.endless_spool_enabled = endless_enabled
+                            self._update_match_mode_sensitivity()
+                        except Exception:
+                            # Switch not connected yet; skip quietly
+                            pass
 
                 match_mode = ace_state.get("endless_spool_match_mode")
                 if isinstance(match_mode, str):
@@ -422,16 +499,22 @@ class Panel(ScreenPanel):
                 ace_pro_enabled = ace_state.get("ace_pro_enabled")
                 if isinstance(ace_pro_enabled, bool):
                     if hasattr(self, "ace_pro_switch"):
-                        try:
-                            self.ace_pro_switch.handler_block_by_func(self.on_ace_pro_toggled)
-                            self.ace_pro_switch.set_active(ace_pro_enabled)
-                            self.ace_pro_switch.handler_unblock_by_func(self.on_ace_pro_toggled)
-                            self.ace_pro_status.set_markup(
-                                '<span foreground="green"><b>On</b></span>' if ace_pro_enabled
-                                else '<span foreground="red">Off</span>'
+                        if self._should_ignore_toggle_update("ace_pro_enabled", ace_pro_enabled):
+                            logging.debug(
+                                "ACE: ignoring temporary ACE Pro state %s while waiting for confirmation",
+                                ace_pro_enabled,
                             )
-                        except Exception:
-                            pass
+                        else:
+                            try:
+                                self.ace_pro_switch.handler_block_by_func(self.on_ace_pro_toggled)
+                                self.ace_pro_switch.set_active(ace_pro_enabled)
+                                self.ace_pro_switch.handler_unblock_by_func(self.on_ace_pro_toggled)
+                                self.ace_pro_status.set_markup(
+                                    '<span foreground="green"><b>On</b></span>' if ace_pro_enabled
+                                    else '<span foreground="red">Off</span>'
+                                )
+                            except Exception:
+                                pass
                     self.ace_pro_enabled = ace_pro_enabled
                     self._update_ace_pro_sensitivity(ace_pro_enabled)
                     self._update_ace_pro_switch_lock()
@@ -544,6 +627,10 @@ class Panel(ScreenPanel):
         }
         .ace_slot_loaded {
             box-shadow: inset 0 0 0 2px #4CAF50;
+            border-radius: 6px;
+        }
+        .ace_slot_target {
+            box-shadow: inset 0 0 0 2px #B0B0B0;
             border-radius: 6px;
         }
         scrollbar.ace_wide_scrollbar {
@@ -805,6 +892,9 @@ class Panel(ScreenPanel):
         self.content.show_all()
         self._update_ace_pro_sensitivity(self.ace_pro_enabled)
 
+        # Fetch fresh slot data immediately so the user doesn't see stale "Empty" cards.
+        self.refresh_all_instances()
+
     def _update_ace_pro_sensitivity(self, enabled):
         """Gray out / restore all controls except the ACE Pro switch itself."""
         if not enabled and getattr(self, "current_view", "main") != "main":
@@ -915,6 +1005,7 @@ class Panel(ScreenPanel):
     def on_ace_pro_toggled(self, switch, gparam):
         """Handle ACE Pro enable/disable toggle."""
         self.ace_pro_enabled = switch.get_active()
+        self._mark_pending_toggle_state("ace_pro_enabled", self.ace_pro_enabled)
         if self.ace_pro_enabled:
             self.ace_pro_status.set_markup('<span foreground="green"><b>On</b></span>')
             self._send_gcode("SET_PIN PIN=ACE_Pro VALUE=1")
@@ -930,6 +1021,7 @@ class Panel(ScreenPanel):
     def on_endless_spool_toggled(self, switch, gparam):
         """Handle Endless Spool toggle"""
         self.endless_spool_enabled = switch.get_active()
+        self._mark_pending_toggle_state("endless_spool_enabled", self.endless_spool_enabled)
 
         # Update status label
         if self.endless_spool_enabled:
@@ -1235,9 +1327,10 @@ class Panel(ScreenPanel):
             logging.debug("ACE: Failed to set slot visual state", exc_info=True)
 
     def update_slot_loaded_states(self):
-        """Update all slot loaded states based on ace_current_index"""
+        """Update all slot loaded states based on ace_current_index / ace_target_index"""
         current_loaded = self.get_current_loaded_slot()
-        logging.info(f"ACE: Updating loaded states, current: {current_loaded}")
+        target_tool = getattr(self, 'target_tool_index', -1)
+        logging.info(f"ACE: Updating loaded states, current: {current_loaded}, target: {target_tool}")
 
         for instance_id in self.ace_instances:
             instance = self.instance_data[instance_id]
@@ -1254,15 +1347,22 @@ class Panel(ScreenPanel):
                 global_tool = instance['tool_offset'] + local_slot
                 slot_btn = instance['slot_buttons'][local_slot]
                 is_loaded = (current_loaded == global_tool)
+                # Only shown while the toolchange is unconfirmed (target differs
+                # from the confirmed current tool); clears once they match again.
+                is_target = (target_tool != -1 and target_tool == global_tool and not is_loaded)
 
                 # Remove all state classes
                 slot_btn.get_style_context().remove_class("ace_slot_loaded")
                 slot_btn.get_style_context().remove_class("ace_slot_empty")
+                slot_btn.get_style_context().remove_class("ace_slot_target")
 
                 # Add appropriate class
                 if is_loaded:
                     slot_btn.get_style_context().add_class("ace_slot_loaded")
                     logging.info(f"ACE: Marked T{global_tool} as LOADED")
+                elif is_target:
+                    slot_btn.get_style_context().add_class("ace_slot_target")
+                    logging.info(f"ACE: Marked T{global_tool} as TARGET (unconfirmed)")
                 else:
                     slot_data = instance['inventory'][local_slot]
                     if slot_data['status'] == 'empty':
@@ -1287,7 +1387,10 @@ class Panel(ScreenPanel):
 
         # Update status label (if it exists)
         if hasattr(self, 'status_label'):
-            if current_loaded != -1:
+            target = getattr(self, 'target_tool_index', -1)
+            if target != -1 and target != current_loaded:
+                self.status_label.set_text(f"ACE: Toolchange to T{target} unconfirmed")
+            elif current_loaded != -1:
                 self.status_label.set_text(f"ACE: Tool T{current_loaded} Loaded")
             else:
                 self.status_label.set_text("ACE: No Tool Loaded")
@@ -1408,8 +1511,7 @@ class Panel(ScreenPanel):
         are still used rather than silently dropping the action.
         """
         try:
-            klippy = getattr(getattr(self._screen, "_ws", None), "klippy", None)
-            direct_ws = getattr(klippy, "_ws", None) if klippy else None
+            direct_ws = getattr(self._screen, "_ws", None)
             if callable(getattr(direct_ws, "send_method", None)):
                 def _cb(response, *_):
                     try:
@@ -2469,7 +2571,24 @@ class Panel(ScreenPanel):
             f"TEMP={temp} DURATION={duration}"
         )
 
-        self._send_gcode(gcode)
+        logging.info(
+            "ACE: Dryer send requested: instance=%s cmd=%s",
+            instance_id,
+            gcode,
+        )
+        sent = self._send_gcode(gcode)
+        if sent:
+            logging.info(
+                "ACE: Dryer command sent: instance=%s cmd=%s",
+                instance_id,
+                gcode,
+            )
+        else:
+            logging.warning(
+                "ACE: Dryer command not sent: instance=%s cmd=%s",
+                instance_id,
+                gcode,
+            )
         self._screen.show_popup_message(
             f"Starting dryer on ACE {instance_id}\n"
             f"{temp}°C for {duration} minutes", 2
@@ -2480,7 +2599,25 @@ class Panel(ScreenPanel):
         instance_param = (
             f" INSTANCE={instance_id}" if instance_id > 0 else ""
         )
-        self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
+        gcode = f"ACE_STOP_DRYING{instance_param}"
+        logging.info(
+            "ACE: Dryer stop requested: instance=%s cmd=%s",
+            instance_id,
+            gcode,
+        )
+        sent = self._send_gcode(gcode)
+        if sent:
+            logging.info(
+                "ACE: Dryer stop command sent: instance=%s cmd=%s",
+                instance_id,
+                gcode,
+            )
+        else:
+            logging.warning(
+                "ACE: Dryer stop command not sent: instance=%s cmd=%s",
+                instance_id,
+                gcode,
+            )
         self._screen.show_popup_message(
             f"Stopping dryer on ACE {instance_id}", 1
         )
@@ -2558,9 +2695,25 @@ class Panel(ScreenPanel):
                 instance_param = (
                     f" INSTANCE={instance_id}" if instance_id > 0 else ""
                 )
-                self._send_gcode(
-                    f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
+                gcode = f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
+                logging.info(
+                    "ACE: Dryer send requested: instance=%s cmd=%s",
+                    instance_id,
+                    gcode,
                 )
+                sent = self._send_gcode(gcode)
+                if sent:
+                    logging.info(
+                        "ACE: Dryer command sent: instance=%s cmd=%s",
+                        instance_id,
+                        gcode,
+                    )
+                else:
+                    logging.warning(
+                        "ACE: Dryer command not sent: instance=%s cmd=%s",
+                        instance_id,
+                        gcode,
+                    )
 
             self._screen.show_popup_message(
                 f"Starting all {len(self.ace_instances)} dryers", 1
@@ -2579,9 +2732,25 @@ class Panel(ScreenPanel):
             instance_param = (
                 f" INSTANCE={instance_id}" if instance_id > 0 else ""
             )
-            self._send_gcode(
-                f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
+            gcode = f"ACE_START_DRYING{instance_param} TEMP={temp} DURATION={duration}"
+            logging.info(
+                "ACE: Dryer send requested: instance=%s cmd=%s",
+                instance_id,
+                gcode,
             )
+            sent = self._send_gcode(gcode)
+            if sent:
+                logging.info(
+                    "ACE: Dryer command sent: instance=%s cmd=%s",
+                    instance_id,
+                    gcode,
+                )
+            else:
+                logging.warning(
+                    "ACE: Dryer command not sent: instance=%s cmd=%s",
+                    instance_id,
+                    gcode,
+                )
             
             self._screen.show_popup_message(
                 f"Starting dryer on ACE {instance_id}\n{temp}°C for {duration} minutes", 2
@@ -2595,7 +2764,25 @@ class Panel(ScreenPanel):
                 instance_param = (
                     f" INSTANCE={instance_id}" if instance_id > 0 else ""
                 )
-                self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
+                gcode = f"ACE_STOP_DRYING{instance_param}"
+                logging.info(
+                    "ACE: Dryer stop requested: instance=%s cmd=%s",
+                    instance_id,
+                    gcode,
+                )
+                sent = self._send_gcode(gcode)
+                if sent:
+                    logging.info(
+                        "ACE: Dryer stop command sent: instance=%s cmd=%s",
+                        instance_id,
+                        gcode,
+                    )
+                else:
+                    logging.warning(
+                        "ACE: Dryer stop command not sent: instance=%s cmd=%s",
+                        instance_id,
+                        gcode,
+                    )
 
             self._screen.show_popup_message(
                 f"Stopping all {len(self.ace_instances)} dryers", 1
@@ -2606,7 +2793,25 @@ class Panel(ScreenPanel):
             instance_param = (
                 f" INSTANCE={instance_id}" if instance_id > 0 else ""
             )
-            self._send_gcode(f"ACE_STOP_DRYING{instance_param}")
+            gcode = f"ACE_STOP_DRYING{instance_param}"
+            logging.info(
+                "ACE: Dryer stop requested: instance=%s cmd=%s",
+                instance_id,
+                gcode,
+            )
+            sent = self._send_gcode(gcode)
+            if sent:
+                logging.info(
+                    "ACE: Dryer stop command sent: instance=%s cmd=%s",
+                    instance_id,
+                    gcode,
+                )
+            else:
+                logging.warning(
+                    "ACE: Dryer stop command not sent: instance=%s cmd=%s",
+                    instance_id,
+                    gcode,
+                )
             
             self._screen.show_popup_message(
                 f"Stopping dryer on ACE {instance_id}", 1
@@ -2907,25 +3112,25 @@ class Panel(ScreenPanel):
         """Handle material selection"""
         # Check if material actually changed (not same selection again)
         previous_material = self.config_material
+        previous_temp = self.config_temp
         self.config_material = material
         self.material_btn.set_label(f"Material: {material}")
 
-        # Auto-populate temperature whenever material actually changes
-        if previous_material != material:
-            if material in self.FILAMENT_TEMP_DEFAULTS:
+        # Auto-populate the temperature whenever the material changes, or
+        # whenever the slot currently has no usable temp (0) - this avoids
+        # leaving a real material saved with an unusable Temp: 0°C if the
+        # user re-taps the already-selected material button.
+        if material in self.FILAMENT_TEMP_DEFAULTS:
+            if previous_material != material or previous_temp <= 0:
                 new_temp = self.FILAMENT_TEMP_DEFAULTS[material]
                 self.config_temp = new_temp
                 self.temp_btn.set_label(f"Temperature: {new_temp}°C")
-            elif material == "Empty":
-                self.config_temp = 0
-                self.temp_btn.set_label("Temperature: Not Set")
                 logging.info(
-                    f"ACE: Auto-set temperature to {new_temp}°C "
-                    f"for {material}"
+                    f"ACE: Auto-set temperature to {new_temp}°C for {material}"
                 )
-                self._screen.show_popup_message(
-                    f"Temperature set to {new_temp}°C for {material}", 1
-                )
+        elif material == "Empty" and previous_material != material:
+            self.config_temp = 0
+            self.temp_btn.set_label("Temperature: Not Set")
 
         self.clear_right_column()
 
@@ -3204,9 +3409,9 @@ class Panel(ScreenPanel):
             logging.error("ACE: Save blocked - no material selected")
             return
 
-        if temp < 0 or temp > 300:
+        if temp <= 0 or temp > 300:
             self._screen.show_popup_message(
-                f"ERROR: Temperature must be between 0-300°C!\nCurrent: {temp}°C"
+                f"ERROR: Temperature must be set (1-300°C) for {material}!\nCurrent: {temp}°C"
             )
             logging.error(f"ACE: Save blocked - invalid temp={temp}")
             return

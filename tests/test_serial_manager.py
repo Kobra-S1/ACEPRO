@@ -14,98 +14,82 @@ import struct
 import json
 from unittest.mock import Mock, patch
 
-from ace.protocol import AceTransportSpec
+from ace.protocol import AceTransportSpec, parse_usb_location
 
 
 class TestParseUsbLocation:
-    """Test USB location string parsing for device sorting."""
+    """Test the shared USB location parser (protocol.parse_usb_location).
 
-    def setup_method(self):
-        """Create serial manager with minimal mocking."""
-        with patch('ace.serial_manager.serial'):
-            import ace.serial_manager as sm
-            DummySerialException = type("DummySerialException", (Exception,), {})
-            sm.SerialException = DummySerialException  # ensure catchable exception type
-            from ace.serial_manager import AceSerialManager
-            sm.SerialException = DummySerialException  # also override in module after import
-            assert issubclass(sm.SerialException, BaseException)
-            self.SerialException = sm.SerialException
-            
-            mock_gcode = Mock()
-            mock_reactor = Mock()
-            
-            self.manager = AceSerialManager(
-                gcode=mock_gcode,
-                reactor=mock_reactor,
-                instance_num=0,
-                ace_enabled=False  # Don't try to connect
-            )
+    serial_manager.py no longer keeps its own copy of this logic - it reuses
+    protocol.parse_usb_location directly so there is a single source of
+    truth for USB daisy-chain sort order.
+    """
 
     def test_parse_simple_location(self):
         """Test parsing simple USB location like '1-1.4'."""
-        result = self.manager._parse_usb_location("1-1.4")
+        result = parse_usb_location("1-1.4")
         assert result == (1, 1, 4)
 
     def test_parse_complex_location_with_colon(self):
         """Test parsing location with colon interface suffix."""
         # "1-1.4.3:1.0" - the :1.0 is the USB interface, should be stripped
-        result = self.manager._parse_usb_location("1-1.4.3:1.0")
+        result = parse_usb_location("1-1.4.3:1.0")
         # After split(':')[0] → "1-1.4.3", replace('-','.') → "1.1.4.3"
         assert result == (1, 1, 4, 3)
 
     def test_parse_acm_fallback(self):
         """Test parsing ACM device fallback format."""
-        result = self.manager._parse_usb_location("acm.2")
+        result = parse_usb_location("acm.2")
         # ACM devices sort after USB (999998) but before unknown (999999)
         assert result == (999998, 2)
 
     def test_parse_acm_fallback_zero(self):
         """Test parsing ACM0 fallback format."""
-        result = self.manager._parse_usb_location("acm.0")
+        result = parse_usb_location("acm.0")
         assert result == (999998, 0)
 
     def test_parse_acm_invalid_returns_high_value(self):
         """Non-numeric ACM suffix should fall back to high sort key."""
-        result = self.manager._parse_usb_location("acm.bad")
+        result = parse_usb_location("acm.bad")
         assert result == (999999,)
 
     def test_parse_invalid_token_raises_value_error_branch(self):
         """Mixed tokens causing ValueError should fall back to high sort key."""
-        result = self.manager._parse_usb_location("1-1.a.3")
+        result = parse_usb_location("1-1.a.3")
         assert result == (999999,)
 
     def test_acm_sorts_after_usb_before_unknown(self):
         """ACM devices should sort after USB but before unknowns."""
-        usb = self.manager._parse_usb_location("1-1.4.3:1.0")
-        acm = self.manager._parse_usb_location("acm.2")
-        unknown = self.manager._parse_usb_location("garbage")
-        
+        usb = parse_usb_location("1-1.4.3:1.0")
+        acm = parse_usb_location("acm.2")
+        unknown = parse_usb_location("garbage")
+
         assert usb < acm < unknown
 
     def test_parse_empty_string_returns_high_value(self):
         """Empty string should sort to end."""
-        result = self.manager._parse_usb_location("")
+        result = parse_usb_location("")
         assert result == (999999,)
 
     def test_parse_none_returns_high_value(self):
         """None should sort to end."""
-        result = self.manager._parse_usb_location(None)
+        result = parse_usb_location(None)
         assert result == (999999,)
 
     def test_parse_invalid_location_returns_high_value(self):
         """Invalid non-numeric location should sort to end."""
-        result = self.manager._parse_usb_location("invalid-text-here")
+        result = parse_usb_location("invalid-text-here")
         assert result == (999999,)
 
     def test_parse_mixed_numeric_and_text_returns_high_value(self):
         """Mixed segments with text should not raise and should sort to end."""
-        result = self.manager._parse_usb_location("1-foo.3")
+        result = parse_usb_location("1-foo.3")
         assert result == (999999,)
 
     def test_invalid_locations_sort_after_valid(self):
         """Ensure invalid locations compare after valid ones without exceptions."""
-        valid = self.manager._parse_usb_location("1-1.2")
-        invalid = self.manager._parse_usb_location("garbage")
+        valid = parse_usb_location("1-1.2")
+        invalid = parse_usb_location("garbage")
         assert valid < invalid
 
     def test_sorting_order_is_correct(self):
@@ -117,7 +101,7 @@ class TestParseUsbLocation:
             "2-1:1.0",      # Should be (2, 1)
         ]
 
-        parsed = [self.manager._parse_usb_location(loc) for loc in locations]
+        parsed = [parse_usb_location(loc) for loc in locations]
         sorted_parsed = sorted(parsed)
 
         assert sorted_parsed == [
@@ -129,7 +113,17 @@ class TestParseUsbLocation:
 
 
 class TestFindComPort:
-    """Tests for find_com_port covering enumeration branches."""
+    """Tests for find_com_port covering enumeration branches.
+
+    find_com_port() is a location-based, stateless fallback: it always
+    re-derives order from currently-visible USB locations (depth-first,
+    then lexicographic) and returns matches[instance]. It no longer
+    remembers "expected topology" across calls - that self-learning
+    validator was redundant with (and could disagree with) AceManager's
+    authoritative _resolve_daisy_chain_topology(), which resolves each
+    instance's target_usb_location once and matches by exact location
+    string via find_port_by_location() instead.
+    """
 
     def setup_method(self):
         self.serial_patch = patch('ace.serial_manager.serial')
@@ -150,20 +144,16 @@ class TestFindComPort:
         self.serial_mod.tools.list_ports.comports = lambda: []
 
         assert self.manager.find_com_port("ACE", 0) is None
-        assert self.manager._expected_topology_positions is None
 
-    def test_warns_when_insufficient_devices_for_instance(self):
+    def test_returns_none_when_insufficient_devices_for_instance(self):
         ports = [SimpleNamespace(device="/dev/ttyUSB0", description="ACE", hwid="LOCATION=1-1.1")]
         self.serial_mod.tools.list_ports.comports = lambda: ports
 
         result = self.manager.find_com_port("ACE", instance=1)
 
         assert result is None
-        # Should have logged the warning about insufficient devices
-        log_messages = [call[0][0] for call in self.gcode.respond_info.call_args_list]
-        assert any("only 1 ace" in msg.lower() for msg in log_messages)
 
-    def test_stores_topology_and_returns_sorted_device(self):
+    def test_returns_sorted_device(self):
         ports = [
             SimpleNamespace(device="/dev/ttyUSB1", description="ACE", hwid="LOCATION=1-1.2"),
             SimpleNamespace(device="/dev/ttyUSB0", description="ACE", hwid="LOCATION=1-1.1"),
@@ -174,18 +164,17 @@ class TestFindComPort:
 
         # Sorted by topology so /dev/ttyUSB0 (1-1.1) should be chosen first
         assert result == "/dev/ttyUSB0"
-        assert self.manager._expected_topology_positions == [(1, 1, 1), (1, 1, 2)]
 
-    def test_uses_existing_topology_on_subsequent_calls(self):
-        self.manager._expected_topology_positions = [(1, 1, 1)]
+    def test_reresolves_order_on_every_call(self):
+        """Unlike the old self-learning validator, order is re-derived from
+        current ports on every call - there is no stale cached state to
+        disagree with reality."""
         ports = [SimpleNamespace(device="/dev/ttyUSB5", description="ACE", hwid="LOCATION=1-1.9")]
         self.serial_mod.tools.list_ports.comports = lambda: ports
 
         result = self.manager.find_com_port("ACE", instance=0)
 
         assert result == "/dev/ttyUSB5"
-        # Should not overwrite expected topology when already set
-        assert self.manager._expected_topology_positions == [(1, 1, 1)]
 
     def test_falls_back_to_device_when_no_location_or_acm(self):
         ports = [SimpleNamespace(device="/dev/ttyXYZ", description="ACE", hwid="NOLOC")]
@@ -228,29 +217,18 @@ class TestFindComPort:
         result = self.manager.find_com_port("ACE", instance=0)
         assert result == "/dev/ttyACM3"
 
-    def test_prefers_port_matching_expected_topology(self):
-        # Stored topology expects the deeper device, even though sorting would pick the first
-        self.manager._expected_topology_positions = [(1, 1, 4, 3)]
+    def test_deeper_daisy_chain_position_selected_for_higher_instance(self):
+        # Instance 1 (second physical unit) must resolve to the deeper
+        # daisy-chain location, purely from current sort order - no stored
+        # "expected topology" needed or consulted.
         ports = [
-            SimpleNamespace(device="/dev/ttyUSB0", description="ACE", hwid="LOCATION=1-1.2"),      # would sort first
-            SimpleNamespace(device="/dev/ttyUSB1", description="ACE", hwid="LOCATION=1-1.4.3"),    # expected match
+            SimpleNamespace(device="/dev/ttyUSB0", description="ACE", hwid="LOCATION=1-1.2"),      # shallower
+            SimpleNamespace(device="/dev/ttyUSB1", description="ACE", hwid="LOCATION=1-1.4.3"),    # deeper
         ]
         self.serial_mod.tools.list_ports.comports = lambda: ports
 
-        result = self.manager.find_com_port("ACE", instance=0)
+        result = self.manager.find_com_port("ACE", instance=1)
         assert result == "/dev/ttyUSB1"
-
-    def test_fallbacks_to_sorted_when_no_topology_match(self):
-        # Expected topology doesn't exist in current ports -> fallback to sorted order (instance index)
-        self.manager._expected_topology_positions = [(1, 1, 9)]
-        ports = [
-            SimpleNamespace(device="/dev/ttyUSB2", description="ACE", hwid="LOCATION=1-1.5"),
-            SimpleNamespace(device="/dev/ttyUSB3", description="ACE", hwid="LOCATION=1-1.6"),
-        ]
-        self.serial_mod.tools.list_ports.comports = lambda: ports
-
-        result = self.manager.find_com_port("ACE", instance=0)
-        assert result == "/dev/ttyUSB2"
 
     def test_find_com_port_detects_ace2_usb_single_serial_real_hwid(self):
         # Simulates the exact PySerial portinfo for a QinHeng CH343 adapter
@@ -268,7 +246,6 @@ class TestFindComPort:
         result = self.manager.find_com_port("USB Single Serial", instance=0)
 
         assert result == "/dev/ttyACM0"
-        assert self.manager._expected_topology_positions == [(1, 1, 4)]
 
     def test_find_com_port_detects_mixed_ace1_ace2_real_topology(self):
         """Mixed enumeration should keep ACE1 and ACE2 transports distinct."""
@@ -287,15 +264,14 @@ class TestFindComPort:
         self.serial_mod.tools.list_ports.comports = lambda: ports
 
         ace1_port = self.manager.find_com_port("ACE", instance=0)
-        self.manager._expected_topology_positions = None
         ace2_port = self.manager.find_com_port("USB Single Serial", instance=0)
 
         assert ace1_port == "/dev/ttyACM0"
         assert ace2_port == "/dev/ttyACM1"
 
     def test_handles_more_aces_than_configured_instances(self):
-        # With two ACEs on the bus but only instance 0 requested, it should still pick the matching expected topo
-        self.manager._expected_topology_positions = [(2, 2, 4, 3)]
+        # Three devices visible (two ACE1 + one unrelated); only instance 0
+        # requested, must resolve to the physically-closest ACE1 unit.
         ports = [
             SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=2-2.3"),
             SimpleNamespace(device="/dev/ttyACM1", description="ACE", hwid="LOCATION=2-2.4.3"),
@@ -304,7 +280,43 @@ class TestFindComPort:
         self.serial_mod.tools.list_ports.comports = lambda: ports
 
         result = self.manager.find_com_port("ACE", instance=0)
+        assert result == "/dev/ttyACM0"
+
+    def test_skips_port_claimed_by_another_instance(self):
+        """A port already opened by a different logical instance must never
+        be selected by another instance's fallback lookup - stealing an
+        in-use port causes interleaved frames on both (see ACE[0]/ACE[1]
+        garbled-comms bug reports)."""
+        from ace import serial_manager
+
+        ports = [
+            SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=2-2.3"),
+            SimpleNamespace(device="/dev/ttyACM1", description="ACE", hwid="LOCATION=2-2.4.3"),
+        ]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        serial_manager._CONNECTED_PORTS["/dev/ttyACM0"] = 5  # claimed by instance 5
+
+        result = self.manager.find_com_port("ACE", instance=0)
+
+        # instance 0 must skip the claimed port and fall back to the next
+        # candidate rather than opening a port instance 5 already owns.
         assert result == "/dev/ttyACM1"
+
+    def test_does_not_skip_port_claimed_by_self(self):
+        """A port this same instance already claimed (e.g. re-resolving
+        after a transient blip) must remain selectable."""
+        from ace import serial_manager
+
+        ports = [SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=2-2.3")]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        serial_manager._CONNECTED_PORTS["/dev/ttyACM0"] = self.manager.instance_num
+
+        result = self.manager.find_com_port("ACE", instance=0)
+
+        assert result == "/dev/ttyACM0"
+
 
 
 class TestGetUsbLocationForPort:
@@ -353,26 +365,6 @@ class TestGetUsbLocationForPort:
         self.serial_mod.tools.list_ports.comports = lambda: ports
         assert self.manager._get_usb_location_for_port("/dev/ttyUSB9") is None
 
-    def test_sorting_order_is_correct(self):
-        """Verify locations sort in expected USB topology order."""
-        locations = [
-            "1-1.4.3:1.0",  # Should be (1, 1, 4, 3)
-            "1-1.2:1.0",    # Should be (1, 1, 2)
-            "1-1.4.1:1.0",  # Should be (1, 1, 4, 1)
-            "2-1:1.0",      # Should be (2, 1)
-        ]
-        
-        parsed = [self.manager._parse_usb_location(loc) for loc in locations]
-        sorted_parsed = sorted(parsed)
-
-        # Expected order: 1-1.2 < 1-1.4.1 < 1-1.4.3 < 2-1
-        assert sorted_parsed == [
-            (1, 1, 2),
-            (1, 1, 4, 1),
-            (1, 1, 4, 3),
-            (2, 1),
-        ]
-
 
 class TestGetUsbTopologyPosition:
     """Tests for get_usb_topology_position."""
@@ -408,73 +400,6 @@ class TestGetUsbTopologyPosition:
         assert self.manager.get_usb_topology_position() == 1
 
 
-class TestValidateTopologyPosition:
-    def setup_method(self):
-        with patch('ace.serial_manager.serial'):
-            from ace.serial_manager import AceSerialManager
-            self.manager = AceSerialManager(gcode=Mock(), reactor=Mock(), instance_num=0, ace_enabled=False)
-
-    def test_first_connection_stores_topology(self):
-        self.manager._usb_location = "1-1.1"
-        self.manager._expected_topology_positions = None
-
-        assert self.manager._validate_topology_position(0) is True
-        assert self.manager._topology_validation_failed_count == 0
-
-    def test_out_of_range_instance_returns_true(self):
-        self.manager._usb_location = "1-1.1"
-        self.manager._expected_topology_positions = [(1, 1, 1)]
-
-        assert self.manager._validate_topology_position(2) is True
-
-    def test_mismatch_increments_counter_and_returns_false(self):
-        self.manager._usb_location = "1-1.2"
-        self.manager._expected_topology_positions = [(1, 1, 1)]
-        self.manager._topology_validation_failed_count = 0
-
-        # With threshold=1, mismatch clears expectations and returns False
-        assert self.manager._validate_topology_position(0) is False
-        assert self.manager._topology_validation_failed_count == 0  # Reset after clearing
-        assert self.manager._expected_topology_positions is None  # Cleared for re-enumeration
-
-    def test_relearn_topology_after_threshold_failures(self):
-        """Test topology expectations cleared after mismatch at threshold."""
-        self.manager._usb_location = "1-1.3"
-        self.manager._expected_topology_positions = [(1, 1, 1)]
-        self.manager._topology_validation_failed_count = self.manager.TOPOLOGY_RELEARN_THRESHOLD - 1
-
-        result = self.manager._validate_topology_position(0)
-
-        assert result is False  # Fail to trigger reconnect
-        assert self.manager._expected_topology_positions is None  # Cleared for re-enumeration
-        assert self.manager._topology_validation_failed_count == 0  # Reset
-
-    def test_relearn_topology_pads_list_when_needed(self):
-        """Test topology validation pads list if instance is out of range."""
-        self.manager._usb_location = "1-1.5"
-        self.manager._expected_topology_positions = [(1, 1, 1)]  # Only has instance 0
-        # Trigger validation at instance 1 (which doesn't exist yet)
-        # First it will pad with None, then on mismatch it should clear all
-        self.manager._topology_validation_failed_count = 0
-
-        # First call at instance 1 - pads with None, no mismatch since None accepts any
-        result = self.manager._validate_topology_position(1)
-        assert result is True  # None accepts anything
-        assert len(self.manager._expected_topology_positions) == 2  # Padded
-        
-        # Now test the mismatch path with existing entry
-        self.manager._usb_location = "1-1.5"
-        self.manager._expected_topology_positions = [(1, 1, 1), (1, 1, 2)]
-        self.manager._topology_validation_failed_count = self.manager.TOPOLOGY_RELEARN_THRESHOLD - 1
-        
-        result = self.manager._validate_topology_position(1)
-        
-        # Should clear all expectations and fail to trigger re-enumeration
-        assert result is False
-        assert self.manager._expected_topology_positions is None  # Cleared
-        assert self.manager._topology_validation_failed_count == 0
-
-
 class TestDwell:
     """Tests for dwell method."""
 
@@ -496,6 +421,35 @@ class TestDwell:
         self.manager.dwell()
 
         self.mock_reactor.pause.assert_called_once_with(101.0)
+
+
+class TestSustainedPortMiss:
+    """Tracking how long a manager has failed to find any port."""
+
+    def setup_method(self):
+        with patch('ace.serial_manager.serial'):
+            from ace.serial_manager import AceSerialManager
+            self.mock_reactor = Mock()
+            self.mock_reactor.monotonic.return_value = 100.0
+            self.manager = AceSerialManager(gcode=Mock(), reactor=self.mock_reactor, ace_enabled=False)
+
+    def test_zero_when_never_missed(self):
+        assert self.manager.sustained_port_miss_s(now=100.0) == 0.0
+
+    def test_measures_elapsed_since_first_miss(self):
+        # Simulate the auto_connect "no port found" branch recording the miss.
+        self.manager._first_port_miss_time = 100.0
+        assert self.manager.sustained_port_miss_s(now=135.0) == 35.0
+
+    def test_uses_reactor_clock_when_now_omitted(self):
+        self.manager._first_port_miss_time = 100.0
+        self.mock_reactor.monotonic.return_value = 142.0
+        assert self.manager.sustained_port_miss_s() == 42.0
+
+    def test_reset_to_zero_after_clear(self):
+        self.manager._first_port_miss_time = 100.0
+        self.manager._first_port_miss_time = None  # cleared on successful connect
+        assert self.manager.sustained_port_miss_s(now=200.0) == 0.0
 
 
 class TestCrcCalculation:
@@ -873,22 +827,20 @@ class TestConnectionLifecycle:
         assert len(self.manager._reconnect_timestamps) == 1
 
     def test_find_com_port_requires_enough_devices(self):
-        # Only one device but instance 1 requested -> returns None and warns
+        # Only one device but instance 1 requested -> returns None
         ports = [SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=2-2.3")]
         self.serial_mod.tools.list_ports.comports = lambda: ports  # Correct mock: target the actual method used
 
         result = self.manager.find_com_port("ACE", 1)
 
         assert result is None
-        log_messages = [call[0][0] for call in self.mock_gcode.respond_info.call_args_list]
-        assert any("only 1 ace" in msg.lower() for msg in log_messages)
 
-    def test_find_com_port_prefers_expected_topology(self):
-        # Two devices, expected topology stored; should pick matching one
+    def test_find_com_port_selects_by_current_sort_order(self):
+        # Two devices; order is re-derived from current USB locations on
+        # every call (no persisted "expected topology" needed or consulted).
         p0 = SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=2-2.3")
         p1 = SimpleNamespace(device="/dev/ttyACM1", description="ACE", hwid="LOCATION=2-2.4.3")
         self.serial_mod.tools.list_ports.comports = lambda: [p1, p0]
-        self.manager._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
 
         result = self.manager.find_com_port("ACE", 1)
 
@@ -1103,39 +1055,26 @@ class TestConnectionLifecycle:
         assert any("Connection failed" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
     
     def test_auto_connect_no_port(self):
+        self.serial_mod.tools.list_ports.comports = lambda: []
         self.manager.find_com_port = Mock(return_value=None)
         ok = self.manager.auto_connect(0, 115200)
         assert ok is False
         assert any("No ACE device found" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
 
-    def test_auto_connect_topology_failure_disconnects(self):
-        self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
-        self.manager.connect = Mock(return_value=True)
-        self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
-        self.manager._get_port_description_for_port = Mock(return_value="ACE")
-        self.manager._validate_topology_position = Mock(return_value=False)
-        self.manager.disconnect = Mock()
-
-        ok = self.manager.auto_connect(0, 115200)
-
-        assert ok is False
-        self.manager.disconnect.assert_called_once()
-
     def test_auto_connect_success_returns_true(self):
-        """Test successful auto_connect path - finds port, connects, validates topology, sends get_info."""
+        """Test successful auto_connect path - finds port, connects, sends get_info."""
+        self.serial_mod.tools.list_ports.comports = lambda: []
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=True)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
         self.manager._get_port_description_for_port = Mock(return_value="ACE")
-        self.manager._validate_topology_position = Mock(return_value=True)
         self.manager.send_request = Mock()
 
         ok = self.manager.auto_connect(0, 115200)
 
         assert ok is True
-        self.manager.find_com_port.assert_called_once_with('ACE', 0)
+        self.manager.find_com_port.assert_called_once_with('ACE', 0, ports=[])
         self.manager.connect.assert_called_once_with("/dev/ttyACM0", 115200)
-        self.manager._validate_topology_position.assert_called_once_with(0)
         self.manager.send_request.assert_called_once()
         # Verify get_info request structure
         call_args = self.manager.send_request.call_args
@@ -1156,14 +1095,51 @@ class TestConnectionLifecycle:
         port = self.manager.find_connection_port(instance=3)
 
         assert port == "/dev/ttyUSB-bus"
-        self.manager.find_com_port.assert_called_once_with("USB Single Serial", 0)
+        self.manager.find_com_port.assert_called_once_with("USB Single Serial", 0, ports=None)
 
-    def test_auto_connect_shared_bus_skips_topology_validation(self):
+    def test_auto_connect_enumerates_ports_only_once(self):
+        """auto_connect() must enumerate serial ports via comports() exactly ONCE
+        per attempt and reuse the result for port lookup, USB location, and
+        description - instead of calling the (blocking, synchronous) comports()
+        three separate times. Redundant enumeration runs on the reactor thread
+        during every reconnect attempt and can stall step generation, which is
+        implicated in an observed "Timer too close" MCU shutdown during a live
+        ACE reconnect storm.
+        """
+        call_count = {"n": 0}
+        ports = [SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=2-2.3")]
+
+        def counting_comports():
+            call_count["n"] += 1
+            return ports
+
+        self.serial_mod.tools.list_ports.comports = counting_comports
+
+        # Use the *real* find_com_port / _get_usb_location_for_port /
+        # _get_port_description_for_port implementations - only connect() is
+        # stubbed, since it doesn't touch comports().
+        self.manager.connect = Mock(return_value=True)
+        self.manager.send_request = Mock()
+        protocol = Mock()
+        protocol.get_transport_spec.return_value = AceTransportSpec(
+            mode="usb-topology",
+            port_description="ACE",
+        )
+        self.manager.protocol = protocol
+
+        ok = self.manager.auto_connect(0, 115200)
+
+        assert ok is True
+        assert call_count["n"] == 1, (
+            f"expected exactly 1 comports() enumeration per auto_connect(), got {call_count['n']}"
+        )
+
+    def test_auto_connect_shared_bus_defers_get_info_to_bus_session(self):
+        self.serial_mod.tools.list_ports.comports = lambda: []
         self.manager.find_connection_port = Mock(return_value="/dev/ttyUSB-bus")
         self.manager.connect = Mock(return_value=True)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.5")
         self.manager._get_port_description_for_port = Mock(return_value="USB Single Serial")
-        self.manager._validate_topology_position = Mock(return_value=False)
         self.manager.send_request = Mock()
         protocol = Mock()
         protocol.get_transport_spec.return_value = AceTransportSpec(
@@ -1178,12 +1154,12 @@ class TestConnectionLifecycle:
         ok = self.manager.auto_connect(2, 230400)
 
         assert ok is True
-        self.manager._validate_topology_position.assert_not_called()
         self.manager.connect.assert_called_once_with("/dev/ttyUSB-bus", 230400)
         self.manager.send_request.assert_not_called()
 
     def test_auto_connect_connect_failure_returns_false(self):
         """Test auto_connect when connect() fails."""
+        self.serial_mod.tools.list_ports.comports = lambda: []
         self.manager.find_com_port = Mock(return_value="/dev/ttyACM0")
         self.manager.connect = Mock(return_value=False)
         self.manager._get_usb_location_for_port = Mock(return_value="2-2.3")
@@ -1237,132 +1213,47 @@ class TestConnectionLifecycle:
         assert "id" in sent_req
         assert self.manager._callback_map[sent_req["id"]] == cb
 
-    def test_validate_topology_relearn_pads_list(self):
-        # expected list shorter than instance index, ensure padding happens
-        self.manager._expected_topology_positions = [(1,)]
-        self.manager.TOPOLOGY_RELEARN_THRESHOLD = 1
-        self.manager._usb_location = "2-2.4.3"
-        current = self.manager._parse_usb_location(self.manager._usb_location)
-        assert self.manager._validate_topology_position(1) is True  # Should pad and return True
-        assert len(self.manager._expected_topology_positions) == 2
-        assert self.manager._expected_topology_positions[1] is None
-
-    def test_topology_validation_handles_reverse_instance_order(self):
-        # Test that connecting higher instance first, then lower, works correctly
-        # Simulate topology already stored from previous enumeration (e.g., instance 0 was connected before)
-        self.manager._expected_topology_positions = [(1, 1, 2)]  # Only instance 0 stored
-        
-        # Instance 1 connects first (higher instance, pads the list)
-        self.manager._usb_location = "1-1.4"
-        result1 = self.manager._validate_topology_position(1)
-        assert result1 is True
-        assert len(self.manager._expected_topology_positions) == 2
-        assert self.manager._expected_topology_positions[0] == (1, 1, 2)
-        assert self.manager._expected_topology_positions[1] is None  # Padded with None
-        
-        # Now instance 0 connects (expected is not None, should validate normally)
-        self.manager._usb_location = "1-1.2"
-        result0 = self.manager._validate_topology_position(0)
-        assert result0 is True
-        # Should match, no failure
-        assert self.manager._topology_validation_failed_count == 0
-        # List unchanged
-        assert len(self.manager._expected_topology_positions) == 2
-        assert self.manager._expected_topology_positions[0] == (1, 1, 2)
-        assert self.manager._expected_topology_positions[1] is None
-
     def test_find_com_port_selects_correct_device_by_topology_order(self):
-        # Test that with multiple devices, instance 0 selects the root/first in topology order
-        # regardless of connection order, and instance 1 selects the next
+        # With multiple devices, instance 0 selects the root/first in
+        # topology order regardless of enumeration/connection order, and
+        # instance 1 selects the next - purely re-derived from current USB
+        # locations each call, no persisted state involved.
         p0 = SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=1-1.2")  # Root
         p1 = SimpleNamespace(device="/dev/ttyACM1", description="ACE", hwid="LOCATION=1-1.4.3")  # Deeper
         self.serial_mod.tools.list_ports.comports = lambda: [p1, p0]  # Ports returned in reverse order
-        
-        # Instance 0 should pick the first in sorted order (root)
+
         result0 = self.manager.find_com_port("ACE", 0)
         assert result0 == "/dev/ttyACM0"  # Root device
-        
-        # Now topology is stored: [(1,1,2), (1,1,4,3)]
-        assert self.manager._expected_topology_positions == [(1, 1, 2), (1, 1, 4, 3)]
-        
-        # Instance 1 should pick the matching expected topology
+
         result1 = self.manager.find_com_port("ACE", 1)
         assert result1 == "/dev/ttyACM1"  # Deeper device
-        
-        # Test reverse: if we reset and call instance 1 first
-        self.manager._expected_topology_positions = None
-        result1_first = self.manager.find_com_port("ACE", 1)
-        assert result1_first == "/dev/ttyACM1"  # Still picks by sorted order since no expected
-        # Now expected is set
-        assert self.manager._expected_topology_positions == [(1, 1, 2), (1, 1, 4, 3)]
-        
-        # Then instance 0 picks matching
-        result0_after = self.manager.find_com_port("ACE", 0)
-        assert result0_after == "/dev/ttyACM0"
 
-    def test_topology_relearn_after_single_mismatch(self):
-        # Test that with threshold=1, expectations cleared after 1 mismatch
-        self.manager.TOPOLOGY_RELEARN_THRESHOLD = 1
-        self.manager._expected_topology_positions = [(1, 1, 2)]  # Stored topology for instance 0
-        self.manager._usb_location = "1-1.4"  # Mismatched location
-        
-        # First validation: mismatch, should clear expectations since threshold=1
-        result = self.manager._validate_topology_position(0)
-        assert result is False  # Fail to trigger reconnect
-        assert self.manager._topology_validation_failed_count == 0  # Reset after clearing
-        assert self.manager._expected_topology_positions is None  # Cleared for re-enumeration
-
-    def test_topology_mismatch_due_to_swapped_acm_assignments(self):
-        # Simulate swapped ACM: expected topology doesn't match current ports due to enumeration order
-        # Ports: p0 has location for instance 1, p1 has location for instance 0
+    def test_find_com_port_handles_swapped_acm_assignments(self):
+        # Enumeration order (/dev/ttyACMx) must not affect which physical
+        # unit maps to which instance - only USB LOCATION= does.
         p0 = SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=1-1.4")  # Deeper, but ACM0
         p1 = SimpleNamespace(device="/dev/ttyACM1", description="ACE", hwid="LOCATION=1-1.2")  # Root, but ACM1
         self.serial_mod.tools.list_ports.comports = lambda: [p0, p1]
-        
-        # Stored topology: instance 0 at (1,1,2), instance 1 at (1,1,4)
-        self.manager._expected_topology_positions = [(1, 1, 2), (1, 1, 4)]
-        
-        # find_com_port for instance 0: prefers expected (1,1,2), finds p1 (/dev/ttyACM1)
-        result0 = self.manager.find_com_port("ACE", 0)
-        assert result0 == "/dev/ttyACM1"
-        
-        # Simulate auto_connect: set usb_location
-        self.manager._usb_location = self.manager._get_usb_location_for_port(result0)
-        assert self.manager._usb_location == "1-1.2"  # Correct
-        
-        # Validate: should match
-        result = self.manager._validate_topology_position(0)
-        assert result is True
-        
-        # Now for instance 1: prefers expected (1,1,4), finds p0 (/dev/ttyACM0)
-        result1 = self.manager.find_com_port("ACE", 1)
-        assert result1 == "/dev/ttyACM0"
-        
-        self.manager._usb_location = self.manager._get_usb_location_for_port(result1)
-        assert self.manager._usb_location == "1-1.4"
-        result = self.manager._validate_topology_position(1)
-        assert result is True
 
-    def test_topology_relearn_on_enumeration_change(self):
-        # Test expectations cleared when enumeration changes cause mismatch
-        # Initial: instance 0 at (1,1,2) on /dev/ttyACM0
-        self.manager._expected_topology_positions = [(1, 1, 2)]
-        
-        # Simulate enumeration swap: now /dev/ttyACM0 has (1,1,4)
-        p0 = SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=1-1.4")
+        result0 = self.manager.find_com_port("ACE", 0)
+        assert result0 == "/dev/ttyACM1"  # Root location, regardless of ACM number
+
+        result1 = self.manager.find_com_port("ACE", 1)
+        assert result1 == "/dev/ttyACM0"  # Deeper location, regardless of ACM number
+
+    def test_find_com_port_re_resolves_after_enumeration_change(self):
+        # If the same physical unit re-enumerates at a different /dev/ttyACMx,
+        # find_com_port must still resolve correctly on the next call since
+        # order is always re-derived, never cached.
+        p0 = SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=1-1.2")
         self.serial_mod.tools.list_ports.comports = lambda: [p0]
-        
-        # find_com_port for instance 0: no match for expected, falls back to sorted (p0)
-        result = self.manager.find_com_port("ACE", 0)
-        assert result == "/dev/ttyACM0"
-        
-        # Set usb_location to the new one
-        self.manager._usb_location = "1-1.4"
-        
-        # Validate: mismatch, should clear expectations since threshold=1 (default)
-        result = self.manager._validate_topology_position(0)
-        assert result is False  # Fail to trigger reconnect
-        assert self.manager._expected_topology_positions is None  # Cleared for re-enumeration
+        result_before = self.manager.find_com_port("ACE", 0)
+        assert result_before == "/dev/ttyACM0"
+
+        p0_renumbered = SimpleNamespace(device="/dev/ttyACM7", description="ACE", hwid="LOCATION=1-1.2")
+        self.serial_mod.tools.list_ports.comports = lambda: [p0_renumbered]
+        result_after = self.manager.find_com_port("ACE", 0)
+        assert result_after == "/dev/ttyACM7"
 
     def test_writer_exception_reports_error(self):
         self.manager.get_pending_request = Mock(side_effect=RuntimeError("boom"))
@@ -1401,29 +1292,6 @@ class TestConnectionLifecycle:
         self.manager._ace_pro_enabled = False
         assert cb(0.0) == "never"
 
-    def test_connect_topology_failure_triggers_disconnect(self):
-        from ace.serial_manager import AceSerialManager
-        # Restore real auto_connect for this test
-        self.manager.auto_connect = AceSerialManager.auto_connect.__get__(self.manager, AceSerialManager)
-        self.manager.find_com_port = Mock(return_value="/dev/ttyUSB0")
-        self.manager.connect = Mock(return_value=True)
-        self.manager._validate_topology_position = Mock(return_value=False)
-        self.manager.disconnect = Mock()
-        self.manager.send_request = Mock()
-        self.manager._get_usb_location_for_port = Mock(return_value="loc")
-        # Ensure list_ports iteration is safe
-        import ace.serial_manager as sm
-        sm.serial.tools.list_ports.comports = lambda: []
-
-        result = self.manager.auto_connect(instance=0, baud=115200)
-
-        assert result is False
-        assert self.manager.find_com_port.called
-        assert self.manager.connect.called
-        self.manager._validate_topology_position.assert_called_once()
-        self.manager.disconnect.assert_called_once()
-        self.manager.send_request.assert_not_called()
-
     def test_connect_success_unregisters_connect_timer_and_calls_on_connect(self):
         self.manager.connect_timer = "connect_timer"
         self.manager.writer_timer = None
@@ -1440,6 +1308,51 @@ class TestConnectionLifecycle:
         assert connected is True
         self.manager.reactor.unregister_timer.assert_called_with("connect_timer")
         self.manager.on_connect_callback.assert_called_once()
+
+    def test_connect_success_claims_port_in_registry(self):
+        from ace import serial_manager
+
+        self.manager.writer_timer = None
+        self.manager.reader_timer = None
+        self.manager.reactor.register_timer.side_effect = ["writer", "reader"]
+        self.manager.start_heartbeat = Mock()
+        serial_obj = Mock(is_open=True)
+        with patch('ace.serial_manager.SerialException', Exception):
+            with patch('ace.serial_manager.serial.Serial', return_value=serial_obj):
+                connected = self.manager.connect("/dev/ttyACM0", 115200)
+
+        assert connected is True
+        assert serial_manager._CONNECTED_PORTS["/dev/ttyACM0"] == self.manager.instance_num
+
+    def test_disconnect_releases_claimed_port(self):
+        from ace import serial_manager
+
+        self.manager._port = "/dev/ttyACM0"
+        serial_manager._CONNECTED_PORTS["/dev/ttyACM0"] = self.manager.instance_num
+        self.manager._serial = Mock(is_open=True)
+        self.manager.writer_timer = None
+        self.manager.reader_timer = None
+        self.manager.connect_timer = None
+
+        self.manager.disconnect()
+
+        assert "/dev/ttyACM0" not in serial_manager._CONNECTED_PORTS
+
+    def test_disconnect_does_not_release_port_claimed_by_another_instance(self):
+        """Guards against a race where instance A's disconnect() runs after
+        instance B has already re-claimed the same port path."""
+        from ace import serial_manager
+
+        self.manager._port = "/dev/ttyACM0"
+        serial_manager._CONNECTED_PORTS["/dev/ttyACM0"] = 99  # owned by instance 99
+        self.manager._serial = Mock(is_open=True)
+        self.manager.writer_timer = None
+        self.manager.reader_timer = None
+        self.manager.connect_timer = None
+
+        self.manager.disconnect()
+
+        assert serial_manager._CONNECTED_PORTS["/dev/ttyACM0"] == 99
 
     def test_connect_failure_returns_false(self):
         class DummyExc(Exception):

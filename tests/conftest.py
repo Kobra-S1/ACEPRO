@@ -25,6 +25,30 @@ def pytest_configure(config):
     sys.modules['serial.tools.list_ports'] = MagicMock()
 
 
+@pytest.fixture(autouse=True)
+def _reset_ace_connected_ports_registry():
+    """Clear the process-global claimed-ports registry around every test.
+
+    ``ace.serial_manager._CONNECTED_PORTS`` tracks which instance owns which
+    physical serial port and is process-global by design (all
+    ``AceSerialManager`` instances live in one Klipper process). Tests that
+    exercise the real (unmocked) ``connect()``/``disconnect()`` methods can
+    otherwise leak claims into unrelated tests run later in the same pytest
+    session.
+    """
+    try:
+        from ace import serial_manager
+        serial_manager._CONNECTED_PORTS.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        from ace import serial_manager
+        serial_manager._CONNECTED_PORTS.clear()
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def mock_config():
     """Create mock config object for AceManager."""

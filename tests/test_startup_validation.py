@@ -402,18 +402,53 @@ class TestValidateStartupToolState(unittest.TestCase):
 
         self.assertEqual(self.variables["ace_current_index"], -1)
 
-    def test_handle_ready_calls_validate(self):
-        """_validate_startup_tool_state is currently disabled in _handle_ready.
+    def test_skips_when_target_index_pending(self):
+        """An unconfirmed toolchange (ace_target_index != -1) blocks validation.
 
-        The call is commented out pending a timing-free rewrite.  This test
-        confirms it is NOT called so we notice if/when it is re-enabled.
+        Unlike print_stats/pause_resume, ace_target_index survives a klippy
+        restart, so it's the authoritative signal that a resume/retry may
+        still depend on the pinned fallback tool state.
+        """
+        self.variables["ace_current_index"] = 2
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+        self.variables["ace_target_index"] = 5
+
+        manager = self._build_manager()
+        manager.sensors[SENSOR_TOOLHEAD] = Mock(filament_present=False)
+
+        manager._validate_startup_tool_state()
+
+        self.assertEqual(self.variables["ace_current_index"], 2)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_NOZZLE)
+
+    def test_skips_when_toolchange_in_progress(self):
+        """An already-running toolchange (e.g. KlipperPLR recovery) blocks validation."""
+        self.variables["ace_current_index"] = 3
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+
+        manager = self._build_manager()
+        manager.sensors[SENSOR_TOOLHEAD] = Mock(filament_present=False)
+        manager.toolchange_in_progress = True
+
+        manager._validate_startup_tool_state()
+
+        self.assertEqual(self.variables["ace_current_index"], 3)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_NOZZLE)
+
+    def test_handle_ready_defers_validate_via_register_callback(self):
+        """_validate_startup_tool_state runs from a deferred reactor callback.
+
+        klippy:ready handlers run sequentially in one greenlet, so calling
+        _validate_startup_tool_state() inline from _handle_ready would block
+        every other module's klippy:ready handler for the duration of its
+        settle-wait. _handle_ready instead schedules it via
+        reactor.register_callback, which runs it in its own greenlet.
         """
         manager = self._build_manager()
         manager._setup_sensors = Mock()
         manager._start_monitoring = Mock()
         manager._validate_startup_tool_state = Mock()
 
-        # Need toolhead for the ready handler
         mock_toolhead = Mock()
 
         def lookup_with_toolhead(name, default=None):
@@ -435,14 +470,17 @@ class TestValidateStartupToolState(unittest.TestCase):
 
         manager._handle_ready()
 
+        # Not invoked inline...
         manager._validate_startup_tool_state.assert_not_called()
 
-    def test_handle_ready_disabled_still_calls_validate(self):
-        """_validate_startup_tool_state is currently disabled in _handle_ready.
+        # ...but scheduled via reactor.register_callback.
+        self.mock_reactor.register_callback.assert_called_once()
+        deferred_callback = self.mock_reactor.register_callback.call_args[0][0]
+        deferred_callback(0.0)
+        manager._validate_startup_tool_state.assert_called_once()
 
-        Confirmed also when ACE Pro is disabled — the call is commented out
-        pending a timing-free rewrite.
-        """
+    def test_handle_ready_disabled_still_defers_validate(self):
+        """Validation is still scheduled even when ACE Pro is disabled on startup."""
         self.variables["ace_global_enabled"] = False
         manager = self._build_manager()
         manager._setup_sensors = Mock()
@@ -470,7 +508,14 @@ class TestValidateStartupToolState(unittest.TestCase):
 
         manager._handle_ready()
 
-        manager._validate_startup_tool_state.assert_not_called()
+        self.mock_reactor.register_callback.assert_called_once()
+        deferred_callback = self.mock_reactor.register_callback.call_args[0][0]
+        deferred_callback(0.0)
+        manager._validate_startup_tool_state.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 if __name__ == "__main__":

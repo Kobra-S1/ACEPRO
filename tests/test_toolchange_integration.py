@@ -498,6 +498,60 @@ class TestToolChangeIntegration(unittest.TestCase):
         self.assertEqual(self.variables['ace_current_index'], 3)
         self.assertEqual(self.variables['ace_filament_pos'], FILAMENT_STATE_NOZZLE)
 
+    def test_target_index_lifecycle_across_full_toolchange(self):
+        """
+        End-to-end: ace_target_index must be set to the target tool as soon
+        as the toolchange begins and cleared back to -1 once the load is
+        fully confirmed -- distinct from ace_current_index, which only
+        reflects the last confirmed physically loaded tool.
+        """
+        manager = self._create_manager()
+
+        self.variables['ace_current_index'] = -1
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
+
+        instance0 = manager.instances[0]
+        captured = {}
+        original_feed = instance0._feed_filament_into_toolhead
+
+        def capture_and_feed(tool, check_pre_condition=True):
+            captured['target_index_during_load'] = self.variables.get('ace_target_index')
+            return original_feed(tool, check_pre_condition=check_pre_condition)
+        instance0._feed_filament_into_toolhead = Mock(side_effect=capture_and_feed)
+
+        status = manager.perform_tool_change(current_tool=-1, target_tool=0)
+
+        self.assertIn("→ 0", status)
+        # Was set to the target *before* the load happened.
+        self.assertEqual(captured.get('target_index_during_load'), 0)
+        # Cleared once the load is confirmed; current_index now reflects it.
+        self.assertEqual(self.variables.get('ace_target_index'), -1)
+        self.assertEqual(self.variables['ace_current_index'], 0)
+
+    def test_target_index_persists_when_load_fails(self):
+        """
+        If loading the target tool fails, ace_target_index must remain set to
+        the attempted target tool -- it must NOT silently revert to -1 or get
+        pinned to the (possibly wrong) previous tool. This is the durable
+        signal that a toolchange to T<target> is outstanding/unconfirmed,
+        used by recovery/retry logic instead of re-deriving guesses from
+        ace_filament_pos + sensors every time.
+        """
+        manager = self._create_manager()
+
+        self.variables['ace_current_index'] = -1
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
+
+        instance0 = manager.instances[0]
+        instance0._feed_filament_into_toolhead = Mock(side_effect=Exception("Feed timeout"))
+
+        with self.assertRaises(Exception):
+            manager.perform_tool_change(current_tool=-1, target_tool=0)
+
+        self.assertEqual(self.variables.get('ace_target_index'), 0)
+        # perform_tool_change itself must not have guessed/pinned current_index.
+        self.assertEqual(self.variables['ace_current_index'], -1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -571,11 +571,20 @@ def cmd_ACE_RECONNECT(gcmd):
             ace.serial_mgr.reconnect(delay=delay)
             gcmd.respond_info(f"ACE[{instance_num}]: Disconnected, reconnecting in {delay:.1f}s...")
         else:
-            def reconnect_instance(inst_num, manager, ace):
-                ace.serial_mgr.reconnect(delay=delay)
-                gcmd.respond_info(f"ACE[{inst_num}]: Disconnected, reconnecting in {delay:.1f}s...")
-
-            for_each_instance(reconnect_instance)
+            # Shared-bus ACE2 instances may reuse the same serial manager.
+            # Reconnect each transport once to avoid duplicate schedule spam.
+            seen_transports = set()
+            for inst_num in sorted(ACE_INSTANCES.keys()):
+                ace = ACE_INSTANCES[inst_num]
+                serial_mgr = getattr(ace, "serial_mgr", None)
+                transport_id = id(serial_mgr)
+                if transport_id in seen_transports:
+                    continue
+                seen_transports.add(transport_id)
+                serial_mgr.reconnect(delay=delay)
+                gcmd.respond_info(
+                    f"ACE[{inst_num}]: Disconnected, reconnecting in {delay:.1f}s..."
+                )
 
     except Exception as e:
         gcmd.respond_info(f"ACE_RECONNECT error: {e}")
@@ -716,8 +725,8 @@ def cmd_ACE_SET_SLOT(gcmd):
         material = gcmd.get("MATERIAL", "")
         temp = gcmd.get_int("TEMP", 0)
 
-        if not color_str or not material or temp < 0:
-            raise gcmd.error("COLOR, MATERIAL, and TEMP (0-300) must be set unless EMPTY=1")
+        if not color_str or not material or temp <= 0 or temp > 300:
+            raise gcmd.error("COLOR, MATERIAL, and TEMP (1-300) must be set unless EMPTY=1")
 
         # Parse color - check for named color first, then R,G,B format
         color_upper = color_str.upper()
@@ -1161,14 +1170,90 @@ def cmd_ACE_RESET_PERSISTENT_INVENTORY(gcmd):
         gcmd.respond_info(f"All {len(ACE_INSTANCES)} ACE instances reset")
 
 
+def cmd_ACE_REDETECT(gcmd):
+    """Re-detect instances mis-typed by an incomplete startup USB scan.
+
+    Recovers an instance frozen on the wrong protocol - typically one stuck on
+    ace1_json because its ACE2 RS-485 adapter (CH340) enumerated after protocol
+    resolution, so it never finds the ACE2. Adoption is gated on ACE2
+    DISCOVER_DEVICE proving an unbound unit exists, so it can never over-
+    subscribe the shared bus (safe to run even if an ACE1 is mid-reset).
+
+    Run this after confirming all ACE units are powered and enumerated.
+    """
+    manager = ace_get_manager(0)
+    manager.redetect_transports(gcmd=gcmd)
+
+
+def cmd_ACE_RESET_SHARED_BUS_BINDINGS(gcmd):
+    """Clear persisted ACE2 shared-bus instance↔UID bindings.
+
+    Optional args:
+      RECONNECT=1/0 (default 1): reconnect shared transports after clearing.
+      DELAY=<seconds> (default 2.0): reconnect delay when RECONNECT=1.
+    """
+    manager = ace_get_manager(0)
+    reconnect = bool(gcmd.get_int("RECONNECT", 1, minval=0, maxval=1))
+    delay = gcmd.get_float("DELAY", 2.0, minval=0.0)
+
+    variables = manager.state.get_all()
+    binding_keys = sorted(
+        key for key in variables.keys() if key.startswith("ace2_bus_bindings_")
+    )
+
+    if not binding_keys:
+        gcmd.respond_info("ACE: No persisted shared-bus bindings found")
+    else:
+        for key in binding_keys:
+            manager.state.set(key, {})
+            gcmd.respond_info(f"ACE: Cleared {key}")
+        manager.state.flush()
+        gcmd.respond_info(
+            f"ACE: Cleared {len(binding_keys)} shared-bus binding entr{'y' if len(binding_keys) == 1 else 'ies'}"
+        )
+
+    if not reconnect:
+        gcmd.respond_info("ACE: Shared-bus reconnect skipped (RECONNECT=0)")
+        return
+
+    # Reconnect each shared transport once.
+    seen_transports = set()
+    reconnected = 0
+    for inst_num in sorted(ACE_INSTANCES.keys()):
+        ace = ACE_INSTANCES[inst_num]
+        if getattr(ace, "bus_session", None) is None:
+            continue
+        serial_mgr = getattr(ace, "serial_mgr", None)
+        transport_id = id(serial_mgr)
+        if transport_id in seen_transports:
+            continue
+        seen_transports.add(transport_id)
+        serial_mgr.reconnect(delay=delay)
+        reconnected += 1
+        gcmd.respond_info(
+            f"ACE[{inst_num}]: Shared-bus transport reconnect scheduled in {delay:.1f}s"
+        )
+
+    if reconnected == 0:
+        gcmd.respond_info("ACE: No active shared-bus transport found to reconnect")
+
+
 def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
-    """Reset all feed assist states and clear current tool index. Affects all instances."""
+    """Reset all feed assist states and clear current tool index. Affects all instances.
+
+    Also clears ace_target_index: this is a full "no tool is active/pending"
+    reset, so any in-flight/unconfirmed toolchange attempt tracked separately
+    from ace_current_index must be cleared too, or KlipperScreen (and other
+    consumers) would keep reporting a stale "unconfirmed" toolchange after
+    this reset.
+    """
     for inst_num in sorted(ACE_INSTANCES.keys()):
         ace = ACE_INSTANCES[inst_num]
         ace.reset_feed_assist_state()
 
     manager = ace_get_manager()
     manager.state.set("ace_current_index", -1)
+    manager.state.set("ace_target_index", -1)
     manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 
     manager.gcode.run_script_from_command(
@@ -1187,6 +1272,9 @@ def cmd_ACE_DEBUG_SET_CURRENT_INDEX(gcmd):
     This only updates the saved-state variable — it does NOT physically
     move or retract any filament.  Use it to correct a stale persisted
     value after manual intervention.
+
+    Also clears ace_target_index to -1: manually asserting the confirmed
+    tool means there is no toolchange attempt still in flight/unconfirmed.
     """
     manager = ace_get_manager()
 
@@ -1202,15 +1290,56 @@ def cmd_ACE_DEBUG_SET_CURRENT_INDEX(gcmd):
 
     prev = manager.state.get("ace_current_index", -1)
     manager.state.set_and_save("ace_current_index", tool)
+    manager.state.set_and_save("ace_target_index", -1)
 
     if tool == -1:
         gcmd.respond_info(
             f"ACE: ace_current_index reset to -1 (no tool loaded). "
+            f"Was: T{prev}. ace_target_index cleared to -1."
+        )
+    else:
+        gcmd.respond_info(
+            f"ACE: ace_current_index set to T{tool}. Was: T{prev}. "
+            f"ace_target_index cleared to -1."
+        )
+
+
+def cmd_ACE_DEBUG_SET_TARGET_INDEX(gcmd):
+    """Manually override ace_target_index.
+
+    TOOL=-1  (or omit TOOL) to clear the in-flight toolchange attempt.
+    TOOL=<n> to declare tool <n> as the attempted (unconfirmed) target.
+
+    ace_target_index tracks a toolchange attempt that is still in flight or
+    was left unconfirmed by a failure -- distinct from ace_current_index,
+    which only reflects the last CONFIRMED physically loaded tool. This
+    command only updates the saved-state variable — it does NOT physically
+    move or retract any filament. Use it to correct a stale persisted value
+    after manual intervention.
+    """
+    manager = ace_get_manager()
+
+    # Default -1 = no toolchange in flight
+    tool = gcmd.get_int("TOOL", default=-1)
+
+    # Validate range
+    total_tools = len(ACE_INSTANCES) * 4
+    if tool != -1 and not (0 <= tool < total_tools):
+        raise gcmd.error(
+            f"TOOL={tool} is out of range. Valid range: -1 (none) to {total_tools - 1}"
+        )
+
+    prev = manager.state.get("ace_target_index", -1)
+    manager.state.set_and_save("ace_target_index", tool)
+
+    if tool == -1:
+        gcmd.respond_info(
+            f"ACE: ace_target_index cleared to -1 (no toolchange in flight). "
             f"Was: T{prev}"
         )
     else:
         gcmd.respond_info(
-            f"ACE: ace_current_index set to T{tool}. Was: T{prev}"
+            f"ACE: ace_target_index set to T{tool}. Was: T{prev}"
         )
 
 
@@ -1265,10 +1394,22 @@ def cmd_ACE_DEBUG_SET_FILAMENT_STATE(gcmd):
 
 
 def cmd_ACE_GET_CURRENT_INDEX(gcmd):
-    """Query currently loaded tool index from persistent storage (returns -1 if no tool loaded)."""
+    """Query currently loaded tool index from persistent storage (returns -1 if no tool loaded).
+
+    Also reports ace_target_index: a tool index other than -1 there means a
+    toolchange to that tool is still in flight or was left unconfirmed by a
+    failed attempt (distinct from the confirmed current_index).
+    """
     manager = ace_get_manager(0)
     current_index = manager.state.get("ace_current_index", -1)
+    target_index = manager.state.get("ace_target_index", -1)
     gcmd.respond_info(f"Current tool index: {current_index}")
+    if target_index != -1:
+        gcmd.respond_info(
+            f"Target tool index: {target_index} (toolchange unconfirmed)"
+        )
+    else:
+        gcmd.respond_info("Target tool index: -1 (no toolchange in flight)")
 
 
 def cmd_ACE_ENDLESS_SPOOL_STATUS(gcmd):
@@ -1576,6 +1717,16 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             except Exception as dialog_error:
                 gcode.respond_info(f"Failed to show error dialog: {dialog_error}")
         else:
+            # No RESUME cycle will follow this failure (idle/manual toolchange,
+            # or startup toolchange that aborts the macro via gcmd.error below)
+            # -- the RESUME macro's use of ace_target_index only applies to the
+            # is_printing PAUSE/prompt branch above. Clear it here so callers
+            # (KlipperScreen, ACE_GET_CURRENT_INDEX, etc.) stop reporting a
+            # permanently "unconfirmed" toolchange for an attempt that has
+            # already been resolved (ace_current_index already reflects the
+            # outcome above).
+            manager.state.set("ace_target_index", -1)
+
             gcode.run_script_from_command("M104 S0")
             gcode.respond_info("ACE: Initial toolchange failed, cancel print and switching extruder heater off")
 
@@ -1678,6 +1829,10 @@ def cmd_ACE_DEBUG_STATE(gcmd):
                 gcmd.respond_info(f"  ACE Count: {mgr.ace_count}")
                 runout_active = mgr.runout_monitor.runout_detection_active
                 gcmd.respond_info(f"  Runout Detection: {runout_active}")
+                current_index = mgr.state.get("ace_current_index", -1)
+                target_index = mgr.state.get("ace_target_index", -1)
+                gcmd.respond_info(f"  Current Tool Index: {current_index}")
+                gcmd.respond_info(f"  Target Tool Index: {target_index}")
             except Exception as e:
                 gcmd.respond_info(f"  Manager state ERROR: {e}")
 
@@ -2202,6 +2357,8 @@ ACE_COMMANDS = [
     ("ACE_GET_CONNECTION_STATUS", cmd_ACE_GET_CONNECTION_STATUS,
      "Get connection status for all ACE instances (connected, stable, retry info)"),
     ("ACE_RECONNECT", cmd_ACE_RECONNECT, "Reconnect ACE serial. INSTANCE= DELAY=5"),
+    ("ACE_REDETECT", cmd_ACE_REDETECT,
+     "Re-detect an instance mis-typed at startup (e.g. late ACE2 adapter). Discovery-gated, safe."),
     ("ACE_GET_CURRENT_INDEX", cmd_ACE_GET_CURRENT_INDEX, "Query currently loaded tool index"),
     ("ACE_FEED", cmd_ACE_FEED, "Feed filament. T=<tool> or INSTANCE= INDEX=, LENGTH=, [SPEED=]"),
     ("ACE_STOP_FEED", cmd_ACE_STOP_FEED, "Stop feeding. T=<tool> or INSTANCE= INDEX="),
@@ -2229,9 +2386,13 @@ ACE_COMMANDS = [
     ("ACE_DEBUG_SENSORS", cmd_ACE_DEBUG_SENSORS, "Print all sensor states (toolhead, RDM, path-free)"),
     ("ACE_DEBUG_STATE", cmd_ACE_DEBUG_STATE, "Print manager and instance state information"),
     ("ACE_RESET_PERSISTENT_INVENTORY", cmd_ACE_RESET_PERSISTENT_INVENTORY, "Reset inventory to empty. INSTANCE="),
+    ("ACE_RESET_SHARED_BUS_BINDINGS", cmd_ACE_RESET_SHARED_BUS_BINDINGS,
+     "Clear persisted ACE2 shared-bus bindings. [RECONNECT=1|0] [DELAY=2.0]"),
     ("ACE_RESET_ACTIVE_TOOLHEAD", cmd_ACE_RESET_ACTIVE_TOOLHEAD, "Reset active toolhead state. INSTANCE="),
     ("ACE_DEBUG_SET_CURRENT_INDEX", cmd_ACE_DEBUG_SET_CURRENT_INDEX,
      "Override saved tool index. TOOL=<n> (0-based) or TOOL=-1 for no tool loaded"),
+    ("ACE_DEBUG_SET_TARGET_INDEX", cmd_ACE_DEBUG_SET_TARGET_INDEX,
+     "Override saved in-flight toolchange target. TOOL=<n> (0-based) or TOOL=-1 for none"),
     ("ACE_DEBUG_SET_FILAMENT_STATE", cmd_ACE_DEBUG_SET_FILAMENT_STATE,
      "Override saved filament position. STATE=bowden|splitter|toolhead|nozzle (omit STATE= to query)"),
     ("ACE_RFID_SYNC_STATUS", cmd_ACE_RFID_SYNC_STATUS, "Query RFID sync status. [INSTANCE=]"),

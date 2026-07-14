@@ -173,6 +173,7 @@ createApp({
             // Slots
             slots: [],
             currentTool: -1,
+            targetTool: -1,  // In-flight/unconfirmed toolchange target (-1 = none)
             feedAssistSlot: -1,  // Индекс слота с активным feed assist (-1 = выключен)
             instanceOptions: [],
             selectedInstance: 0,
@@ -374,6 +375,9 @@ createApp({
                         if (aceData.current_index !== undefined) {
                             globalUpdate.current_index = aceData.current_index;
                         }
+                        if (aceData.target_index !== undefined) {
+                            globalUpdate.target_index = aceData.target_index;
+                        }
                         if (typeof aceData.rfid_sync_enabled === 'boolean') {
                             globalUpdate.rfid_sync_enabled = aceData.rfid_sync_enabled;
                         }
@@ -473,6 +477,20 @@ createApp({
             }
             if (incomingCurrentTool !== null) {
                 this.currentTool = incomingCurrentTool;
+            }
+
+            // Sync in-flight/unconfirmed toolchange target (-1 = none).
+            // Accept both top-level target_index and nested ace_manager.target_index.
+            let incomingTargetTool = null;
+            const topLevelTarget = Number(data.target_index);
+            const managerTarget = Number(data?.ace_manager?.target_index);
+            if (Number.isInteger(topLevelTarget)) {
+                incomingTargetTool = topLevelTarget;
+            } else if (Number.isInteger(managerTarget)) {
+                incomingTargetTool = managerTarget;
+            }
+            if (incomingTargetTool !== null) {
+                this.targetTool = incomingTargetTool;
             }
             
             if (typeof data.rfid_sync_enabled === 'boolean') {
@@ -1120,6 +1138,19 @@ createApp({
             }
             const slotTool = this.getSlotToolNumber(slot, instanceIndex);
             return slotTool !== null && slotTool === this.currentTool;
+        },
+
+        isTargetToolSlot(slot, instanceIndex) {
+            if (!Number.isInteger(this.targetTool) || this.targetTool < 0) {
+                return false;
+            }
+            // Unconfirmed target only -- once it matches the confirmed current
+            // tool, the toolchange is done and only the LOADED highlight shows.
+            if (this.targetTool === this.currentTool) {
+                return false;
+            }
+            const slotTool = this.getSlotToolNumber(slot, instanceIndex);
+            return slotTool !== null && slotTool === this.targetTool;
         },
         
         openColorPicker(instanceIndex, slotIndex, currentColor, toolNumber, material, temp, slotObj) {

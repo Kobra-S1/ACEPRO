@@ -123,17 +123,9 @@ class TestUSBEnumerationValidation:
         mock_port.hwid = "USB VID:PID=1234:5678 LOCATION=2-2.3"
         mock_comports.return_value = [mock_port]
         
-        # Instance 1 should refuse (needs at least 2 devices)
+        # Instance 1 should refuse (only 1 device is present, so index 1 is out of range)
         result = mgr.find_com_port('ACE', instance=1)
         assert result is None, "Instance 1 should refuse with only 1 device"
-        
-        # Verify warning was logged (note the exact format from code)
-        found_warning = False
-        for call in mock_gcode.respond_info.call_args_list:
-            if "WARNING - Only 1 ACE(s) found" in str(call):
-                found_warning = True
-                break
-        assert found_warning, "Should log warning about insufficient devices"
     
     @patch('extras.ace.serial_manager.serial.tools.list_ports.comports')
     def test_enumeration_sufficient_devices_instance_1(self, mock_comports):
@@ -182,95 +174,6 @@ class TestUSBEnumerationValidation:
         # Instance 0 should select SHALLOWER device (sorted first)
         result = mgr.find_com_port('ACE', instance=0)
         assert result == "/dev/ttyACM1", "Should sort by topology and select shallower"
-
-
-class TestTopologyValidation:
-    """Test topology validation during connection."""
-    
-    def test_validation_first_connection_no_stored_topology(self):
-        """Test validation passes on first connection (no stored topology yet)."""
-        mock_gcode = Mock()
-        mock_reactor = Mock()
-        mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
-        mgr._usb_location = "2-2.3"
-        mgr._expected_topology_positions = None  # First connection
-        
-        result = mgr._validate_topology_position(0)
-        assert result is True, "First connection should always pass validation"
-    
-    def test_validation_matching_topology(self):
-        """Test validation passes when topology matches."""
-        mock_gcode = Mock()
-        mock_reactor = Mock()
-        mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
-        mgr._usb_location = "2-2.3"
-        mgr._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
-        
-        result = mgr._validate_topology_position(0)
-        assert result is True, "Should pass when topology matches"
-        assert mgr._topology_validation_failed_count == 0
-    
-    def test_validation_mismatched_topology(self):
-        """Test validation clears expectations when topology doesn't match (threshold=1)."""
-        mock_gcode = Mock()
-        mock_reactor = Mock()
-        mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
-        mgr._usb_location = "2-2.4.3"  # Wrong topology
-        mgr._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
-        
-        result = mgr._validate_topology_position(0)
-        assert result is False, "Should clear expectations and fail when topology doesn't match"
-        assert mgr._topology_validation_failed_count == 0  # Reset after clearing
-        assert mgr._expected_topology_positions is None  # Cleared for re-enumeration
-        
-        # Verify errors were logged
-        assert mock_gcode.respond_info.call_count == 2
-        calls = [call[0][0] for call in mock_gcode.respond_info.call_args_list]
-        assert "Topology mismatch" in calls[0]
-        assert "expected (2, 2, 3)" in calls[0]
-        assert "got (2, 2, 4, 3)" in calls[0]
-        assert "Topology expectations cleared" in calls[1]
-    
-    def test_validation_failure_counter_increments(self):
-        """Test that failure counter increments until threshold, then clears expectations."""
-        mock_gcode = Mock()
-        mock_reactor = Mock()
-        mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
-        mgr.TOPOLOGY_RELEARN_THRESHOLD = 2  # Set higher for this test
-        mgr._usb_location = "2-2.4.3"
-        mgr._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
-        
-        # First failure
-        result = mgr._validate_topology_position(0)
-        assert result is False  # Returns False on mismatch
-        assert mgr._topology_validation_failed_count == 1
-        
-        # Second failure - reaches threshold, clears expectations
-        result = mgr._validate_topology_position(0)
-        # After threshold is reached the expectations are cleared and counter resets
-        assert result is False
-        assert mgr._topology_validation_failed_count == 0
-        assert mgr._expected_topology_positions is None  # Cleared
-    
-    def test_validation_failure_counter_resets_on_success(self):
-        """Test that failure counter resets when validation succeeds."""
-        mock_gcode = Mock()
-        mock_reactor = Mock()
-        mgr = AceSerialManager(mock_gcode, mock_reactor, 0)
-        mgr.TOPOLOGY_RELEARN_THRESHOLD = 3  # Set higher to allow multiple failures
-        mgr._expected_topology_positions = [(2, 2, 3), (2, 2, 4, 3)]
-        
-        # Fail a few times
-        mgr._usb_location = "2-2.4.3"
-        mgr._validate_topology_position(0)
-        mgr._validate_topology_position(0)
-        assert mgr._topology_validation_failed_count == 2
-        
-        # Now succeed
-        mgr._usb_location = "2-2.3"
-        result = mgr._validate_topology_position(0)
-        assert result is True
-        assert mgr._topology_validation_failed_count == 0  # Resets on success, "Counter should reset on success"
 
 
 class TestFeedAssistTopologyTracking:

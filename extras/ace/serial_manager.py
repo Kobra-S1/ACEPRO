@@ -19,8 +19,19 @@ import re
 from serial import SerialException
 import serial.tools.list_ports
 
-from .protocol import transport_description_matches
+from .protocol import transport_description_matches, parse_usb_location
 from .protocol_ace1 import AceJsonProtocolAdapter
+
+# Process-global registry of physical serial ports currently claimed by a
+# connected AceSerialManager instance (device path -> instance_num). Used to
+# stop a second logical instance from opening a port another instance is
+# already actively using - e.g. when an instance's known/persisted USB
+# location is momentarily invisible (mid ACE watchdog reset) and its
+# index-based fallback would otherwise pick a port that's already in use.
+# This is intentionally module-level (not per-instance) since all
+# AceSerialManager instances share one Klipper process.
+_CONNECTED_PORTS = {}
+_CONNECTED_PORTS_LOCK = threading.Lock()
 
 
 class AceSerialManager:
@@ -38,7 +49,8 @@ class AceSerialManager:
             ace_enabled=True,
             status_debug_logging=False,
             supervision_enabled=True,
-            protocol=None):
+            protocol=None,
+            target_usb_location=None):
         """
         Initialize serial manager.
 
@@ -49,12 +61,29 @@ class AceSerialManager:
             ace_enabled: Initial ACE Pro enabled state
             status_debug_logging: Enable detailed status logging for debugging
             supervision_enabled: Enable communication health supervision
+            target_usb_location: Physical USB location (e.g. "6-1.3") this
+                instance is bound to, as resolved once from daisy-chain
+                topology order by AceManager. When set, port lookup finds
+                whichever device currently sits at this exact location -
+                immune to /dev/ttyACMx renumbering across resets. When None
+                (e.g. direct/unit-tested construction), legacy index-based
+                matching is used, and the location is learned automatically
+                after the first successful connect.
         """
         self._port = None
         self._usb_location = None
+        self._target_usb_location = target_usb_location
         self._port_description = None
         self._baud = None
         self.serial_name = None
+        # Monotonic time this manager first failed to find ANY port for its
+        # current protocol since its last successful connect (None while
+        # connected or never-yet-missed). Used by AceManager's re-detection to
+        # tell a genuinely mis-typed instance (fails to find a port
+        # indefinitely) from a normal ACE1 watchdog flicker (reconnects within
+        # a few seconds), so protocol re-typing is only ever considered after a
+        # sustained failure far longer than the ~2-3s watchdog window.
+        self._first_port_miss_time = None
 
         self.gcode = gcode
         self.reactor = reactor
@@ -118,15 +147,15 @@ class AceSerialManager:
         self._reconnect_timestamps = []      # List of monotonic times of reconnect attempts
         self._last_connected_time = 0.0      # Monotonic time of last successful connect
         self._counter_reset_time = 0.0       # Time when counter was last reset
-        self._reconnect_backoff = 5.0        # Current backoff delay (increases on failure)
-        self.RECONNECT_BACKOFF_MIN = 5.0     # Minimum backoff delay
+        self.RECONNECT_BACKOFF_MIN = 5.0     # Minimum backoff delay (location not yet known)
         self.RECONNECT_BACKOFF_MAX = 30.0    # Maximum backoff delay (30 seconds)
         self.RECONNECT_BACKOFF_FACTOR = 1.5  # Multiply backoff on each failure
-        self.TOPOLOGY_RELEARN_THRESHOLD = 1  # After N mismatches, accept new topology
-
-        # Expected topology positions for validation
-        self._expected_topology_positions = None  # Set after first successful enumeration
-        self._topology_validation_failed_count = 0
+        # Once we know the exact physical USB location to reconnect to, we no
+        # longer need a long delay to let ambiguous enumeration settle - we
+        # only need to catch the ACE's ~2-3s watchdog-reset window, so retry
+        # much faster.
+        self.LOCATION_KNOWN_RECONNECT_BACKOFF_MIN = 1.0
+        self._reconnect_backoff = self._reconnect_backoff_floor()  # Current backoff delay (increases on failure)
 
         # Communication health supervision
         # Track timeouts and unsolicited messages to detect out-of-sync communication
@@ -167,59 +196,73 @@ class AceSerialManager:
         """Check if ACE Pro is enabled."""
         return self._ace_pro_enabled
 
+    def _reconnect_backoff_floor(self):
+        """
+        Minimum reconnect backoff delay.
+
+        Once the physical USB location to reconnect to is known (either
+        supplied by AceManager's topology resolution, or learned after a
+        prior successful connect), we no longer need a long delay to let
+        ambiguous multi-device enumeration settle - we only need to retry
+        fast enough to catch the ACE's ~2-3s watchdog-reset window.
+        """
+        if self._target_usb_location is not None:
+            return self.LOCATION_KNOWN_RECONNECT_BACKOFF_MIN
+        return self.RECONNECT_BACKOFF_MIN
+
     # ========== Serial Port Detection ==========
 
-    def _parse_usb_location(self, location_str):
-        """
-        Parse USB location string into tuple for natural sorting.
-
-        Examples:
-            "1-1.4.3:1.0" → (1, 1, 4, 3)
-            "acm.2" → (999998, 2)
-
-        ACM fallback locations sort after USB locations but before
-        unrecognized devices (999999).
-        """
-        if not location_str:
-            return (999999,)
-
-        location_str = str(location_str)
-
-        # Handle ACM fallback format (e.g., "acm.2")
-        if location_str.startswith('acm.'):
-            try:
-                acm_num = int(location_str[4:])
-                return (999998, acm_num)  # Sort after USB, before unknown
-            except ValueError:
-                return (999999,)
-
-        # Strip interface suffix (e.g., ":1.0")
-        location_str = location_str.split(':')[0]
-        parts = location_str.replace('-', '.').split('.')
-
-        try:
-            return tuple(int(p) for p in parts)
-        except ValueError:
-            return (999999,)
-
-    def find_com_port(self, device_name, instance=0):
+    def find_com_port(self, device_name, instance=0, ports=None):
         """
         Find serial port for device, sorted by USB topology.
 
-        Returns the nth matching port (instance index) sorted by USB location,
-        ensuring consistent ordering across hot-plugs.
+        Returns the nth matching port (instance index) sorted by physical
+        USB daisy-chain position, using the single shared
+        ``protocol.parse_usb_location`` implementation (depth-first, then
+        lexicographic) - the same sort AceManager's topology resolution
+        uses. This is only a fallback for when ``_target_usb_location``
+        isn't known yet (e.g. very first boot, before any location has
+        been learned); once known, ``find_connection_port`` matches by
+        exact location instead of re-deriving order here.
 
         Args:
             device_name: Device identifier in port description
             instance: Which matching port to return (0=first, 1=second, etc)
+            ports: Pre-fetched serial.tools.list_ports.comports() result to
+                reuse (avoids a redundant synchronous port enumeration).
+                When None, comports() is queried directly.
 
         Returns:
             str: Serial device path or None if not found
         """
         matches = []
 
-        for portinfo in serial.tools.list_ports.comports():
+        if ports is None:
+            ports = serial.tools.list_ports.comports()
+
+        # Ports already opened by a DIFFERENT logical instance must never be
+        # selected here - stealing an in-use port causes interleaved frames
+        # on both instances (garbled comms, identical duplicated status on
+        # two ACE[n] logs). Shared-bus transports are exempt since multiple
+        # instances legitimately share one physical port by design.
+        shared_bus = self.protocol.get_transport_spec().shared_bus
+        claimed_elsewhere = set()
+        if not shared_bus:
+            with _CONNECTED_PORTS_LOCK:
+                claimed_elsewhere = {
+                    dev for dev, owner in _CONNECTED_PORTS.items()
+                    if owner != self.instance_num
+                }
+
+        for portinfo in ports:
             if not transport_description_matches(device_name, portinfo.description):
+                continue
+
+            if portinfo.device in claimed_elsewhere:
+                logging.info(
+                    f"ACE[{self.instance_num}] Skipping {portinfo.device} - "
+                    f"already claimed by another instance"
+                )
                 continue
 
             # Extract USB location from hwid
@@ -235,7 +278,8 @@ class AceSerialManager:
                 else:
                     location = portinfo.device
 
-            sort_key = self._parse_usb_location(location)
+            location_key = parse_usb_location(location)
+            sort_key = (len(location_key), location_key)
             matches.append((sort_key, location, portinfo.device))
 
             logging.info(
@@ -243,64 +287,90 @@ class AceSerialManager:
                 f"at location '{location}' (sort_key={sort_key})"
             )
 
-        # Sort by location
+        # Sort by physical daisy-chain position (depth-first, then location)
         matches.sort(key=lambda x: x[0])
 
-        if matches:
-            # Store expected topology positions for validation
-            if self._expected_topology_positions is None:
-                # Check that we found at least instance+1 devices
-                if len(matches) < instance + 1:
-                    self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: WARNING - Only {len(matches)} ACE(s) found, "
-                        f"but instance {instance} requires at least {instance + 1}. "
-                        f"Waiting for all ACEs to enumerate..."
-                    )
-                    return None
-
-                self._expected_topology_positions = [self._parse_usb_location(loc) for _, loc, _ in matches]
-                logging.info(
-                    f"ACE[{self.instance_num}]: Stored topology positions: {self._expected_topology_positions}"
-                )
-
-            # Prefer a port whose topology matches the stored signature for this instance
-            selected_dev = None
-            if self._expected_topology_positions and instance < len(self._expected_topology_positions):
-                expected_topo = self._expected_topology_positions[instance]
-                for sort_key, loc, dev in matches:
-                    if sort_key == expected_topo:
-                        selected_dev = dev
-                        break
-
-            logging.info(
-                f"ACE[{self.instance_num}] USB enumeration order:"
-            )
-            for idx, (sort_key, loc, dev) in enumerate(matches):
-                marker = ""
-                if selected_dev and dev == selected_dev:
-                    marker = " <- SELECTED (topology match)"
-                elif idx == instance and not selected_dev:
-                    marker = " <- SELECTED"
-                logging.info(
-                    f"  [{idx}] {dev} at {loc}{marker}"
-                )
-
-            if selected_dev:
-                return selected_dev
+        logging.info(f"ACE[{self.instance_num}] USB enumeration order:")
+        for idx, (sort_key, loc, dev) in enumerate(matches):
+            marker = " <- SELECTED" if idx == instance else ""
+            logging.info(f"  [{idx}] {dev} at {loc}{marker}")
 
         if len(matches) > instance:
             return matches[instance][2]
         return None
 
-    def find_connection_port(self, instance=0):
+    def find_port_by_location(self, device_name, target_location, ports=None):
+        """
+        Find the serial port for `device_name` whose USB location exactly
+        matches `target_location`.
+
+        Unlike index-based matching, this is immune to /dev/ttyACMx
+        renumbering: it doesn't matter how many other ACE-like ports are
+        currently visible or which index this unit ends up at after a
+        reset - only its fixed physical daisy-chain position (LOCATION=)
+        matters.
+
+        Returns:
+            str: Serial device path, or None if that location isn't
+                currently visible (e.g. the unit is mid-reset).
+        """
+        if target_location is None:
+            return None
+
+        if ports is None:
+            ports = serial.tools.list_ports.comports()
+
+        for portinfo in ports:
+            if not transport_description_matches(device_name, portinfo.description):
+                continue
+
+            m = re.search(r'LOCATION=([-\w\.]+)', portinfo.hwid)
+            if m:
+                location = m.group(1)
+            else:
+                m2 = re.search(r'ACM(\d+)', portinfo.device)
+                location = f"acm.{m2.group(1)}" if m2 else portinfo.device
+
+            if location == target_location:
+                return portinfo.device
+
+        return None
+
+    def find_connection_port(self, instance=0, ports=None):
         """Find the physical serial port for this logical ACE instance."""
         transport = self.protocol.get_transport_spec()
-        port_index = 0 if transport.shared_bus else instance
-        return self.find_com_port(transport.port_description, port_index)
 
-    def _get_usb_location_for_port(self, port):
+        if self._target_usb_location is not None:
+            port = self.find_port_by_location(
+                transport.port_description,
+                self._target_usb_location,
+                ports=ports,
+            )
+            if port is not None:
+                if not transport.shared_bus:
+                    with _CONNECTED_PORTS_LOCK:
+                        owner = _CONNECTED_PORTS.get(port)
+                    if owner is not None and owner != self.instance_num:
+                        logging.info(
+                            f"ACE[{self.instance_num}] Known location "
+                            f"{self._target_usb_location} resolved to {port}, "
+                            f"but it's already claimed by instance {owner} - "
+                            f"treating as unavailable"
+                        )
+                        return None
+                return port
+            # The known physical location isn't visible right now (e.g. the
+            # unit is mid-reset/re-enumerating) - fall back to legacy
+            # index+description matching rather than refusing to connect.
+
+        port_index = 0 if transport.shared_bus else instance
+        return self.find_com_port(transport.port_description, port_index, ports=ports)
+
+    def _get_usb_location_for_port(self, port, ports=None):
         """Get USB location string for a specific port."""
-        for portinfo in serial.tools.list_ports.comports():
+        if ports is None:
+            ports = serial.tools.list_ports.comports()
+        for portinfo in ports:
             if portinfo.device == port:
                 m = re.search(r'LOCATION=([-\w\.]+)', portinfo.hwid)
                 if m:
@@ -312,9 +382,11 @@ class AceSerialManager:
                 return portinfo.device
         return None
 
-    def _get_port_description_for_port(self, port):
+    def _get_port_description_for_port(self, port, ports=None):
         """Get human-readable USB port description for a specific port."""
-        for portinfo in serial.tools.list_ports.comports():
+        if ports is None:
+            ports = serial.tools.list_ports.comports()
+        for portinfo in ports:
             if portinfo.device == port:
                 return str(portinfo.description or "")
         return None
@@ -346,60 +418,6 @@ class AceSerialManager:
 
         return None
 
-    def _validate_topology_position(self, instance):
-        """
-        Validate that this instance is connected to the correct physical ACE.
-        Uses USB topology depth to verify position in daisy chain.
-
-        Returns:
-            bool: True if topology position is correct, False otherwise
-        """
-        current_topo = self._parse_usb_location(self._usb_location)
-
-        if self._expected_topology_positions is None:
-            # First connection - store it but validate the order is ascending
-            # Instance 0 should be shallowest (closest to root), instance 1 deeper, etc.
-            # We can't fully validate yet, but we can check relative to what we have
-            logging.info(
-                f'ACE[{instance}]: First connection - storing topology {current_topo}'
-            )
-            return True
-
-        if instance >= len(self._expected_topology_positions):
-            # Instance number out of range - pad the list with None
-            while len(self._expected_topology_positions) <= instance:
-                self._expected_topology_positions.append(None)
-            return True
-
-        expected_topo = self._expected_topology_positions[instance]
-
-        # If no expected topology (padded with None), accept without validation
-        if expected_topo is None:
-            return True
-
-        # Compare topology positions (they should match)
-        if current_topo != expected_topo:
-            self._topology_validation_failed_count += 1
-            self.gcode.respond_info(
-                f'ACE[{instance}]: Topology mismatch - '
-                f'expected {expected_topo}, got {current_topo} '
-                f'(failure #{self._topology_validation_failed_count})'
-            )
-            if self._topology_validation_failed_count >= self.TOPOLOGY_RELEARN_THRESHOLD:
-                # Clear all topology expectations to force re-enumeration
-                self._expected_topology_positions = None
-                self.gcode.respond_info(
-                    f'ACE[{instance}]: Topology expectations cleared after '
-                    f'{self._topology_validation_failed_count} failures - will re-enumerate'
-                )
-                self._topology_validation_failed_count = 0
-                return False  # Fail this connection attempt to trigger re-enumeration
-            return False
-
-        # Reset failure counter on success
-        self._topology_validation_failed_count = 0
-        return True
-
     # ========== Serial Connection Management ==========
 
     def connect_to_ace(self, baud, delay=2):
@@ -423,7 +441,7 @@ class AceSerialManager:
             if self.auto_connect(self.instance_num, self._baud):
                 logging.info(f'ACE[{self.instance_num}]: Connected')
                 # Reset backoff on successful connect
-                self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
+                self._reconnect_backoff = self._reconnect_backoff_floor()
                 return self.reactor.NEVER
             else:
                 # Track failed connection attempt for stability detection
@@ -440,7 +458,7 @@ class AceSerialManager:
                 next_backoff = self._reconnect_backoff * self.RECONNECT_BACKOFF_FACTOR
                 if next_backoff >= self.RECONNECT_BACKOFF_MAX:
                     # Reset to min after hitting max (cyclic backoff)
-                    self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
+                    self._reconnect_backoff = self._reconnect_backoff_floor()
                 else:
                     self._reconnect_backoff = next_backoff
                 recent_count = len(self._reconnect_timestamps)
@@ -494,7 +512,7 @@ class AceSerialManager:
             if self.auto_connect(self.instance_num, self._baud):
                 self.gcode.respond_info(f'ACE[{self.instance_num}]: Connected')
                 # Reset backoff on successful connect
-                self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
+                self._reconnect_backoff = self._reconnect_backoff_floor()
                 return self.reactor.NEVER
             else:
                 # Track failed connection attempt for stability detection
@@ -510,7 +528,7 @@ class AceSerialManager:
                 next_backoff = self._reconnect_backoff * self.RECONNECT_BACKOFF_FACTOR
                 if next_backoff >= self.RECONNECT_BACKOFF_MAX:
                     # Reset to min after hitting max (cyclic backoff)
-                    self._reconnect_backoff = self.RECONNECT_BACKOFF_MIN
+                    self._reconnect_backoff = self._reconnect_backoff_floor()
                 else:
                     self._reconnect_backoff = next_backoff
                 recent_count = len(self._reconnect_timestamps)
@@ -520,9 +538,6 @@ class AceSerialManager:
                 )
                 return eventtime + current_backoff
 
-        self.gcode.respond_info(
-            f'ACE[{self.instance_num}]: Scheduling reconnect in {initial_delay:.0f}s'
-        )
         self.connect_timer = self.reactor.register_timer(
             _reconnect_callback,
             self.reactor.monotonic() + initial_delay
@@ -544,15 +559,26 @@ class AceSerialManager:
     def auto_connect(self, instance, baud):
         """Attempt to connect to ACE device."""
         transport = self.protocol.get_transport_spec()
-        port = self.find_connection_port(instance)
+        # Enumerate serial ports once and reuse the result for port lookup,
+        # USB location, and description - comports() does synchronous
+        # filesystem/sysfs I/O and this method runs on the reactor thread
+        # (via connect_to_ace's connect_callback), so calling it repeatedly
+        # per attempt adds avoidable reactor latency.
+        ports = list(serial.tools.list_ports.comports())
+        port = self.find_connection_port(instance, ports=ports)
         if port is None:
             self.gcode.respond_info(f'ACE[{instance}]: No ACE device found')
+            if self._first_port_miss_time is None:
+                try:
+                    self._first_port_miss_time = self.reactor.monotonic()
+                except Exception:
+                    self._first_port_miss_time = None
             return False
 
         self._port = port
         self._baud = baud
-        self._usb_location = self._get_usb_location_for_port(port)
-        self._port_description = self._get_port_description_for_port(port)
+        self._usb_location = self._get_usb_location_for_port(port, ports=ports)
+        self._port_description = self._get_port_description_for_port(port, ports=ports)
 
         logging.info('Try connecting to ' + str(port))
         connected = self.connect(port, baud)
@@ -568,13 +594,13 @@ class AceSerialManager:
             f'ACE[{instance}]: auto_connect: Connected to {port}, sending get_info request'
         )
 
-        # Validate we're connected to the correct physical ACE
-        if transport.topology_validation and not self._validate_topology_position(instance):
-            self.gcode.respond_info(
-                f'ACE[{instance}]: Topology validation failed - disconnecting and retrying'
-            )
-            self.disconnect()
-            return False
+        # Learn this unit's physical USB location if we weren't already
+        # bound to one (e.g. manager didn't resolve topology yet, or this
+        # manager was constructed directly/for tests). Future reconnects
+        # then target this exact location - immune to /dev/ttyACMx
+        # renumbering - and use the faster location-known backoff floor.
+        if self._target_usb_location is None and self._usb_location is not None:
+            self._target_usb_location = self._usb_location
 
         # Shared-bus transports defer info queries to the bus session
         if not transport.shared_bus:
@@ -664,7 +690,21 @@ class AceSerialManager:
             if self._serial.is_open:
                 self._connected = True
                 self.connection_state = "connected"
+                # Found and opened a port -> clear any sustained-miss tracking.
+                self._first_port_miss_time = None
                 logging.info(f'ACE[{self.instance_num}]: Serial port {port} opened')
+                # Claim this port so no other instance's fallback port
+                # selection can pick it while we're using it. Release any
+                # stale claim we held on a different port first (e.g. after
+                # reconnecting to a location that changed device path).
+                with _CONNECTED_PORTS_LOCK:
+                    stale = [
+                        dev for dev, owner in _CONNECTED_PORTS.items()
+                        if owner == self.instance_num and dev != port
+                    ]
+                    for dev in stale:
+                        del _CONNECTED_PORTS[dev]
+                    _CONNECTED_PORTS[port] = self.instance_num
                 # DON'T reset _request_id on reconnect - old responses may still arrive
                 # Resetting to 0 would cause ID collisions with stale ACE responses
 
@@ -724,6 +764,13 @@ class AceSerialManager:
             except Exception as e:
                 logging.error(f"ACE[{self.instance_num}]: Error closing serial: {e}")
 
+        # Release our claim on the port so other instances can use it again
+        # (e.g. after a topology change or if this instance's real physical
+        # unit later re-enumerates on this same device path).
+        with _CONNECTED_PORTS_LOCK:
+            if self._port is not None and _CONNECTED_PORTS.get(self._port) == self.instance_num:
+                del _CONNECTED_PORTS[self._port]
+
         self._connected = False
         self.read_buffer = bytearray()
         self.clear_queues()
@@ -762,6 +809,22 @@ class AceSerialManager:
     def is_connected(self):
         """Check if serial connection is active."""
         return self._connected and self._serial and self._serial.is_open
+
+    def sustained_port_miss_s(self, now=None):
+        """Seconds this manager has continuously failed to find any port.
+
+        Returns 0.0 while connected or when no miss has been recorded yet.
+        Used to distinguish a genuinely mis-typed protocol (misses forever)
+        from a transient ACE1 watchdog reset (reappears within ~2-3s).
+        """
+        if self._first_port_miss_time is None:
+            return 0.0
+        if now is None:
+            try:
+                now = self.reactor.monotonic()
+            except Exception:
+                return 0.0
+        return max(0.0, now - self._first_port_miss_time)
 
     def _get_recent_reconnect_count(self):
         """

@@ -125,6 +125,72 @@ class TestAceInstance(unittest.TestCase):
         self.assertEqual(instance.tool_offset, 4)  # Second unit starts at T4
 
     @patch('ace.instance.AceSerialManager')
+    def test_rebind_transport_swaps_protocol_and_rewires_callbacks(self, mock_serial_mgr_class):
+        """rebind_transport swaps an instance mis-typed as ace1 over to ace2.
+
+        Recovery of a late-enumerated ACE2: the instance keeps identity but its
+        protocol adapter, transport and baud change, and the new serial manager
+        is re-wired to this instance's callbacks. A shared-bus (ace2) transport
+        must NOT get a heartbeat callback (the manager drives shared-bus polling).
+        """
+        from ace.protocol_ace2 import AceProtoProtocolAdapter
+
+        instance = AceInstance(1, self.ace_config, self.mock_printer)
+        self.assertEqual(instance.protocol_name, 'ace1_json')
+        self.assertFalse(instance.transport_spec.shared_bus)
+
+        proto2 = AceProtoProtocolAdapter()
+        mock_serial_mgr_class.reset_mock()
+
+        instance.rebind_transport(
+            protocol=proto2,
+            protocol_name='ace2_proto',
+            baud=230400,
+            serial_mgr=None,
+            bus_session=None,
+            target_usb_location='3-1.4',
+        )
+
+        self.assertIs(instance.protocol, proto2)
+        self.assertEqual(instance.protocol_name, 'ace2_proto')
+        self.assertEqual(instance.baud, 230400)
+        self.assertTrue(instance.transport_spec.shared_bus)
+
+        mock_serial_mgr_class.assert_called_once()
+        _args, kwargs = mock_serial_mgr_class.call_args
+        self.assertIs(kwargs['protocol'], proto2)
+        self.assertEqual(kwargs['target_usb_location'], '3-1.4')
+
+        new_mgr = instance.serial_mgr
+        new_mgr.set_on_connect_callback.assert_called_once_with(instance._on_ace_connect)
+        new_mgr.set_heartbeat_callback.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_rebind_transport_uses_provided_shared_serial_mgr(self, mock_serial_mgr_class):
+        """When a shared serial_mgr is supplied, rebind reuses it (no new one)."""
+        from ace.protocol_ace2 import AceProtoProtocolAdapter
+
+        instance = AceInstance(1, self.ace_config, self.mock_printer)
+        proto2 = AceProtoProtocolAdapter()
+        shared_mgr = Mock()
+        bus_session = Mock()
+        mock_serial_mgr_class.reset_mock()
+
+        instance.rebind_transport(
+            protocol=proto2,
+            protocol_name='ace2_proto',
+            baud=230400,
+            serial_mgr=shared_mgr,
+            bus_session=bus_session,
+        )
+
+        mock_serial_mgr_class.assert_not_called()  # reused, not constructed
+        self.assertIs(instance.serial_mgr, shared_mgr)
+        self.assertIs(instance.bus_session, bus_session)
+        shared_mgr.set_on_connect_callback.assert_called_once_with(instance._on_ace_connect)
+        shared_mgr.set_heartbeat_callback.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
     def test_send_request(self, mock_serial_mgr_class):
         """Test send_request delegates to serial manager."""
         instance = AceInstance(0, self.ace_config, self.mock_printer)
@@ -1246,15 +1312,18 @@ class TestFeedAssist(unittest.TestCase):
         }
         instance._on_heartbeat_response(heartbeat_response)
         
-        # Now feed assist should be restored plus 4 RFID queries (one per slot)
-        self.assertEqual(len(sent_requests), 5)
-        # First 4 requests should be RFID queries
-        for i in range(4):
-            self.assertEqual(sent_requests[i]['method'], 'get_filament_info')
-            self.assertEqual(sent_requests[i]['params']['index'], i)
-        # Last request should be feed assist restore
-        self.assertEqual(sent_requests[4]['method'], 'start_feed_assist')
-        self.assertEqual(sent_requests[4]['params']['index'], 2)
+        # RFID refresh is throttled to one slot per status update (to avoid
+        # a post-reconnect request burst that can push responses beyond
+        # timeout and look unsolicited) - so the first heartbeat sends only
+        # the first slot's RFID query plus the feed assist restore.
+        self.assertEqual(len(sent_requests), 2)
+        self.assertEqual(sent_requests[0]['method'], 'get_filament_info')
+        self.assertEqual(sent_requests[0]['params']['index'], 0)
+        # Feed assist restore
+        self.assertEqual(sent_requests[1]['method'], 'start_feed_assist')
+        self.assertEqual(sent_requests[1]['params']['index'], 2)
+        # Remaining slots still queued for subsequent status updates
+        self.assertEqual(instance._pending_rfid_refresh_slots, [1, 2, 3])
         # Pending should be cleared
         self.assertEqual(instance._pending_feed_assist_restore, -1)
 

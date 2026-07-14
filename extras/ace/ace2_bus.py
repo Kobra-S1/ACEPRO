@@ -37,20 +37,48 @@ class Ace2BusSession:
         self.baud = baud
         self._devices_by_identity: Dict[Ace2DeviceIdentity, Ace2BusDevice] = {}
         self._identity_by_instance: Dict[int, Ace2DeviceIdentity] = {}
+        # Identities that actually answered discovery in the current scan
+        # cycle. Distinct from _devices_by_identity, which also holds
+        # persisted-but-currently-absent units restored via
+        # bind_persisted_instances() - those must not be treated as present
+        # (they cannot be addressed, must not count as "ready", and must not
+        # be handed a device id) until they answer discovery again.
+        self._present_identities: set = set()
 
     def reset(self) -> None:
         """Clear runtime discovery and binding state before a fresh bus scan."""
         self._devices_by_identity.clear()
         self._identity_by_instance.clear()
+        self._present_identities.clear()
 
     def record_discovered_device(self, uid1: int, uid2: int, uid3: int) -> Ace2BusDevice:
-        """Add or return a discovered ACE2 device by UID."""
+        """Add or return a discovered ACE2 device by UID.
+
+        This only registers the identity; it does NOT mark the device present
+        for this scan cycle (persisted-binding restore reuses this path). Use
+        ``note_present_device`` for units that actually answered discovery.
+        """
         identity = Ace2DeviceIdentity(uid1, uid2, uid3)
         device = self._devices_by_identity.get(identity)
         if device is None:
             device = Ace2BusDevice(identity=identity)
             self._devices_by_identity[identity] = device
         return device
+
+    def note_present_device(self, uid1: int, uid2: int, uid3: int) -> Ace2BusDevice:
+        """Register a unit that answered discovery this scan cycle."""
+        device = self.record_discovered_device(uid1, uid2, uid3)
+        self._present_identities.add(device.identity)
+        return device
+
+    def is_present(self, identity: Ace2DeviceIdentity) -> bool:
+        """Return True if this identity answered discovery in the current cycle."""
+        return identity in self._present_identities
+
+    def iter_present_devices(self) -> Iterable[Ace2BusDevice]:
+        """Yield devices that answered discovery this cycle, in UID order."""
+        for identity in sorted(self._present_identities, key=lambda item: item.uid_tuple):
+            yield self._devices_by_identity[identity]
 
     def bind_logical_instance(self, instance_num: int, uid1: int, uid2: int, uid3: int) -> Ace2BusDevice:
         """Bind a discovered ACE2 device to a logical ACE instance number."""
@@ -61,6 +89,21 @@ class Ace2BusSession:
         device.logical_instance = instance_num
         self._identity_by_instance[instance_num] = device.identity
         return device
+
+    def unbind_logical_instance(self, instance_num: int) -> None:
+        """Remove a logical-instance binding.
+
+        Used when an instance is handed back to a dedicated ACE1 transport
+        during over-subscription self-heal. Clears both the instance→identity
+        map and the device's back-reference, so the freed ACE2 unit becomes
+        available to another logical instance again.
+        """
+        identity = self._identity_by_instance.pop(instance_num, None)
+        if identity is None:
+            return
+        device = self._devices_by_identity.get(identity)
+        if device is not None and device.logical_instance == instance_num:
+            device.logical_instance = None
 
     def assign_device_id(self, uid1: int, uid2: int, uid3: int, device_id: int) -> Ace2BusDevice:
         """Store the assigned bus device id for a discovered ACE2 unit."""
@@ -100,10 +143,28 @@ class Ace2BusSession:
         for identity in sorted(self._devices_by_identity, key=lambda item: item.uid_tuple):
             yield self._devices_by_identity[identity]
 
-    def build_assignment_plan(self, start_device_id: int = 1) -> List[Ace2BusDevice]:
-        """Assign device IDs to known devices lacking one, preferring bound instances first."""
+    def build_assignment_plan(
+        self,
+        start_device_id: int = 1,
+        present_only: bool = False,
+    ) -> List[Ace2BusDevice]:
+        """Assign device IDs to known devices lacking one, preferring bound instances first.
+
+        When ``present_only`` is True, only units that answered discovery this
+        cycle (see ``note_present_device``) are given a device id. A
+        persisted-but-absent unit is then left without one so it does not count
+        as "ready" - forcing the caller's discovery retry to keep hunting for
+        it instead of silently treating a missing spool bay as available.
+        """
+        candidate_devices = self._devices_by_identity.values()
+        if present_only:
+            candidate_devices = [
+                device for device in candidate_devices
+                if device.identity in self._present_identities
+            ]
+
         ordered_devices = sorted(
-            self._devices_by_identity.values(),
+            candidate_devices,
             key=lambda device: (
                 device.logical_instance is None,
                 device.logical_instance if device.logical_instance is not None else 9999,
