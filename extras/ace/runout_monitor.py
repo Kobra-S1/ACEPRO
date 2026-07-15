@@ -22,9 +22,6 @@ from .config import (
 class RunoutMonitor:
     """Periodic monitor for filament runout and ACE-side tangle detection."""
 
-    # Monitor loop cadence (seconds) when actively checking.
-    TANGLE_CHECK_INTERVAL = 0.250
-
     # pump_time defaults
     DEFAULT_TANGLE_PUMP_TIME = 4.0
     TANGLE_PUMP_TIME_FLOOR = 2.0
@@ -78,7 +75,7 @@ class RunoutMonitor:
         self.tangle_pump_time = threshold
         # pump_time state — see _check_tangle for semantics
         self._pt_last_value_s = 0.0
-        self._pt_phase_start_eventtime = None
+        self._pt_phase_armed = False
         self._pt_unsupported_logged = False
 
     def start_monitoring(self):
@@ -239,7 +236,7 @@ class RunoutMonitor:
 
         # Early exit if detection disabled or toolchange in progress
         if not self.runout_detection_active or self.manager.toolchange_in_progress:
-            self._pt_phase_start_eventtime = None
+            self._pt_phase_armed = False
             return eventtime + 0.2
 
         try:
@@ -256,7 +253,7 @@ class RunoutMonitor:
                 self.gcode.respond_info("ACE: Print stopped/cancelled - resetting monitor baseline")
                 self.prev_toolhead_sensor_state = None
                 self._runout_false_count = 0
-                self._pt_phase_start_eventtime = None
+                self._pt_phase_armed = False
                 self.runout_handling_in_progress = False
 
                 if not self.runout_detection_active:
@@ -276,7 +273,7 @@ class RunoutMonitor:
             if raw_print_state == "paused" or not is_printing:
                 self.prev_toolhead_sensor_state = None
                 self._runout_false_count = 0
-                self._pt_phase_start_eventtime = None
+                self._pt_phase_armed = False
                 return eventtime + 0.2
 
             # Enhanced baseline initialization
@@ -341,7 +338,7 @@ class RunoutMonitor:
 
             # ===== TANGLE DETECTION (optional) =====
             if self._is_tangle_detection_active() and not self.runout_handling_in_progress:
-                self._check_tangle(eventtime, current_tool)
+                self._check_tangle(current_tool)
 
             # Update previous state for next cycle
             self.prev_toolhead_sensor_state = current_sensor_state
@@ -372,7 +369,7 @@ class RunoutMonitor:
         cont_assist_time value cannot fire immediately on re-enable.
         """
         self.tangle_detection_enabled = bool(enabled)
-        self._pt_phase_start_eventtime = None
+        self._pt_phase_armed = False
         self._pt_last_value_s = 0.0
 
     def _is_tangle_detection_active(self):
@@ -400,7 +397,7 @@ class RunoutMonitor:
                 pass  # read failure → fall through to flag
         return self.tangle_detection_enabled
 
-    def _check_tangle(self, eventtime, current_tool):
+    def _check_tangle(self, current_tool):
         """Trigger when cont_assist_time stays above tangle_pump_time.
 
         Called from the monitor loop only while actively printing —
@@ -408,13 +405,16 @@ class RunoutMonitor:
         and runout_handling_in_progress.  Noops further unless the
         currently pumping instance is Gen 1 (Gen 2 has device-native
         tangle reporting and is intentionally not covered here).
-        Tracks monotonic growth of cont_assist_time: a value drop ends
-        the current phase, a value at or above the threshold while a
-        phase is active fires the tangle handler.
+        Tracks monotonic growth of cont_assist_time: the first growing
+        reading only arms the phase (so one stale sample can never
+        fire), a value drop disarms it, and a value at or above the
+        threshold while armed fires the tangle handler.  The duration
+        itself is the device-reported cont_assist_time — no local
+        elapsed-time tracking.
         """
         inst = self._get_active_gen1_instance()
         if inst is None:
-            self._pt_phase_start_eventtime = None
+            self._pt_phase_armed = False
             return
 
         info = getattr(inst, "_info", None) or {}
@@ -434,12 +434,12 @@ class RunoutMonitor:
 
         # Cycle ended or idle: reset phase
         if current < prev or current <= 0.0:
-            self._pt_phase_start_eventtime = None
+            self._pt_phase_armed = False
             return
 
-        # First growth tick: mark phase start, wait for next tick
-        if self._pt_phase_start_eventtime is None:
-            self._pt_phase_start_eventtime = eventtime
+        # First growth tick: arm the phase, wait for next tick
+        if not self._pt_phase_armed:
+            self._pt_phase_armed = True
             return
 
         # Threshold crossed → tangle
@@ -448,7 +448,7 @@ class RunoutMonitor:
                 "ACE: TANGLE DETECTED on T%d — cont_assist_time=%.1fs >= %.1fs",
                 current_tool, current, self.tangle_pump_time,
             )
-            self._pt_phase_start_eventtime = None
+            self._pt_phase_armed = False
             self._pt_last_value_s = 0.0
             self._handle_tangle_detected(current_tool)
 
@@ -472,7 +472,7 @@ class RunoutMonitor:
     def _handle_tangle_detected(self, tool_index):
         """Pause the print and prompt the user to clear the tangle."""
         self.runout_handling_in_progress = True
-        self._pt_phase_start_eventtime = None
+        self._pt_phase_armed = False
         self._pt_last_value_s = 0.0
 
         try:

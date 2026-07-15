@@ -404,7 +404,7 @@ Mode     | Material | Color/RGB | Example
 - **Print State Tracking**: Know when printing is active (vs idle/paused)
 - **Runout Coordination**: Trigger endless spool or show prompts
 - **Print Start Baseline**: Re-initialize sensor baseline when print starts
-- **Optional Tangle Detection**: ACE Gen 1 — watch `cont_assist_time` heartbeat field for sustained pumping against resistance
+- **Optional Tangle Detection**: ACE Gen 1 — watch `cont_assist_time` heartbeat field for sustained pumping against resistance (requires active feed assist)
 
 **Architecture:**
 RunoutMonitor is purely an observer - it does NOT change state directly. Instead:
@@ -502,8 +502,10 @@ reads present again, or on any baseline reset (pause, stop, no active tool).
 - Purpose: Prevent false runout detection if print starts with wrong baseline
 
 **Tangle Detection (optional, ACE Gen 1 only):**
-- Enabled via `[ace] tangle_detection` with threshold `tangle_pump_time` (default 4.0 s)
-- Watches the ACE-reported `cont_assist_time` heartbeat field; trips when it stays above the threshold (ACE pumping continuously against resistance)
+- Enabled via `[ace] tangle_detection` with threshold `tangle_pump_time` (default 4.0 s, clamped to a 2.0 s minimum)
+- Watches the ACE-reported `cont_assist_time` heartbeat field; trips when it stays above the threshold (ACE pumping continuously against resistance). The first growing reading only arms the detector — it can never fire from a single stale sample; a value drop disarms it.
+- **Precondition — feed assist must be active**: the detector only monitors the Gen 1 instance whose feed assist is currently enabled. With feed assist off, `cont_assist_time` is not driven and tangle detection is effectively inactive.
+- **Coupled to runout monitoring**: the check runs inside the `RunoutMonitor` loop, so it is suspended whenever runout detection is (detection disabled, toolchange in progress, print paused/stopped, runout handling in progress).
 - Live toggle via `ACE_TANGLE_DETECTION ENABLE=0/1`, or expose a Mainsail/Fluidd slider by uncommenting `[output_pin TANGLE_DETECTION]` in the printer config example. When the pin is configured it is authoritative — both the command and the in-prompt "Disable Detection & Resume" button flip the pin so the dashboard never drifts out of sync with the runtime state.
 
 ### 5. AceSerialManager (`serial_manager.py`)
@@ -962,8 +964,8 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
-| `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (Gen 1 only) |
-| `tangle_pump_time` | 4.0 | Seconds of continuous ACE pumping before declaring a tangle |
+| `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (Gen 1 only; requires active feed assist) |
+| `tangle_pump_time` | 4.0 | Seconds of continuous ACE pumping before declaring a tangle (clamped to 2.0 minimum) |
 | `ace_connection_supervision` | True | Monitor connections; pause and alert on instability |
 | `moonraker_lane_sync_enabled` | True | Sync slot metadata to Moonraker `lane_data` namespace |
 | `moonraker_lane_sync_unknown_material_mode` | `empty` | How to publish placeholder materials: `passthrough`/`empty`/`map` |

@@ -71,7 +71,7 @@ class TestTangleDetectionInit:
     def test_tangle_disabled_by_default(self):
         monitor, *_ = _make_monitor(tangle_detection=False)
         assert monitor.tangle_detection_enabled is False
-        assert monitor._pt_phase_start_eventtime is None
+        assert monitor._pt_phase_armed is False
         assert monitor._pt_last_value_s == 0.0
         assert monitor._pt_unsupported_logged is False
 
@@ -95,13 +95,13 @@ class TestTangleDetectionInit:
 class TestGen1Gate:
     def test_noop_when_no_instances(self):
         monitor, _m, gcode = _make_monitor(instances=[])
-        monitor._check_tangle(100.0, current_tool=0)
+        monitor._check_tangle(current_tool=0)
         assert not gcode.run_script_from_command.called
 
     def test_noop_when_gen2_only(self):
         inst = _make_instance(protocol_name="ace2_proto", cont_assist_time=99.0)
         monitor, _m, gcode = _make_monitor(instances=[inst])
-        monitor._check_tangle(100.0, current_tool=0)
+        monitor._check_tangle(current_tool=0)
         assert not gcode.run_script_from_command.called
 
     def test_noop_when_mixed_fleet_and_gen2_is_active(self):
@@ -116,9 +116,9 @@ class TestGen1Gate:
             cont_assist_time=99.0,
         )
         monitor, _m, gcode = _make_monitor(instances=[gen1_idle, gen2_active])
-        monitor._check_tangle(100.0, current_tool=4)
+        monitor._check_tangle(current_tool=4)
         assert not gcode.run_script_from_command.called
-        assert monitor._pt_phase_start_eventtime is None
+        assert monitor._pt_phase_armed is False
 
     def test_fires_when_mixed_fleet_and_gen1_is_active(self):
         # Gen1 actively pumping, Gen2 idle → must monitor Gen1's pump time
@@ -139,17 +139,17 @@ class TestFeedAssistGate:
         inst = _make_instance(
             feed_assist_index=-1, cont_assist_time=99.0)
         monitor, _m, gcode = _make_monitor(instances=[inst])
-        monitor._check_tangle(100.0, current_tool=0)
+        monitor._check_tangle(current_tool=0)
         assert not gcode.run_script_from_command.called
 
     def test_phase_resets_when_pump_stops(self):
         inst = _make_instance(cont_assist_time=2.0)
         monitor, _m, _g = _make_monitor(instances=[inst])
-        monitor._check_tangle(100.0, current_tool=0)
-        assert monitor._pt_phase_start_eventtime is not None
+        monitor._check_tangle(current_tool=0)
+        assert monitor._pt_phase_armed is True
         inst._feed_assist_index = -1
-        monitor._check_tangle(101.0, current_tool=0)
-        assert monitor._pt_phase_start_eventtime is None
+        monitor._check_tangle(current_tool=0)
+        assert monitor._pt_phase_armed is False
 
 
 class TestPumpTimeDetection:
@@ -157,16 +157,16 @@ class TestPumpTimeDetection:
         inst = _make_instance(cont_assist_time=2.5)
         monitor, _m, gcode = _make_monitor(
             instances=[inst], tangle_pump_time=4.0)
-        monitor._check_tangle(100.0, current_tool=0)
+        monitor._check_tangle(current_tool=0)
         assert not gcode.run_script_from_command.called
 
     def test_trigger_at_threshold_after_growth_phase(self):
         inst = _make_instance(cont_assist_time=1.0)
         monitor, _m, gcode = _make_monitor(
             instances=[inst], tangle_pump_time=4.0)
-        monitor._check_tangle(100.0, current_tool=0)
+        monitor._check_tangle(current_tool=0)
         inst._info["cont_assist_time"] = 4.0
-        monitor._check_tangle(101.0, current_tool=0)
+        monitor._check_tangle(current_tool=0)
         pause_calls = [
             c for c in gcode.run_script_from_command.call_args_list
             if "PAUSE" in str(c)
@@ -177,18 +177,18 @@ class TestPumpTimeDetection:
         inst = _make_instance(cont_assist_time=5.0)
         monitor, _m, gcode = _make_monitor(
             instances=[inst], tangle_pump_time=4.0)
-        monitor._check_tangle(100.0, current_tool=0)
-        assert monitor._pt_phase_start_eventtime == 100.0
+        monitor._check_tangle(current_tool=0)
+        assert monitor._pt_phase_armed is True
         assert not gcode.run_script_from_command.called
 
     def test_value_drop_resets_phase(self):
         inst = _make_instance(cont_assist_time=2.0)
         monitor, _m, _g = _make_monitor(instances=[inst])
-        monitor._check_tangle(100.0, current_tool=0)
-        assert monitor._pt_phase_start_eventtime is not None
+        monitor._check_tangle(current_tool=0)
+        assert monitor._pt_phase_armed is True
         inst._info["cont_assist_time"] = 0.0
-        monitor._check_tangle(101.0, current_tool=0)
-        assert monitor._pt_phase_start_eventtime is None
+        monitor._check_tangle(current_tool=0)
+        assert monitor._pt_phase_armed is False
         assert monitor._pt_last_value_s == 0.0
 
     def test_field_absent_logs_once_then_silent(self):
@@ -196,11 +196,11 @@ class TestPumpTimeDetection:
         monitor, _m, gcode = _make_monitor(instances=[inst])
         assert monitor._pt_unsupported_logged is False
         with patch("ace.runout_monitor.logging") as log:
-            monitor._check_tangle(100.0, current_tool=0)
+            monitor._check_tangle(current_tool=0)
             assert monitor._pt_unsupported_logged is True
             log.info.assert_called_once()
             log.info.reset_mock()
-            monitor._check_tangle(101.0, current_tool=0)
+            monitor._check_tangle(current_tool=0)
             log.info.assert_not_called()
         assert not gcode.run_script_from_command.called
 
@@ -208,10 +208,10 @@ class TestPumpTimeDetection:
         inst = _make_instance(cont_assist_time=1.0)
         monitor, _m, _g = _make_monitor(
             instances=[inst], tangle_pump_time=4.0)
-        monitor._check_tangle(100.0, current_tool=0)
+        monitor._check_tangle(current_tool=0)
         inst._info["cont_assist_time"] = 5.0
-        monitor._check_tangle(101.0, current_tool=0)
-        assert monitor._pt_phase_start_eventtime is None
+        monitor._check_tangle(current_tool=0)
+        assert monitor._pt_phase_armed is False
         assert monitor._pt_last_value_s == 0.0
 
 
@@ -244,19 +244,19 @@ class TestLiveToggle:
     def test_enable_sets_flag_and_clears_state(self):
         monitor, *_ = _make_monitor(tangle_detection=False)
         monitor._pt_last_value_s = 2.5
-        monitor._pt_phase_start_eventtime = 100.0
+        monitor._pt_phase_armed = True
         monitor.set_tangle_detection_enabled(True)
         assert monitor.tangle_detection_enabled is True
-        assert monitor._pt_phase_start_eventtime is None
+        assert monitor._pt_phase_armed is False
         assert monitor._pt_last_value_s == 0.0
 
     def test_disable_sets_flag_and_clears_state(self):
         monitor, *_ = _make_monitor(tangle_detection=True)
         monitor._pt_last_value_s = 1.5
-        monitor._pt_phase_start_eventtime = 100.0
+        monitor._pt_phase_armed = True
         monitor.set_tangle_detection_enabled(False)
         assert monitor.tangle_detection_enabled is False
-        assert monitor._pt_phase_start_eventtime is None
+        assert monitor._pt_phase_armed is False
         assert monitor._pt_last_value_s == 0.0
 
 
