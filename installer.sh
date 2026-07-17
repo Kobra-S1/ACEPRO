@@ -3,22 +3,20 @@
 # =============================================================================
 # ACE Pro Klipper Driver - Interactive Installer
 # =============================================================================
-# This script performs the necessary installation steps to set up the ACE Pro
-# driver for Klipper, including configuration file setup and symlinks.
+# KIAUH-style menu installer for the ACE Pro driver: select the printer model
+# first, then pick the components to install or update. Every replaced file is
+# backed up into <config>/acepro_backups/<timestamp>/ instead of scattering
+# *.backup_* files through the config directory.
 #
 # Compatible with: Raspberry Pi OS, Debian, Ubuntu
-# Usage: ./installer.sh
+#
+# Interactive usage:      ./installer.sh
+# Non-interactive usage:  ./installer.sh --printer K3 --all [--restart]
+#                         ./installer.sh --printer K3 --components driver,ace-config
 #
 # =============================================================================
 
 set -u  # Exit on undefined variables
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
 
 # Script directory (where this script is located)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -30,913 +28,485 @@ if [ -z "$INSTALL_HOME" ]; then
     INSTALL_HOME="$HOME"
 fi
 
+source "$SCRIPT_DIR/installer/ui.sh"
+source "$SCRIPT_DIR/installer/detect.sh"
+source "$SCRIPT_DIR/installer/backup.sh"
+source "$SCRIPT_DIR/installer/steps.sh"
+
 # ============================================================================
-# Helper Functions
+# Global state
 # ============================================================================
 
-print_header() {
-    echo -e "\n${BLUE}========================================${NC}"
-    echo -e "${BLUE}$1${NC}"
-    echo -e "${BLUE}========================================${NC}\n"
+PRINTER_MODEL=""
+PRINTER_NAME=""
+INTERACTIVE=1
+RESTART_SERVICES=0
+
+# Component selection flags (1 = install/update, 0 = skip)
+SEL_DRIVER=0
+SEL_GENERIC=0
+SEL_PRINTERCFG=0
+SEL_ACECFG=0
+SEL_SPOOLMAN=0
+SEL_MOONRAKER=0
+SEL_MAINSAIL=0
+SEL_FLUIDD=0
+SEL_KSCREEN=0
+
+# Paths may be overridden via command line before detect_paths() fills defaults
+KLIPPER_DIR="${KLIPPER_DIR:-}"
+CONFIG_DIR="${CONFIG_DIR:-}"
+MOONRAKER_DIR="${MOONRAKER_DIR:-}"
+MOONRAKER_CONF="${MOONRAKER_CONF:-}"
+MAINSAIL_DIR="${MAINSAIL_DIR:-}"
+FLUIDD_DIR="${FLUIDD_DIR:-}"
+KLIPPERSCREEN_ROOT_DIR="${KLIPPERSCREEN_ROOT_DIR:-}"
+
+# Per-run result tracking for the summary screen
+RUN_OK=()
+RUN_FAILED=()
+
+# ============================================================================
+# Command line parsing
+# ============================================================================
+
+usage() {
+    cat << EOF
+ACE Pro Klipper Driver Installer
+
+Usage: $0 [options]
+
+Without options an interactive menu is shown.
+
+Options:
+  --printer MODEL          Printer model (e.g. K3, KS1, K3M)
+  --all                    Select all components (non-interactive install)
+  --components LIST        Comma separated component list (non-interactive):
+                             driver, generic, printer-config, ace-config,
+                             spoolman, moonraker, mainsail, fluidd,
+                             klipperscreen
+  --restart                Restart touched services after install (non-interactive)
+  --klipper-dir DIR        Klipper directory        (default: ~/klipper)
+  --config-dir DIR         Klipper config directory (default: ~/printer_data/config)
+  --moonraker-dir DIR      Moonraker directory      (default: ~/moonraker)
+  --moonraker-conf FILE    moonraker.conf path      (default: <config-dir>/moonraker.conf)
+  --mainsail-dir DIR       Mainsail directory       (default: ~/mainsail)
+  --fluidd-dir DIR         Fluidd directory         (default: ~/fluidd)
+  --klipperscreen-dir DIR  KlipperScreen directory  (default: ~/KlipperScreen)
+  -h, --help               Show this help
+EOF
 }
 
-print_info() {
-    echo -e "${BLUE}ℹ ${1}${NC}"
+select_component() {
+    case "$1" in
+        driver)         SEL_DRIVER=1 ;;
+        generic)        SEL_GENERIC=1 ;;
+        printer-config) SEL_PRINTERCFG=1 ;;
+        ace-config)     SEL_ACECFG=1 ;;
+        spoolman)       SEL_SPOOLMAN=1 ;;
+        moonraker)      SEL_MOONRAKER=1 ;;
+        mainsail)       SEL_MAINSAIL=1 ;;
+        fluidd)         SEL_FLUIDD=1 ;;
+        klipperscreen)  SEL_KSCREEN=1 ;;
+        *)
+            print_error "Unknown component: $1"
+            exit 1
+            ;;
+    esac
 }
 
-print_success() {
-    echo -e "${GREEN}✓ ${1}${NC}"
-}
-
-print_warning() {
-    echo -e "${YELLOW}⚠ ${1}${NC}"
-}
-
-print_error() {
-    echo -e "${RED}✗ ${1}${NC}"
-}
-
-# Yes/No prompt
-prompt_yes_no() {
-    local prompt="$1"
-    local response
-    while true; do
-        read -p "$(echo -e ${BLUE}${prompt}${NC} [y/N]: )" response
-        case "$response" in
-            [yY][eE][sS]|[yY]) return 0 ;;
-            [nN][oO]|[nN]|"") return 1 ;;
-            *) echo "Please answer y or n" ;;
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --printer)
+                PRINTER_MODEL="$2"; shift 2 ;;
+            --all)
+                INTERACTIVE=0
+                SEL_DRIVER=1 SEL_GENERIC=1 SEL_PRINTERCFG=1 SEL_ACECFG=1
+                SEL_SPOOLMAN=1 SEL_MOONRAKER=1 SEL_MAINSAIL=1 SEL_FLUIDD=1
+                SEL_KSCREEN=1
+                shift ;;
+            --components)
+                INTERACTIVE=0
+                local comp
+                IFS=',' read -ra comp <<< "$2"
+                local c
+                for c in "${comp[@]}"; do
+                    select_component "$c"
+                done
+                shift 2 ;;
+            --restart)
+                RESTART_SERVICES=1; shift ;;
+            --klipper-dir)       KLIPPER_DIR="$2"; shift 2 ;;
+            --config-dir)        CONFIG_DIR="$2"; shift 2 ;;
+            --moonraker-dir)     MOONRAKER_DIR="$2"; shift 2 ;;
+            --moonraker-conf)    MOONRAKER_CONF="$2"; shift 2 ;;
+            --mainsail-dir)      MAINSAIL_DIR="$2"; shift 2 ;;
+            --fluidd-dir)        FLUIDD_DIR="$2"; shift 2 ;;
+            --klipperscreen-dir) KLIPPERSCREEN_ROOT_DIR="$2"; shift 2 ;;
+            -h|--help)
+                usage; exit 0 ;;
+            *)
+                print_error "Unknown option: $1"
+                usage
+                exit 1 ;;
         esac
     done
 }
 
-# Prompt for input with default
-prompt_input() {
-    local prompt="$1"
-    local default="$2"
-    local response
-    read -p "$(echo -e ${BLUE}${prompt}${NC} [${default}]: )" response
-    echo "${response:-$default}"
+# ============================================================================
+# Menus
+# ============================================================================
+
+set_printer() {
+    local model="$1"
+    PRINTER_MODEL="$model"
+    PRINTER_NAME=$(printer_display_name "$model")
 }
 
-# Create backup with timestamp
-backup_file() {
-    local file="$1"
-    if [ -f "$file" ]; then
-        local timestamp=$(date +"%Y%m%d_%H%M%S")
-        local backup="${file}.backup_${timestamp}"
-        cp "$file" "$backup"
-        print_success "Backed up: $file → $backup"
-        return 0
-    fi
-    return 1
-}
+printer_menu() {
+    discover_printers
 
-# Remove a symlink if it exists and show what it pointed to
-remove_symlink_if_exists() {
-    local path="$1"
-    if is_symlink "$path"; then
-        local target=$(readlink "$path")
-        rm -f "$path"
-        print_info "Removed symlink: $path (was pointing to: $target)"
-        return 0
-    fi
-    return 1
-}
-
-# Check if path is a symlink
-is_symlink() {
-    [ -L "$1" ]
-}
-
-# Add a KlipperScreen menu entry (handles user-editable section vs auto-generated marker)
-ensure_menu_entry() {
-    local conf="$1"
-    local header="$2"
-    local block="$3"
-    local label="$4"
-
-    # Extract user-editable section (lines before the #~# auto-generated marker)
-    local user_section
-    user_section=$(sed '/^#~# --- Do not edit/,$d' "$conf" 2>/dev/null || cat "$conf" 2>/dev/null || true)
-
-    if echo "$user_section" | grep -qF "$header"; then
-        print_success "KlipperScreen.conf: $label entry already present"
-        return 0
-    fi
-
-    print_info "Adding $label entry to $conf"
-    local tmpfile
-    tmpfile=$(mktemp)
-
-    if grep -q '^#~# --- Do not edit' "$conf" 2>/dev/null; then
-        # Insert the block just before the auto-generated marker
-        awk -v block="$block" '
-            /^#~# --- Do not edit/ && !done {
-                print block; print ""; done=1
-            }
-            { print }
-        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
-    else
-        # No marker — append at end of file
-        printf '\n%s\n' "$block" >> "$conf"
-    fi
-    print_success "KlipperScreen.conf: added $label entry"
-}
-
-# Ensure the ACE Pro menu entry exists in main and print menus
-ensure_klipperscreen_acepro_menu() {
-    local conf="$1"
-    local entry_block_main='[menu __main acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
-    local entry_block_print='[menu __print acepro]\nname: ACE Pro\nicon: settings\npanel: acepro'
-
-    ensure_menu_entry "$conf" "[menu __main acepro]" "$entry_block_main" "ACE Pro (main menu)"
-    ensure_menu_entry "$conf" "[menu __print acepro]" "$entry_block_print" "ACE Pro (print menu)"
-}
-
-# Ensure [ace_status] section exists in moonraker.conf (create file if missing)
-ensure_moonraker_ace_status() {
-    local conf="$1"
-
-    if [ -f "$conf" ] && grep -qi '^[[:space:]]*\[ace_status\]' "$conf"; then
-        print_success "moonraker.conf: [ace_status] already present"
-        return 0
-    fi
-
-    mkdir -p "$(dirname "$conf")"
-    if [ ! -f "$conf" ]; then
-        printf '# Moonraker configuration\n\n' > "$conf"
-        print_warning "Created new moonraker.conf at $conf"
-    fi
-
-    printf '\n# ACE status extension\n[ace_status]\n' >> "$conf"
-    print_success "Added [ace_status] to $conf"
-}
-
-# Ensure font_size = small is set in the user-editable section of KlipperScreen.conf
-# Handles missing file, missing [main] section, wrong value, and #~# auto-generated block.
-ensure_klipperscreen_font_size() {
-    local conf="$1"
-
-    if [ ! -f "$conf" ]; then
-        printf '[main]\nfont_size = small\n' > "$conf"
-        print_success "Created $conf with font_size = small"
-        return 0
-    fi
-
-    # Extract user-editable section (lines before the #~# auto-generated marker)
-    local user_section
-    user_section=$(sed '/^#~# --- Do not edit/,$d' "$conf")
-
-    # Already correct?
-    if echo "$user_section" | grep -qiE '^[[:space:]]*font_size[[:space:]]*=[[:space:]]*small[[:space:]]*$'; then
-        print_success "KlipperScreen.conf: font_size = small is already configured"
-        return 0
-    fi
-
-    print_info "Configuring font_size = small in $conf"
-    local tmpfile
-    tmpfile=$(mktemp)
-
-    if echo "$user_section" | grep -qiE '^[[:space:]]*font_size[[:space:]]*='; then
-        # font_size exists with a different value — update first occurrence before #~# block
-        awk '
-            /^#~# --- Do not edit/ { in_auto=1 }
-            !in_auto && /^[[:space:]]*font_size[[:space:]]*=/ && !replaced {
-                print "font_size = small"; replaced=1; next
-            }
-            { print }
-        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
-        print_success "KlipperScreen.conf: updated font_size to small"
-
-    elif echo "$user_section" | grep -q '^\[main\]'; then
-        # [main] exists in user section but no font_size — insert after first [main]
-        awk '
-            /^#~# --- Do not edit/ { in_auto=1 }
-            !in_auto && /^\[main\]$/ && !done {
-                print; print "font_size = small"; done=1; next
-            }
-            { print }
-        ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
-        print_success "KlipperScreen.conf: added font_size = small under [main]"
-
-    else
-        # No [main] in user section — insert block before #~# marker or prepend
-        if grep -q '^#~# --- Do not edit' "$conf"; then
-            awk '
-                /^#~# --- Do not edit/ && !done {
-                    print "[main]"; print "font_size = small"; print ""; done=1
-                }
-                { print }
-            ' "$conf" > "$tmpfile" && mv "$tmpfile" "$conf"
-        else
-            { printf '[main]\nfont_size = small\n\n'; cat "$conf"; } > "$tmpfile" && mv "$tmpfile" "$conf"
-        fi
-        print_success "KlipperScreen.conf: added [main] section with font_size = small"
-    fi
-}
-
-# Create or replace symlink
-create_or_replace_symlink() {
-    local source="$1"
-    local target="$2"
-    local description="$3"
-    local force="${4:-}"  # "force" = replace without asking, "skip" = skip without asking, empty = ask
-    
-    if [ ! -e "$source" ]; then
-        print_error "$source does not exist, skipping symlink"
+    if [ "${#PRINTER_MODELS[@]}" -eq 0 ]; then
+        print_error "No printer configs found in $SCRIPT_DIR/config/"
+        pause_for_key
         return 1
     fi
-    
-    if [ -e "$target" ] || is_symlink "$target"; then
-        local do_replace
-        if [ "$force" = "force" ]; then
-            do_replace=0
-        elif [ "$force" = "skip" ]; then
-            do_replace=1
-        else
-            # Only show the "already exists" warning when we're actually
-            # about to ask the user - in force/skip mode the decision was
-            # already made once upfront, so repeating it per file just looks
-            # like something is wrong.
-            if is_symlink "$target"; then
-                print_warning "Symlink already exists: $target"
-                local current_target=$(readlink "$target")
-                print_info "  → Currently points to: $current_target"
-            else
-                print_warning "File/directory already exists: $target"
-            fi
 
-            if prompt_yes_no "Replace it?"; then
-                do_replace=0
-            else
-                do_replace=1
-            fi
-        fi
+    while true; do
+        ui_clear
+        box_top
+        box_center "${CYAN}Select Printer${NC}"
+        box_sep
+        local i
+        for i in "${!PRINTER_MODELS[@]}"; do
+            box_line "$(printf '%2d) %s' "$((i + 1))" "$(printer_display_name "${PRINTER_MODELS[$i]}")")"
+        done
+        box_sep
+        box_line "B) Back"
+        box_bottom
 
-        if [ "$do_replace" -eq 0 ]; then
-            rm -f "$target"
-            ln -sf "$source" "$target"
-            print_success "Symlink created: $target → $source"
-            return 0
-        else
-            print_info "Skipped symlink for $description (already exists)"
-            return 1
-        fi
+        local choice
+        read -r -p "Select: " choice
+        case "$choice" in
+            [bB]) return 1 ;;
+            *)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#PRINTER_MODELS[@]}" ]; then
+                    set_printer "${PRINTER_MODELS[$((choice - 1))]}"
+                    return 0
+                fi
+                ;;
+        esac
+    done
+}
+
+# Preselect components based on what is present on this system
+default_selection() {
+    SEL_DRIVER=1
+    SEL_GENERIC=1
+    SEL_ACECFG=1
+
+    # Replacing printer.cfg is the destructive one - default OFF when one
+    # already exists (update scenario), ON on a fresh install.
+    if [ -f "$CONFIG_DIR/printer.cfg" ]; then
+        SEL_PRINTERCFG=0
     else
-        # Target doesn't exist, create symlink
-        mkdir -p "$(dirname "$target")"
-        ln -sf "$source" "$target"
-        print_success "Symlink created: $target → $source"
-        return 0
+        SEL_PRINTERCFG=1
+    fi
+
+    # Spoolman is opt-in infrastructure - preselect only when already installed
+    [ -f "$CONFIG_DIR/spoolman_logic.cfg" ] && SEL_SPOOLMAN=1 || SEL_SPOOLMAN=0
+
+    [ -d "$MOONRAKER_DIR/moonraker/components" ] && SEL_MOONRAKER=1 || SEL_MOONRAKER=0
+    [ -d "$MAINSAIL_DIR" ] && SEL_MAINSAIL=1 || SEL_MAINSAIL=0
+    [ -d "$FLUIDD_DIR" ] && SEL_FLUIDD=1 || SEL_FLUIDD=0
+    [ -d "$KLIPPERSCREEN_ROOT_DIR" ] && SEL_KSCREEN=1 || SEL_KSCREEN=0
+}
+
+_checkbox() {
+    if [ "$1" -eq 1 ]; then
+        printf '%s[x]%s' "$GREEN" "$NC"
+    else
+        printf '[ ]'
     fi
 }
 
+_toggle() {
+    local var="$1"
+    if [ "${!var}" -eq 1 ]; then
+        printf -v "$var" 0
+    else
+        printf -v "$var" 1
+    fi
+}
+
+# Component selection screen. Returns 0 = run install, 1 = back.
+component_menu() {
+    while true; do
+        detect_status
+
+        ui_clear
+        box_top
+        box_center "${CYAN}Install / Update — $PRINTER_NAME${NC}"
+        box_sep
+        box_cols "1) $(_checkbox $SEL_DRIVER) ACE driver" "$ST_DRIVER" 34
+        box_cols "2) $(_checkbox $SEL_GENERIC) Generic config files" "$ST_GENERIC" 34
+        box_cols "3) $(_checkbox $SEL_PRINTERCFG) printer.cfg (${PRINTER_MODEL})" "$ST_PRINTERCFG" 34
+        box_cols "4) $(_checkbox $SEL_ACECFG) ACE config (ace_${PRINTER_MODEL}.cfg)" "$ST_ACECFG" 34
+        box_cols "5) $(_checkbox $SEL_SPOOLMAN) Spoolman integration" "$ST_SPOOLMAN" 34
+        box_cols "6) $(_checkbox $SEL_MOONRAKER) Moonraker ACE status" "$ST_MOONRAKER" 34
+        box_cols "7) $(_checkbox $SEL_MAINSAIL) Dashboard (Mainsail)" "$ST_MAINSAIL" 34
+        box_cols "8) $(_checkbox $SEL_FLUIDD) Dashboard (Fluidd)" "$ST_FLUIDD" 34
+        box_cols "9) $(_checkbox $SEL_KSCREEN) KlipperScreen" "$ST_KSCREEN" 34
+        box_sep
+        box_line "Selected components are backed up and replaced."
+        box_line "printer.cfg replaces your whole printer config -"
+        box_line "only select it if you want the stock ${PRINTER_MODEL} config."
+        box_sep
+        box_line "A) Toggle all    I) Install selected    B) Back"
+        box_bottom
+
+        local key
+        key=$(read_key)
+        case "$key" in
+            1) _toggle SEL_DRIVER ;;
+            2) _toggle SEL_GENERIC ;;
+            3) _toggle SEL_PRINTERCFG ;;
+            4) _toggle SEL_ACECFG ;;
+            5) _toggle SEL_SPOOLMAN ;;
+            6) _toggle SEL_MOONRAKER ;;
+            7) _toggle SEL_MAINSAIL ;;
+            8) _toggle SEL_FLUIDD ;;
+            9) _toggle SEL_KSCREEN ;;
+            [aA])
+                local all=1
+                if [ "$SEL_DRIVER" -eq 1 ] && [ "$SEL_GENERIC" -eq 1 ] && \
+                   [ "$SEL_PRINTERCFG" -eq 1 ] && [ "$SEL_ACECFG" -eq 1 ] && \
+                   [ "$SEL_SPOOLMAN" -eq 1 ] && \
+                   [ "$SEL_MOONRAKER" -eq 1 ] && [ "$SEL_MAINSAIL" -eq 1 ] && \
+                   [ "$SEL_FLUIDD" -eq 1 ] && [ "$SEL_KSCREEN" -eq 1 ]; then
+                    all=0
+                fi
+                SEL_DRIVER=$all SEL_GENERIC=$all SEL_PRINTERCFG=$all SEL_ACECFG=$all
+                SEL_SPOOLMAN=$all SEL_MOONRAKER=$all SEL_MAINSAIL=$all SEL_FLUIDD=$all
+                SEL_KSCREEN=$all
+                ;;
+            [iI])
+                if [ "$SEL_DRIVER" -eq 0 ] && [ "$SEL_GENERIC" -eq 0 ] && \
+                   [ "$SEL_PRINTERCFG" -eq 0 ] && [ "$SEL_ACECFG" -eq 0 ] && \
+                   [ "$SEL_SPOOLMAN" -eq 0 ] && \
+                   [ "$SEL_MOONRAKER" -eq 0 ] && [ "$SEL_MAINSAIL" -eq 0 ] && \
+                   [ "$SEL_FLUIDD" -eq 0 ] && [ "$SEL_KSCREEN" -eq 0 ]; then
+                    print_warning "Nothing selected"
+                    pause_for_key
+                else
+                    return 0
+                fi
+                ;;
+            [bB]) return 1 ;;
+        esac
+    done
+}
+
+paths_menu() {
+    while true; do
+        ui_clear
+        box_top
+        box_center "${CYAN}Paths${NC}"
+        box_sep
+        box_cols "1) Klipper dir" "${KLIPPER_DIR/#$INSTALL_HOME/\~}" 22
+        box_cols "2) Config dir" "${CONFIG_DIR/#$INSTALL_HOME/\~}" 22
+        box_cols "3) Moonraker dir" "${MOONRAKER_DIR/#$INSTALL_HOME/\~}" 22
+        box_cols "4) moonraker.conf" "${MOONRAKER_CONF/#$INSTALL_HOME/\~}" 22
+        box_cols "5) Mainsail dir" "${MAINSAIL_DIR/#$INSTALL_HOME/\~}" 22
+        box_cols "6) Fluidd dir" "${FLUIDD_DIR/#$INSTALL_HOME/\~}" 22
+        box_cols "7) KlipperScreen dir" "${KLIPPERSCREEN_ROOT_DIR/#$INSTALL_HOME/\~}" 22
+        box_sep
+        box_line "B) Back"
+        box_bottom
+
+        local choice
+        read -r -p "Select: " choice
+        case "$choice" in
+            1) KLIPPER_DIR=$(prompt_input "Klipper directory" "$KLIPPER_DIR") ;;
+            2)
+                CONFIG_DIR=$(prompt_input "Config directory" "$CONFIG_DIR")
+                MOONRAKER_CONF="$CONFIG_DIR/moonraker.conf"
+                BACKUP_ROOT="$CONFIG_DIR/acepro_backups"
+                ;;
+            3) MOONRAKER_DIR=$(prompt_input "Moonraker directory" "$MOONRAKER_DIR") ;;
+            4) MOONRAKER_CONF=$(prompt_input "moonraker.conf path" "$MOONRAKER_CONF") ;;
+            5) MAINSAIL_DIR=$(prompt_input "Mainsail directory" "$MAINSAIL_DIR") ;;
+            6) FLUIDD_DIR=$(prompt_input "Fluidd directory" "$FLUIDD_DIR") ;;
+            7) KLIPPERSCREEN_ROOT_DIR=$(prompt_input "KlipperScreen directory" "$KLIPPERSCREEN_ROOT_DIR") ;;
+            [bB]|"") return 0 ;;
+        esac
+    done
+}
+
+main_menu() {
+    while true; do
+        detect_status
+        local printer_label legacy_count
+        if [ -n "$PRINTER_MODEL" ]; then
+            printer_label="${GREEN}${PRINTER_NAME}${NC}"
+        else
+            printer_label="${YELLOW}(none selected)${NC}"
+        fi
+        legacy_count=$(count_legacy_backups)
+
+        ui_clear
+        box_top
+        box_center "${CYAN}ACE Pro Driver — Installer${NC}"
+        box_sep
+        box_cols "Printer:" "$printer_label" 12
+        box_cols "Config dir:" "${CONFIG_DIR/#$INSTALL_HOME/\~}" 12
+        box_sep
+        box_cols "1) Install / Update" "Driver:         $ST_DRIVER" 24
+        box_cols "2) Select printer" "Generic config: $ST_GENERIC" 24
+        box_cols "3) Backups" "printer.cfg:    $ST_PRINTERCFG" 24
+        box_cols "4) Paths" "ACE config:     $ST_ACECFG" 24
+        box_cols "" "Spoolman:       $ST_SPOOLMAN" 24
+        box_cols "" "Moonraker:      $ST_MOONRAKER" 24
+        box_cols "" "Mainsail dash:  $ST_MAINSAIL" 24
+        box_cols "" "Fluidd dash:    $ST_FLUIDD" 24
+        box_cols "" "KlipperScreen:  $ST_KSCREEN" 24
+        if [ "$legacy_count" -gt 0 ]; then
+            box_sep
+            box_line "${YELLOW}$legacy_count old *.backup_* file(s) in config root${NC}"
+            box_line "${YELLOW}→ see Backups menu to migrate them${NC}"
+        fi
+        box_sep
+        box_line "Q) Quit"
+        box_bottom
+
+        local choice
+        read -r -p "Select: " choice
+        case "$choice" in
+            1)
+                if [ -z "$PRINTER_MODEL" ]; then
+                    printer_menu || continue
+                fi
+                default_selection
+                if component_menu; then
+                    run_install
+                    pause_for_key
+                fi
+                ;;
+            2) printer_menu || true ;;
+            3) backups_menu ;;
+            4) paths_menu ;;
+            [qQ])
+                print_success "Happy printing!"
+                exit 0
+                ;;
+        esac
+    done
+}
+
 # ============================================================================
-# Main Installation
+# Install runner
 # ============================================================================
 
-main() {
-    print_header "ACE Pro Klipper Driver - Interactive Installer"
-    
-    # Track backup files for final instructions
-    PRINTER_CONFIG_BACKUP=""
-    PRINTER_GENERIC_MACROS_BACKUP=""
-    ACE_CONFIG_BACKUP=""
-    ACE_MACROS_BACKUP=""
-    MOONRAKER_RESTART_NEEDED=0
-    
-    # ========================================================================
-    # Step 1: Gather user input
-    # ========================================================================
-    
-    print_info "Gathering installation parameters...\n"
-    print_info "Installer source directory: $SCRIPT_DIR"
-    print_info "Default target user/home: $INSTALL_USER ($INSTALL_HOME)"
-    
-    # 1.1 - Klipper installation directory
-    DEFAULT_KLIPPER_DIR="$INSTALL_HOME/klipper"
-    KLIPPER_DIR=$(prompt_input "Klipper installation directory (press ENTER to use default)" "$DEFAULT_KLIPPER_DIR")
-    
-    if [ ! -d "$KLIPPER_DIR" ]; then
-        print_error "Klipper directory not found: $KLIPPER_DIR"
-        exit 1
+_run_step() {
+    local label="$1" fn="$2"
+    if "$fn"; then
+        RUN_OK+=("$label")
+    else
+        RUN_FAILED+=("$label")
     fi
-    print_success "Using Klipper directory: $KLIPPER_DIR"
-    
-    # 1.2 - Printer model
-    echo ""
-    echo "Which printer model?"
-    echo "  1) Kobra 3"
-    echo "  2) Kobra KS1"
-    echo "  3) Kobra K3M (BETA testing)"
-    read -p "$(echo -e ${BLUE}Select [1, 2 or 3]${NC}: )" printer_choice
-    
-    case "$printer_choice" in
-        1)
-            PRINTER_MODEL="K3"
-            PRINTER_NAME="Kobra 3"
-            ;;
-        2)
-            PRINTER_MODEL="KS1"
-            PRINTER_NAME="Kobra S1"
-            ;;
-        3)
-            PRINTER_MODEL="K3M"
-            PRINTER_NAME="Kobra K3M (BETA testing)"
-            ;;
-        *)
-            print_error "Invalid choice"
-            exit 1
-            ;;
-    esac
-    print_success "Selected printer: $PRINTER_NAME"
-    
-    # 1.3 - Config directory
-    DEFAULT_CONFIG_DIR="$INSTALL_HOME/printer_data/config"
-    CONFIG_DIR=$(prompt_input "\nKlipper config directory" "$DEFAULT_CONFIG_DIR")
-    
+}
+
+run_install() {
+    RUN_OK=()
+    RUN_FAILED=()
+    BACKUP_RUN_DIR=""
+    TOUCHED_KLIPPER=0
+    TOUCHED_MOONRAKER=0
+    TOUCHED_KLIPPERSCREEN=0
+
+    # Basic validation
     if [ ! -d "$CONFIG_DIR" ]; then
         print_error "Config directory not found: $CONFIG_DIR"
-        exit 1
+        return 1
     fi
-    print_success "Using config directory (press ENTER to use default): $CONFIG_DIR"
-    
-    # ========================================================================
-    # Step 2: Ask for confirmation
-    # ========================================================================
-    
-    echo ""
+    if [ "$SEL_DRIVER" -eq 1 ] && [ ! -d "$KLIPPER_DIR" ]; then
+        print_error "Klipper directory not found: $KLIPPER_DIR"
+        return 1
+    fi
+    if { [ "$SEL_PRINTERCFG" -eq 1 ] || [ "$SEL_ACECFG" -eq 1 ]; } && [ -z "$PRINTER_MODEL" ]; then
+        print_error "No printer model selected (needed for printer.cfg / ACE config)"
+        return 1
+    fi
+
+    [ "$SEL_DRIVER" -eq 1 ]     && _run_step "ACE driver" step_driver
+    [ "$SEL_GENERIC" -eq 1 ]    && _run_step "Generic config files" step_generic_config
+    [ "$SEL_PRINTERCFG" -eq 1 ] && _run_step "printer.cfg ($PRINTER_MODEL)" step_printer_config
+    [ "$SEL_ACECFG" -eq 1 ]     && _run_step "ACE config (ace_${PRINTER_MODEL}.cfg)" step_ace_config
+    [ "$SEL_SPOOLMAN" -eq 1 ]   && _run_step "Spoolman integration" step_spoolman
+    [ "$SEL_MOONRAKER" -eq 1 ]  && _run_step "Moonraker ACE status" step_moonraker
+    [ "$SEL_MAINSAIL" -eq 1 ]   && _run_step "Dashboard (Mainsail)" step_dashboard_mainsail
+    [ "$SEL_FLUIDD" -eq 1 ]     && _run_step "Dashboard (Fluidd)" step_dashboard_fluidd
+    [ "$SEL_KSCREEN" -eq 1 ]    && _run_step "KlipperScreen" step_klipperscreen
+
+    step_restart
+    show_summary
+    return 0
+}
+
+show_summary() {
     print_header "Installation Summary"
-    
-    cat << EOF
-Script directory:        $SCRIPT_DIR
-Klipper directory:       $KLIPPER_DIR
-Printer model:           $PRINTER_NAME
-Config directory:        $CONFIG_DIR
 
-Installation steps:
-1. Link ace module to Klipper extras
-1b. (Optional) Install ACE status Moonraker component + dashboard symlinks
-2. Backup and install printer.cfg for $PRINTER_NAME
-3. Copy printer_generic_macros.cfg (backup if exists)
-4. Copy ACE configuration file
-5. Copy ACE macro file
-6. Link optional ACE temperature sensor
-7. Link KlipperScreen panel (if available)
-8. Optionally restart services
-EOF
-    
-    if ! prompt_yes_no "Continue with installation?"; then
-        print_info "Installation cancelled"
-        exit 0
-    fi
-    
-    # ========================================================================
-    # Step 1: Link ace module to Klipper extras
-    # ========================================================================
-    
-    print_header "Step 1: Linking ACE module to Klipper extras"
-    
-    ACE_SOURCE="$SCRIPT_DIR/extras/ace"
-    ACE_TARGET="$KLIPPER_DIR/klippy/extras/ace"
-    
-    if [ ! -d "$ACE_SOURCE" ]; then
-        print_error "ACE source directory not found: $ACE_SOURCE"
-        exit 1
-    fi
+    local label
+    for label in "${RUN_OK[@]}"; do
+        print_success "$label"
+    done
+    for label in "${RUN_FAILED[@]}"; do
+        print_error "$label (failed or skipped - see output above)"
+    done
 
-    VP_SOURCE="$SCRIPT_DIR/extras/virtual_pins.py"
-    VP_TARGET="$KLIPPER_DIR/klippy/extras/virtual_pins.py"
-    
-    if [ ! -f "$VP_SOURCE" ]; then
-        print_error "virtual_pins.py not found: $VP_SOURCE"
-        exit 1
-    fi
-
-    TEMP_SOURCE="$SCRIPT_DIR/extras/temperature_ace.py"
-    TEMP_TARGET="$KLIPPER_DIR/klippy/extras/temperature_ace.py"
-
-    # Single overwrite decision for all ACE extras modules instead of asking
-    # once per file.
-    ACE_EXTRAS_FORCE=""
-    if [ -e "$ACE_TARGET" ] || is_symlink "$ACE_TARGET" || \
-       [ -e "$VP_TARGET" ] || is_symlink "$VP_TARGET" || \
-       { [ -f "$TEMP_SOURCE" ] && { [ -e "$TEMP_TARGET" ] || is_symlink "$TEMP_TARGET"; }; }; then
-        if prompt_yes_no "One or more ACE extras modules already exist. Overwrite all of them?"; then
-            ACE_EXTRAS_FORCE="force"
-        else
-            ACE_EXTRAS_FORCE="skip"
-        fi
-    fi
-
-    create_or_replace_symlink "$ACE_SOURCE" "$ACE_TARGET" "ACE module" "$ACE_EXTRAS_FORCE"
-    create_or_replace_symlink "$VP_SOURCE" "$VP_TARGET" "virtual_pins module" "$ACE_EXTRAS_FORCE"
-
-    # Optional ACE temperature sensor (safe to link even if unused)
-    if [ -f "$TEMP_SOURCE" ]; then
-        print_info "Linking optional ACE temperature sensor (temperature_ace.py)..."
-        create_or_replace_symlink "$TEMP_SOURCE" "$TEMP_TARGET" "temperature_ace sensor" "$ACE_EXTRAS_FORCE"
-    else
-        print_warning "temperature_ace.py not found; skipping sensor symlink"
-    fi
-
-    # ========================================================================
-    # Step 1b: ACE Status Integration (Optional)
-    # ========================================================================
-
-    ACE_STATUS_DIR="$SCRIPT_DIR/ace_status_integration"
-    if [ -d "$ACE_STATUS_DIR" ]; then
-        print_header "Step 1b: ACE Status Integration (Optional)"
-
-        if prompt_yes_no "Install ACE status Moonraker component + dashboard symlinks?"; then
-            ACE_MOONRAKER_DEFAULT="$INSTALL_HOME/moonraker"
-            ACE_MAINSAIL_DEFAULT="$INSTALL_HOME/mainsail"
-            ACE_FLUIDD_DEFAULT="$INSTALL_HOME/fluidd"
-            ACE_MOONRAKER_CONF_DEFAULT="$INSTALL_HOME/printer_data/config/moonraker.conf"
-
-            # Single overwrite decision for the whole integration (component +
-            # Mainsail + Fluidd dashboard files) instead of asking per file.
-            ACE_STATUS_FORCE="skip"
-            if prompt_yes_no "If any ACE status integration files already exist, overwrite all of them? (No = keep existing files as-is)"; then
-                ACE_STATUS_FORCE="force"
-            fi
-
-            # Moonraker component
-            ACE_MOONRAKER_DIR=$(prompt_input "Moonraker directory (press ENTER to use default)" "$ACE_MOONRAKER_DEFAULT")
-            ACE_MOONRAKER_COMPONENTS="$ACE_MOONRAKER_DIR/moonraker/components"
-            if [ -d "$ACE_MOONRAKER_COMPONENTS" ]; then
-                ACE_STATUS_SOURCE="$ACE_STATUS_DIR/moonraker/ace_status.py"
-                ACE_STATUS_TARGET="$ACE_MOONRAKER_COMPONENTS/ace_status.py"
-                create_or_replace_symlink "$ACE_STATUS_SOURCE" "$ACE_STATUS_TARGET" "ACE status Moonraker component" "$ACE_STATUS_FORCE"
-                MOONRAKER_RESTART_NEEDED=1
-
-                # Ensure moonraker.conf has [ace_status]
-                ACE_MOONRAKER_CONF=$(prompt_input "moonraker.conf path (press ENTER to use default)" "$ACE_MOONRAKER_CONF_DEFAULT")
-                ensure_moonraker_ace_status "$ACE_MOONRAKER_CONF"
-            else
-                print_warning "Moonraker components directory not found: $ACE_MOONRAKER_COMPONENTS"
-                print_info "Skipping Moonraker ACE status symlink"
-            fi
-
-            # Mainsail dashboard files
-            if prompt_yes_no "Link dashboard files into Mainsail?"; then
-                ACE_MAINSAIL_DIR=$(prompt_input "Mainsail install directory" "$ACE_MAINSAIL_DEFAULT")
-                if [ -d "$ACE_MAINSAIL_DIR" ]; then
-                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js vue.global.prod.js favicon.svg; do
-                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_MAINSAIL_DIR/$ace_file" "Mainsail $ace_file" "$ACE_STATUS_FORCE"
-                    done
-                else
-                    print_warning "Mainsail directory not found: $ACE_MAINSAIL_DIR"
-                    print_info "Skipped Mainsail dashboard links"
-                fi
-            fi
-
-            # Fluidd dashboard files
-            if prompt_yes_no "Link dashboard files into Fluidd?"; then
-                ACE_FLUIDD_DIR=$(prompt_input "Fluidd install directory" "$ACE_FLUIDD_DEFAULT")
-                if [ -d "$ACE_FLUIDD_DIR" ]; then
-                    for ace_file in ace.html ace-dashboard.js ace-dashboard.css ace-dashboard-config.js vue.global.prod.js favicon.svg; do
-                        create_or_replace_symlink "$ACE_STATUS_DIR/web/$ace_file" "$ACE_FLUIDD_DIR/$ace_file" "Fluidd $ace_file" "$ACE_STATUS_FORCE"
-                    done
-                else
-                    print_warning "Fluidd directory not found: $ACE_FLUIDD_DIR"
-                    print_info "Skipped Fluidd dashboard links"
-                fi
-            fi
-        else
-            print_info "ACE status integration skipped"
-        fi
-    fi
-    
-    # ========================================================================
-    # Step 2: Backup and copy printer configuration
-    # ========================================================================
-    
-    print_header "Step 2: Printer Configuration"
-    
-    PRINTER_CONFIG_SOURCE="$SCRIPT_DIR/config/printer_${PRINTER_MODEL}.cfg"
-    PRINTER_CONFIG_TARGET="$CONFIG_DIR/printer.cfg"
-    
-    if [ ! -f "$PRINTER_CONFIG_SOURCE" ]; then
-        print_error "Printer config file not found: $PRINTER_CONFIG_SOURCE"
-        exit 1
-    fi
-    
-    # Backup existing printer.cfg
-    if [ -f "$PRINTER_CONFIG_TARGET" ]; then
-        print_warning "printer.cfg already exists"
-        local was_symlink=0
-        if is_symlink "$PRINTER_CONFIG_TARGET"; then
-            was_symlink=1
-            print_info "Current printer.cfg is a symlink (→ $(readlink "$PRINTER_CONFIG_TARGET"))"
-        fi
-
-        if ! prompt_yes_no "Back up and replace printer.cfg?"; then
-            print_info "Skipped printer configuration installation"
-        else
-            local timestamp=$(date +"%Y%m%d_%H%M%S")
-            PRINTER_CONFIG_BACKUP="${PRINTER_CONFIG_TARGET}.backup_${timestamp}"
-            cp "$PRINTER_CONFIG_TARGET" "$PRINTER_CONFIG_BACKUP"
-            print_success "Backed up: $PRINTER_CONFIG_TARGET → $PRINTER_CONFIG_BACKUP"
-
-            if [ "$was_symlink" -eq 1 ]; then
-                remove_symlink_if_exists "$PRINTER_CONFIG_TARGET"
-            fi
-
-            cp "$PRINTER_CONFIG_SOURCE" "$PRINTER_CONFIG_TARGET"
-            print_success "Copied: $PRINTER_CONFIG_SOURCE → $PRINTER_CONFIG_TARGET"
-        fi
-    else
-        cp "$PRINTER_CONFIG_SOURCE" "$PRINTER_CONFIG_TARGET"
-        print_success "Copied: $PRINTER_CONFIG_SOURCE → $PRINTER_CONFIG_TARGET"
-    fi
-    
-    # ========================================================================
-    # Step 3: Copy printer_generic_macros.cfg
-    # ========================================================================
-
-    print_header "Step 3: Printer Generic Macros"
-
-    PRINTER_GENERIC_MACROS_SOURCE="$SCRIPT_DIR/config/printer_generic_macros.cfg"
-    PRINTER_GENERIC_MACROS_TARGET="$CONFIG_DIR/printer_generic_macros.cfg"
-
-    if [ ! -f "$PRINTER_GENERIC_MACROS_SOURCE" ]; then
-        print_error "printer_generic_macros.cfg not found: $PRINTER_GENERIC_MACROS_SOURCE"
-        exit 1
-    fi
-
-    if [ -f "$PRINTER_GENERIC_MACROS_TARGET" ]; then
-        print_warning "printer_generic_macros.cfg already exists"
-        local was_symlink=0
-        if is_symlink "$PRINTER_GENERIC_MACROS_TARGET"; then
-            was_symlink=1
-            print_info "Current printer_generic_macros.cfg is a symlink (→ $(readlink "$PRINTER_GENERIC_MACROS_TARGET"))"
-        fi
-
-        if ! prompt_yes_no "Back up and replace printer_generic_macros.cfg?"; then
-            print_info "Skipped printer_generic_macros.cfg installation"
-        else
-            local timestamp=$(date +"%Y%m%d_%H%M%S")
-            PRINTER_GENERIC_MACROS_BACKUP="${PRINTER_GENERIC_MACROS_TARGET}.backup_${timestamp}"
-            cp "$PRINTER_GENERIC_MACROS_TARGET" "$PRINTER_GENERIC_MACROS_BACKUP"
-            print_success "Backed up: $PRINTER_GENERIC_MACROS_TARGET → $PRINTER_GENERIC_MACROS_BACKUP"
-
-            if [ "$was_symlink" -eq 1 ]; then
-                remove_symlink_if_exists "$PRINTER_GENERIC_MACROS_TARGET"
-            fi
-
-            cp "$PRINTER_GENERIC_MACROS_SOURCE" "$PRINTER_GENERIC_MACROS_TARGET"
-            print_success "Copied: $PRINTER_GENERIC_MACROS_SOURCE → $PRINTER_GENERIC_MACROS_TARGET"
-        fi
-    else
-        cp "$PRINTER_GENERIC_MACROS_SOURCE" "$PRINTER_GENERIC_MACROS_TARGET"
-        print_success "Copied: $PRINTER_GENERIC_MACROS_SOURCE → $PRINTER_GENERIC_MACROS_TARGET"
-    fi
-
-    # Legacy filename support (cleanup old printer_macros_generic.cfg symlinks)
-    LEGACY_PRINTER_GENERIC_MACROS_TARGET="$CONFIG_DIR/printer_macros_generic.cfg"
-    if is_symlink "$LEGACY_PRINTER_GENERIC_MACROS_TARGET"; then
-        print_warning "Legacy printer_macros_generic.cfg symlink detected"
-        print_info "Current printer_macros_generic.cfg is a symlink (→ $(readlink "$LEGACY_PRINTER_GENERIC_MACROS_TARGET"))"
-
-        if prompt_yes_no "Replace printer_macros_generic.cfg with a local copy?"; then
-            local timestamp=$(date +"%Y%m%d_%H%M%S")
-            local legacy_backup="${LEGACY_PRINTER_GENERIC_MACROS_TARGET}.backup_${timestamp}"
-            cp "$LEGACY_PRINTER_GENERIC_MACROS_TARGET" "$legacy_backup"
-            print_success "Backed up: $LEGACY_PRINTER_GENERIC_MACROS_TARGET → $legacy_backup"
-
-            remove_symlink_if_exists "$LEGACY_PRINTER_GENERIC_MACROS_TARGET"
-            cp "$PRINTER_GENERIC_MACROS_SOURCE" "$LEGACY_PRINTER_GENERIC_MACROS_TARGET"
-            print_success "Copied: $PRINTER_GENERIC_MACROS_SOURCE → $LEGACY_PRINTER_GENERIC_MACROS_TARGET"
-        else
-            print_info "Skipped printer_macros_generic.cfg replacement"
-        fi
-    fi
-
-    # ========================================================================
-    # Step 4: Copy ACE configuration file
-    # ========================================================================
-
-    print_header "Step 4: ACE Configuration Files"
-
-    ACE_CONFIG_SOURCE="$SCRIPT_DIR/config/ace_${PRINTER_MODEL}.cfg"
-    ACE_CONFIG_TARGET="$CONFIG_DIR/ace_${PRINTER_MODEL}.cfg"
-
-    if [ ! -f "$ACE_CONFIG_SOURCE" ]; then
-        print_error "ACE config file not found: $ACE_CONFIG_SOURCE"
-        exit 1
-    fi
-
-    if [ -f "$ACE_CONFIG_TARGET" ]; then
-        print_warning "ace_${PRINTER_MODEL}.cfg already exists"
-        local was_symlink=0
-        if is_symlink "$ACE_CONFIG_TARGET"; then
-            was_symlink=1
-            print_info "Current ace_${PRINTER_MODEL}.cfg is a symlink (→ $(readlink "$ACE_CONFIG_TARGET"))"
-        fi
-
-        if ! prompt_yes_no "Back up and replace ace_${PRINTER_MODEL}.cfg?"; then
-            print_info "Skipped ace_${PRINTER_MODEL}.cfg installation"
-        else
-            local timestamp=$(date +"%Y%m%d_%H%M%S")
-            ACE_CONFIG_BACKUP="${ACE_CONFIG_TARGET}.backup_${timestamp}"
-            cp "$ACE_CONFIG_TARGET" "$ACE_CONFIG_BACKUP"
-            print_success "Backed up: $ACE_CONFIG_TARGET → $ACE_CONFIG_BACKUP"
-
-            if [ "$was_symlink" -eq 1 ]; then
-                remove_symlink_if_exists "$ACE_CONFIG_TARGET"
-            fi
-
-            cp "$ACE_CONFIG_SOURCE" "$ACE_CONFIG_TARGET"
-            print_success "Copied: $ACE_CONFIG_SOURCE → $ACE_CONFIG_TARGET"
-        fi
-    else
-        cp "$ACE_CONFIG_SOURCE" "$ACE_CONFIG_TARGET"
-        print_success "Copied: $ACE_CONFIG_SOURCE → $ACE_CONFIG_TARGET"
-    fi
-
-    # ========================================================================
-    # Step 5: Copy ACE macro file
-    # ========================================================================
-
-    print_header "Step 5: ACE Macro Files"
-
-    MACROS_SOURCE="$SCRIPT_DIR/config/ace_macros_generic.cfg"
-    MACROS_TARGET="$CONFIG_DIR/ace_macros_generic.cfg"
-
-    if [ ! -f "$MACROS_SOURCE" ]; then
-        print_error "ACE macros file not found: $MACROS_SOURCE"
-        exit 1
-    fi
-
-    if [ -f "$MACROS_TARGET" ]; then
-        print_warning "ace_macros_generic.cfg already exists"
-        local was_symlink=0
-        if is_symlink "$MACROS_TARGET"; then
-            was_symlink=1
-            print_info "Current ace_macros_generic.cfg is a symlink (→ $(readlink "$MACROS_TARGET"))"
-        fi
-
-        if ! prompt_yes_no "Back up and replace ace_macros_generic.cfg?"; then
-            print_info "Skipped ace_macros_generic.cfg installation"
-        else
-            local timestamp=$(date +"%Y%m%d_%H%M%S")
-            ACE_MACROS_BACKUP="${MACROS_TARGET}.backup_${timestamp}"
-            cp "$MACROS_TARGET" "$ACE_MACROS_BACKUP"
-            print_success "Backed up: $MACROS_TARGET → $ACE_MACROS_BACKUP"
-
-            if [ "$was_symlink" -eq 1 ]; then
-                remove_symlink_if_exists "$MACROS_TARGET"
-            fi
-
-            cp "$MACROS_SOURCE" "$MACROS_TARGET"
-            print_success "Copied: $MACROS_SOURCE → $MACROS_TARGET"
-        fi
-    else
-        cp "$MACROS_SOURCE" "$MACROS_TARGET"
-        print_success "Copied: $MACROS_SOURCE → $MACROS_TARGET"
-    fi
-    
-    # ========================================================================
-    # Step 6: Link KlipperScreen panel (if available)
-    # ========================================================================
-
-    print_header "Step 6: KlipperScreen Integration (Optional)"
-    
-    KLIPPERSCREEN_ROOT_DIR="$INSTALL_HOME/KlipperScreen"
-    KLIPPERSCREEN_PANELS_DIR="$KLIPPERSCREEN_ROOT_DIR/panels"
-    KLIPPERSCREEN_PANEL_SOURCE="$SCRIPT_DIR/KlipperScreen/acepro.py"
-    KLIPPERSCREEN_PANEL_TARGET="$KLIPPERSCREEN_PANELS_DIR/acepro.py"
-    
-    if [ ! -d "$KLIPPERSCREEN_PANELS_DIR" ]; then
-        print_warning "KlipperScreen panels directory not found: $KLIPPERSCREEN_PANELS_DIR"
-        print_info "KlipperScreen integration skipped (not installed)"
-    else
-        if [ ! -f "$KLIPPERSCREEN_PANEL_SOURCE" ]; then
-            print_error "KlipperScreen panel file not found: $KLIPPERSCREEN_PANEL_SOURCE"
-        else
-            print_info "KlipperScreen panels directory found"
-            create_or_replace_symlink "$KLIPPERSCREEN_PANEL_SOURCE" "$KLIPPERSCREEN_PANEL_TARGET" "acepro.py panel"
-        fi
-    fi
-
-    # Optional: patch KlipperScreen core to subscribe to ACE objects
-    #
-    # KlipperScreen's screen.py has changed shape across upstream commits
-    # (quote style via ruff reformatting, self._ws.klippy -> self._ws.api
-    # rename), so a single fixed patch doesn't apply across all versions.
-    # Try each variant, newest first, and apply the first one that matches
-    # the user's checkout via a dry-run.
-    KLIPPERSCREEN_PATCH_CANDIDATES=(
-        "$SCRIPT_DIR/patches/ace_global_subscription.patch"
-        "$SCRIPT_DIR/patches/ace_global_subscription_transitional.patch"
-        "$SCRIPT_DIR/patches/ace_global_subscription_legacy.patch"
-    )
-    KLIPPERSCREEN_SCREEN_PY="$KLIPPERSCREEN_ROOT_DIR/screen.py"
-
-    if [ -d "$KLIPPERSCREEN_ROOT_DIR" ]; then
+    if [ -n "$BACKUP_RUN_DIR" ]; then
         echo ""
-        if [ -f "$KLIPPERSCREEN_SCREEN_PY" ] && grep -q "_ace_subscription_objects" "$KLIPPERSCREEN_SCREEN_PY"; then
-            print_success "ACE KlipperScreen patch already applied (found _ace_subscription_objects in screen.py)"
-        else
-            print_info "ACE patch available for KlipperScreen core subscription."
-            if prompt_yes_no "Apply ACE KlipperScreen patch now?"; then
-                KLIPPERSCREEN_MATCHED_PATCH=""
-                for candidate in "${KLIPPERSCREEN_PATCH_CANDIDATES[@]}"; do
-                    [ -f "$candidate" ] || continue
-                    print_info "Checking applicability of $(basename "$candidate")..."
-                    if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward --fuzz=0 --dry-run < "$candidate" >/dev/null 2>&1; then
-                        KLIPPERSCREEN_MATCHED_PATCH="$candidate"
-                        break
-                    fi
-                done
-
-                if [ -n "$KLIPPERSCREEN_MATCHED_PATCH" ]; then
-                    print_info "Applying $(basename "$KLIPPERSCREEN_MATCHED_PATCH") to $KLIPPERSCREEN_ROOT_DIR"
-                    if patch -d "$KLIPPERSCREEN_ROOT_DIR" -p1 --forward --fuzz=0 < "$KLIPPERSCREEN_MATCHED_PATCH"; then
-                        print_success "KlipperScreen patch applied ($(basename "$KLIPPERSCREEN_MATCHED_PATCH"))"
-                    else
-                        print_warning "Patch failed during apply (unexpected). Please review output."
-                    fi
-                else
-                    print_warning "No patch variant applied cleanly against this KlipperScreen checkout. Skipping."
-                    print_info "Your KlipperScreen version may be newer/older than any known variant; see patches/ to apply manually."
-                fi
-            else
-                print_info "Skipped KlipperScreen patch (you can apply one from $SCRIPT_DIR/patches/ manually later)"
-            fi
+        print_info "Replaced files were backed up to:"
+        echo "  $BACKUP_RUN_DIR"
+        if [ -f "$BACKUP_RUN_DIR/printer.cfg" ]; then
+            echo ""
+            print_warning "Your previous printer.cfg is in that backup folder."
+            echo "  Manually review and merge any custom changes (macros, hardware"
+            echo "  settings, personal customizations) into the new printer.cfg."
         fi
     fi
 
-    # Ensure KlipperScreen.conf has font_size = small and ACE Pro menu entry
-    if [ -d "$KLIPPERSCREEN_ROOT_DIR" ]; then
-        KLIPPERSCREEN_CONF="$CONFIG_DIR/KlipperScreen.conf"
-        echo ""
-        print_info "Checking KlipperScreen.conf for font_size setting..."
-        ensure_klipperscreen_font_size "$KLIPPERSCREEN_CONF"
-        print_info "Checking KlipperScreen.conf for ACE Pro menu entries (main + print menus)..."
-        ensure_klipperscreen_acepro_menu "$KLIPPERSCREEN_CONF"
-    fi
-    
-    # ========================================================================
-    # Step 7: Service restart
-    # ========================================================================
-
-    print_header "Step 7: Service Restart"
-    
-    echo "Moonraker (if ACE status was linked), Klipper and KlipperScreen need to be restarted for changes to take effect."
-    echo ""
-
-    if [ "$MOONRAKER_RESTART_NEEDED" -eq 1 ]; then
-        if prompt_yes_no "Restart Moonraker service now?"; then
-            print_info "Restarting Moonraker..."
-            sudo systemctl restart moonraker
-            if [ $? -eq 0 ]; then
-                print_success "Moonraker restarted"
-            else
-                print_error "Failed to restart Moonraker"
-            fi
-        else
-            print_warning "Moonraker not restarted. You can restart manually:"
-            echo "  sudo systemctl restart moonraker"
-        fi
-        echo ""
-    fi
-
-    if prompt_yes_no "Restart Klipper service now?"; then
-        print_info "Restarting Klipper..."
-        sudo systemctl restart klipper
-        if [ $? -eq 0 ]; then
-            print_success "Klipper restarted"
-        else
-            print_error "Failed to restart Klipper"
-        fi
-    else
-        print_warning "Klipper not restarted. You can restart manually:"
-        echo "  sudo systemctl restart klipper"
-    fi
-    
-    if [ -d "$KLIPPERSCREEN_PANELS_DIR" ]; then
-        echo ""
-        if prompt_yes_no "Restart KlipperScreen service now?"; then
-            print_info "Restarting KlipperScreen..."
-            sudo systemctl restart KlipperScreen 2>/dev/null || \
-            sudo supervisorctl restart klipperscreen 2>/dev/null || \
-            print_warning "Could not restart KlipperScreen. You can restart manually or via supervisor"
-            if [ $? -eq 0 ]; then
-                print_success "KlipperScreen restarted"
-            fi
-        else
-            print_warning "KlipperScreen not restarted. You can restart manually:"
-            echo "  sudo systemctl restart KlipperScreen"
-            echo "  or: sudo supervisorctl restart klipperscreen"
-        fi
-    fi
-    
-    # ========================================================================
-    # Installation complete
-    # ========================================================================
-    
-    print_header "Installation Complete!"
-    
-    cat << EOF
-ACE Pro driver installation finished!
-
-Configuration Files:
-  New printer.cfg:       $PRINTER_CONFIG_TARGET
-EOF
-    
-    # Show backup file if one was created
-    if [ -n "$PRINTER_CONFIG_BACKUP" ] && [ -f "$PRINTER_CONFIG_BACKUP" ]; then
-        cat << EOF
-  Backed up printer.cfg: $PRINTER_CONFIG_BACKUP
-EOF
-    fi
-
-    if [ -f "$PRINTER_GENERIC_MACROS_TARGET" ]; then
-        cat << EOF
-  New printer_generic_macros.cfg: $PRINTER_GENERIC_MACROS_TARGET
-EOF
-    fi
-
-    if [ -n "$PRINTER_GENERIC_MACROS_BACKUP" ] && [ -f "$PRINTER_GENERIC_MACROS_BACKUP" ]; then
-        cat << EOF
-  Backed up printer_generic_macros.cfg: $PRINTER_GENERIC_MACROS_BACKUP
-EOF
-    fi
-
-    if [ -f "$ACE_CONFIG_TARGET" ]; then
-        cat << EOF
-  New ace_${PRINTER_MODEL}.cfg: $ACE_CONFIG_TARGET
-EOF
-    fi
-
-    if [ -n "$ACE_CONFIG_BACKUP" ] && [ -f "$ACE_CONFIG_BACKUP" ]; then
-        cat << EOF
-  Backed up ace_${PRINTER_MODEL}.cfg: $ACE_CONFIG_BACKUP
-EOF
-    fi
-
-    if [ -f "$MACROS_TARGET" ]; then
-        cat << EOF
-  New ace_macros_generic.cfg: $MACROS_TARGET
-EOF
-    fi
-
-    if [ -n "$ACE_MACROS_BACKUP" ] && [ -f "$ACE_MACROS_BACKUP" ]; then
-        cat << EOF
-  Backed up ace_macros_generic.cfg: $ACE_MACROS_BACKUP
-EOF
-    fi
-    
     cat << EOF
 
 Next steps:
-  1. Review and customize ACE configuration:
-      $CONFIG_DIR/ace_${PRINTER_MODEL}.cfg
-      - Set ace_count to number of ACE units
-      - Adjust feed/retract speeds
-      - Configure sensor pins if needed
-      - Re-run installer after updates to pick up template changes
-
-  2. Review and merge printer configuration:
-     New config:          $PRINTER_CONFIG_TARGET
 EOF
-    
-    # Show backup for reference if it exists
-    if [ -n "$PRINTER_CONFIG_BACKUP" ] && [ -f "$PRINTER_CONFIG_BACKUP" ]; then
+    if [ "$SEL_ACECFG" -eq 1 ] && [ -n "$PRINTER_MODEL" ]; then
         cat << EOF
-     Original backup:     $PRINTER_CONFIG_BACKUP
-     
-     Manually review and merge any custom changes from the backup file
-     into the new printer.cfg file, especially:
-     - Custom macros
-     - Non-standard hardware settings
-     - Personal customizations
+  - Review and customize the ACE configuration:
+      $CONFIG_DIR/ace_${PRINTER_MODEL}.cfg
+      (ace_count, feed/retract speeds, sensor pins)
 EOF
     fi
-    
+    if [ "$SEL_GENERIC" -eq 1 ]; then
+        cat << EOF
+  - Review printer_generic_macros.cfg / ace_macros_generic.cfg if you plan
+    to customize pause/resume, purge helpers or ACE hooks.
+EOF
+    fi
+    if [ "$SEL_SPOOLMAN" -eq 1 ]; then
+        cat << EOF
+  - Spoolman: make sure Spoolman is configured in moonraker.conf and add
+    '[include spoolman_logic.cfg]' to printer.cfg BEFORE the ACE include.
+    See README.md, Spoolman Integration.
+EOF
+    fi
     cat << EOF
-
-  3. Review printer_generic_macros.cfg if you plan to customize pause/resume, velocity stack, or purge helpers:
-      $CONFIG_DIR/printer_generic_macros.cfg
-
-  4. Review ace_macros_generic.cfg if you plan to tweak ACE hooks or safety wrappers:
-      $CONFIG_DIR/ace_macros_generic.cfg
-
-  5. Restart Klipper if not already restarted:
-     sudo systemctl restart klipper
-
-  6. Test basic commands in Klipper console:
-     e.g. ACE_GET_STATUS
-
-  7. Optional but recommened: Set inventory for each tool:
-     ACE_SET_SLOT INSTANCE=0 INDEX=0 COLOR=255,0,0 MATERIAL=PLA TEMP=210
-
-  8. If using Orca Slicer:
-     Install the orca_flush_to_purgelength.py post-processing script on your host PC
-     See README.md section on Orca Slicer integration for detailed instructions
+  - Test basic commands in the Klipper console, e.g. ACE_GET_STATUS
+  - Optional but recommended - set inventory for each tool:
+      ACE_SET_SLOT INSTANCE=0 INDEX=0 COLOR=255,0,0 MATERIAL=PLA TEMP=210
+  - If using Orca Slicer: install orca_flush_to_purgelength.py on your host
+    PC (see README.md, Orca Slicer integration).
 
 EOF
 }
@@ -944,6 +514,39 @@ EOF
 # ============================================================================
 # Entry Point
 # ============================================================================
+
+main() {
+    parse_args "$@"
+    detect_paths
+    discover_printers
+
+    if [ -n "$PRINTER_MODEL" ]; then
+        # Validate a model given via --printer
+        local found=0 m
+        for m in "${PRINTER_MODELS[@]}"; do
+            [ "$m" = "$PRINTER_MODEL" ] && found=1
+        done
+        if [ "$found" -eq 0 ]; then
+            print_error "Unknown printer model: $PRINTER_MODEL (available: ${PRINTER_MODELS[*]})"
+            exit 1
+        fi
+        set_printer "$PRINTER_MODEL"
+    fi
+
+    if [ "$INTERACTIVE" -eq 0 ]; then
+        run_install
+        [ "${#RUN_FAILED[@]}" -gt 0 ] && exit 1
+        exit 0
+    fi
+
+    if [ ! -t 0 ]; then
+        print_error "No terminal available. Use --printer/--components/--all for non-interactive mode."
+        usage
+        exit 1
+    fi
+
+    main_menu
+}
 
 if [ "${BASH_SOURCE[0]}" == "${0}" ]; then
     main "$@"

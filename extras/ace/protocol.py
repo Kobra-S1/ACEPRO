@@ -342,6 +342,17 @@ class AceProtocolAdapter:
         """
         return False
 
+    def default_disconnect_pause_timeout(self) -> float:
+        """Seconds of continuous mid-print disconnection before pausing the print.
+
+        Used by the manager's fast disconnect pause when the config value
+        disconnect_pause_timeout is negative (= auto).  ACE1 gears let the
+        extruder keep pulling filament through a dead/resetting unit (added
+        friction, but printable) and ACE1 units routinely recover from brief
+        connection blips, so the default is lenient.
+        """
+        return 30.0
+
     def build_feed_filament_request(
         self,
         slot: int,

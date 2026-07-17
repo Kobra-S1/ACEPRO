@@ -256,7 +256,10 @@ class AceManager:
             self,  # Pass manager for sensor access and state
             runout_debounce_count=self.ace_config.get("runout_debounce_count", 1),
             tangle_detection=self.ace_config.get("tangle_detection", False),
-            tangle_pump_time=self.ace_config.get("tangle_pump_time", 4.0),
+            tangle_pump_time=self.ace_config.get("tangle_pump_time", 5.0),
+            tangle_verify_time=self.ace_config.get("tangle_verify_time", 7.0),
+            tangle_pump_time_hard=self.ace_config.get(
+                "tangle_pump_time_hard", 8.0),
         )
 
         self.toolchange_in_progress = False
@@ -275,6 +278,8 @@ class AceManager:
         )
         self._connection_issue_shown = False  # Track if dialog is currently shown
         self._last_connection_status = {}     # Track per-instance connection state
+        # Instance num of the outage already paused for (one pause per outage)
+        self._fast_disconnect_pause_fired = None
         self._shared_bus_last_connected_time = {}
         self._shared_bus_retry_timers = {}
         # Flat retry cadence - not exponential. Missing ACE2 units on the
@@ -1034,7 +1039,8 @@ class AceManager:
             toolhead.wait_moves()
 
     @toolchange_in_progress_guard
-    def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False):
+    def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
+                     cycle_on_blocked=False):
         """
         Unload with slot cycling when tool is unknown.
 
@@ -1044,6 +1050,11 @@ class AceManager:
         - Need to identify which tool is loaded
 
         ALL OTHER CASES: Direct unload or fail with error.
+
+        cycle_on_blocked: when True (operator-level ACE_SMART_UNLOAD without
+        an explicit TOOL=), a known-tool unload that leaves the path blocked
+        escalates to cycling all slots to find the blocker. Default False so
+        normal print toolchange unloads never start cycling through spools.
         """
         current_tool_index = self.state.get("ace_current_index", -1)
 
@@ -1127,6 +1138,21 @@ class AceManager:
                         self._turn_off_heater_if_idle()
                     return True
                 else:
+                    # The known tool's slot has been retracted (it may even
+                    # report empty now) but the path is still blocked - the
+                    # blocker is another slot's filament (e.g. left behind by
+                    # an earlier failed toolchange). Only the operator-level
+                    # no-TOOL invocation may escalate to cycling all slots -
+                    # print toolchange unloads must fail fast instead of
+                    # retracting innocent spools until their slots run empty.
+                    if cycle_on_blocked:
+                        self.gcode.respond_info(
+                            f"ACE: Path still blocked after unload of T{tool_index} - "
+                            f"falling back to cycling all slots to find the blocker"
+                        )
+                        return self._cycling_unload_fallback(
+                            current_tool_index, tool_index, retract_length, retract_speed
+                        )
                     raise Exception(f"Path still blocked after unload of T{tool_index}")
 
             # Sensor triggered - coordinated retraction
@@ -1180,6 +1206,19 @@ class AceManager:
                         self._turn_off_heater_if_idle()
                     return True
                 else:
+                    # Same escalation as the toolhead-clear branch above: the
+                    # coordinated retract of the known tool did not free the
+                    # path, so another slot's filament is the blocker. Only
+                    # for the operator-level no-TOOL invocation.
+                    if cycle_on_blocked:
+                        self.gcode.respond_info(
+                            f"ACE: Path still blocked after coordinated retract of "
+                            f"T{tool_index} - falling back to cycling all slots"
+                        )
+                        if self._cycling_unload_fallback(
+                            current_tool_index, tool_index, retract_length, retract_speed
+                        ):
+                            return True
                     raise Exception(f"Unload failed for T{tool_index}")
 
             except Exception as e:
@@ -1201,32 +1240,8 @@ class AceManager:
             self.gcode.respond_info(
                 f"ACE: Current tool unknown but {sensor_desc} sensor triggered - cycling slots to identify loaded tool"
             )
-
-            # Distances for completing unload after identification
-            park_to_toolhead_len = self._get_config_for_tool(
-                0, "parkposition_to_toolhead_length"
-            )
-            park_to_rdm_len = (
-                self._get_config_for_tool(0, "parkposition_to_rdm_length")
-                if self.has_rdm_sensor() else park_to_toolhead_len
-            )
-
-            retract_speed_mmmin = retract_speed * 60
-
-            # Use unified cycling that also handles RDM-only trigger
-            full_unload_length = (
-                park_to_rdm_len
-                if (rdm_triggered and not toolhead_triggered and self.has_rdm_sensor())
-                else park_to_toolhead_len
-            )
-
-            return self._identify_and_unload_by_cycling(
-                current_tool_index,
-                tool_index,
-                retract_length,
-                retract_speed,
-                retract_speed_mmmin,
-                full_unload_length
+            return self._cycling_unload_fallback(
+                current_tool_index, tool_index, retract_length, retract_speed
             )
         else:
             self.gcode.respond_info(
@@ -1257,6 +1272,43 @@ class AceManager:
             f"rdm_triggered={rdm_triggered}"
         )
         raise Exception("Unexpected state in smart_unload")
+
+    def _cycling_unload_fallback(self, current_tool_index, attempted_tool_index,
+                                 retract_length, retract_speed):
+        """Identify and unload the path-blocking slot by cycling all slots.
+
+        Used both when the current tool is unknown and as escalation when a
+        known tool's direct unload left the path blocked (the blocker is then
+        another slot's filament). Reads the sensors live to pick the unload
+        distance, then delegates to _identify_and_unload_by_cycling().
+        """
+        toolhead_triggered = self.get_switch_state(SENSOR_TOOLHEAD)
+        rdm_triggered = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
+
+        # Distances for completing unload after identification
+        park_to_toolhead_len = self._get_config_for_tool(
+            0, "parkposition_to_toolhead_length"
+        )
+        park_to_rdm_len = (
+            self._get_config_for_tool(0, "parkposition_to_rdm_length")
+            if self.has_rdm_sensor() else park_to_toolhead_len
+        )
+
+        # Use unified cycling that also handles RDM-only trigger
+        full_unload_length = (
+            park_to_rdm_len
+            if (rdm_triggered and not toolhead_triggered and self.has_rdm_sensor())
+            else park_to_toolhead_len
+        )
+
+        return self._identify_and_unload_by_cycling(
+            current_tool_index,
+            attempted_tool_index,
+            retract_length,
+            retract_speed,
+            retract_speed * 60,
+            full_unload_length
+        )
 
     def _identify_and_unload_by_cycling(
         self,
@@ -1457,13 +1509,18 @@ class AceManager:
                     # is polled DURING retraction (not after) — same approach
                     # as rmd_triggered_unload_slot from PR #11.
 
-                    # Disable feed assist BEFORE retraction — it pushes forward
-                    # which fights the retraction.
-                    if instance._feed_assist_index == slot:
+                    # Disable feed assist BEFORE retraction — on the cycled
+                    # slot it pushes forward and fights the retraction, and on
+                    # ANY slot it keeps ACE2 'busy' so the retract would stall
+                    # in wait_ready() (log-verified: 60s timeout per slot).
+                    # _retract() guards this itself too; kept here for the
+                    # explicit log line before the cycling test starts.
+                    if instance._feed_assist_index >= 0:
+                        active_fa = instance._feed_assist_index
                         self.gcode.respond_info(
-                            f"ACE[{instance_num}]: Disabling feed assist on slot {slot} before retraction"
+                            f"ACE[{instance_num}]: Disabling feed assist on slot {active_fa} before retraction"
                         )
-                        instance._disable_feed_assist(slot)
+                        instance._disable_feed_assist(active_fa)
 
                     overshoot_length = instance.rdm_overshoot_length
 
@@ -1812,6 +1869,168 @@ class AceManager:
         """Enable/disable runout detection (delegates to monitor)."""
         return self.runout_monitor.set_detection_active(active)
 
+    def disable_feed_assist_for_tool(self, tool_index, reason):
+        """Disable a tool's feed assist if the driver tracks it on its slot.
+
+        Used where assist must not survive but no unload (with its own
+        disable-before-motion step) runs:
+        - Endless-spool skip-unload (slot already empty): without this the
+          outgoing tool's assist stays enabled (driver index AND device)
+          while the new tool's instance feeds.  The ACE keeps
+          starved-cycling the empty slot, and the stale index makes tangle
+          detection watch the WRONG instance (a tangle on the freshly
+          loaded tool then goes undetected).
+        - Toolhead runout: the tail is past the toolhead, assist has
+          nothing to push - and on ACE2 a surviving assist keeps the
+          device busy-by-design, deadlocking the wait_ready of any
+          subsequent reload (RESUME's tool re-activation times out against
+          the starved-cycling empty slot).  Clearing the index also stops
+          the reconcile layer from restoring assist onto the empty slot
+          when a cut remnant flaps the slot sensor back to ready.
+
+        Failures are reported, never raised - callers must proceed.
+        """
+        try:
+            out_ace, out_slot = get_ace_instance_and_slot_for_tool(
+                tool_index
+            )
+            if (out_ace is not None
+                    and out_ace._feed_assist_index == out_slot):
+                self.gcode.respond_info(
+                    f"ACE: Disabling feed assist on T{tool_index} - {reason}"
+                )
+                out_ace._disable_feed_assist(out_slot)
+        except Exception as e:
+            self.gcode.respond_info(
+                f"ACE: Warning - could not disable feed "
+                f"assist for T{tool_index}: {e}"
+            )
+
+    def ensure_tool_slot_loaded(self, tool_index):
+        """Raise if the target tool's ACE slot reports empty.
+
+        Guard for every load path: ACE2 firmware ACKs a FEED on an empty
+        slot (result_code=0) and spins the feed motor until the toolhead
+        sensor timeout minutes later; ACE1 fails fast.
+        Checks the live device-reported slot state first, then the
+        inventory status.  No-op for unload (-1) or unresolvable tools —
+        those paths have their own handling.
+        """
+        if tool_index is None or tool_index < 0:
+            return
+        try:
+            instance, slot = get_ace_instance_and_slot_for_tool(tool_index)
+        except Exception:
+            return
+        if instance is None or slot is None or slot < 0:
+            return
+
+        # Strict-bool contract: _is_slot_empty returns True/False; anything
+        # else (error, unavailable) counts as "unknown" and does not block
+        # on its own - the inventory check below still applies.
+        live_empty = False
+        try:
+            live_empty = instance._is_slot_empty(slot) is True
+        except Exception:
+            pass
+        inv_empty = False
+        try:
+            inv_empty = (
+                instance.inventory[slot].get("status", "empty") == "empty"
+            )
+        except Exception:
+            pass
+
+        if live_empty or inv_empty:
+            source = "device" if live_empty else "inventory"
+            raise ValueError(
+                f"ACE[{instance.instance_num}] slot {slot} (T{tool_index}) is "
+                f"EMPTY ({source}-reported) - insert a spool and retry. "
+                f"Aborted before any filament movement - the previously "
+                f"loaded tool (if any) is untouched."
+            )
+
+    def verify_feed_assist_for_tool(self, tool_index):
+        """Ensure feed assist is active on the loaded tool's slot.
+
+        Resume safety net: an ACE power cycle, klippy restart, or a
+        busy-skipped reconnect restore can leave a resumed print without
+        feed assist — the print then extrudes nothing once path friction
+        exceeds what the extruder can pull (immediately on ACE2, which
+        clamps the filament when not feeding).  Called on the
+        paused→printing transition; no-op when assist is already active
+        on the right slot.  Blocks (wait_ready) — run from a reactor
+        callback greenlet, not from a timer callback.
+        """
+        try:
+            instance, slot = get_ace_instance_and_slot_for_tool(tool_index)
+        except Exception:
+            return False
+        if instance is None or slot is None or slot < 0:
+            return False
+        if not instance.serial_mgr.is_connected():
+            self.gcode.respond_info(
+                f"ACE: Resume feed assist check skipped for T{tool_index} - "
+                f"ACE[{instance.instance_num}] not connected"
+            )
+            return False
+
+        # Guard: only a tool that is plausibly LOADED may get assist
+        # re-enabled.  ace_current_index can point at a tool whose load
+        # FAILED (failure handlers preserve it for the Retry prompt) —
+        # re-arming assist then pushes a parked filament into the path
+        # (resume after a failed swap would arm assist on a never-loaded
+        # candidate; with the old tool's assist also restored, two ACEs
+        # push filament into one toolhead).  "Loaded" means filament_pos at
+        # toolhead/nozzle, or the toolhead sensor seeing filament (covers a
+        # stale pos).  An unconfirmed in-flight toolchange
+        # (ace_target_index != -1) is retried by the RESUME macro, which
+        # arms assist itself.  Fail-open: unreadable state keeps the safety
+        # net's protective re-enable.
+        try:
+            if self.toolchange_in_progress is True:
+                return False
+            if int(self.state.get("ace_target_index", -1)) != -1:
+                self.gcode.respond_info(
+                    f"ACE: Resume feed assist check skipped for T{tool_index} "
+                    f"- unconfirmed toolchange pending (its retry owns assist)"
+                )
+                return False
+            pos = self.state.get("ace_filament_pos", None)
+            pos_loaded = pos in (
+                FILAMENT_STATE_TOOLHEAD, FILAMENT_STATE_NOZZLE
+            )
+            sensor_loaded = False
+            try:
+                sensor_loaded = self.get_switch_state(SENSOR_TOOLHEAD) is True
+            except Exception:
+                pass
+            if pos is not None and not pos_loaded and not sensor_loaded:
+                self.gcode.respond_info(
+                    f"ACE: NOT re-enabling feed assist for T{tool_index} - "
+                    f"tool is not loaded (filament_pos='{pos}', toolhead "
+                    f"sensor clear). Assist on an unloaded tool would push "
+                    f"parked filament into the path."
+                )
+                return False
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        if instance._get_current_feed_assist_index() == slot:
+            return True
+        self.gcode.respond_info(
+            f"ACE: Feed assist not active on resumed tool T{tool_index} - "
+            f"re-enabling (ACE[{instance.instance_num}] slot {slot})"
+        )
+        try:
+            instance._enable_feed_assist(slot)
+            return True
+        except Exception as e:
+            self.gcode.respond_info(
+                f"ACE: Failed to re-enable feed assist on T{tool_index}: {e}"
+            )
+            return False
+
     def set_ace_global_enabled(self, enabled):
         """Set global ACE Pro enabled state and persist it."""
         self.state.set_and_save("ace_global_enabled", enabled)
@@ -1941,7 +2160,18 @@ class AceManager:
         If any instance has an unstable connection:
         - During printing: Pause print and show dialog with resume/cancel
         - When idle: Show informational dialog
+
+        Additionally runs the fast disconnect pause: when the instance
+        feeding the ACTIVE tool is continuously disconnected mid-print
+        for longer than its disconnect_pause_timeout, pause immediately
+        instead of waiting for the reconnect-count instability threshold
+        (~60-90 s).  Timeout default is protocol-aware: ACE2 clamps the
+        filament when not feeding (starves the extruder in seconds),
+        ACE1 lets the extruder drag filament through and usually
+        recovers from brief connection blips.
         """
+        self._check_fast_disconnect_pause(eventtime)
+
         unstable_instances = []
 
         for instance in self.instances:
@@ -1986,6 +2216,93 @@ class AceManager:
         # If we have unstable instances and haven't shown dialog yet
         if unstable_instances and not self._connection_issue_shown:
             self._handle_connection_issue(unstable_instances, eventtime)
+
+    def _resolve_disconnect_pause_timeout(self, instance):
+        """Effective fast-pause timeout for one instance (seconds).
+
+        Config disconnect_pause_timeout wins when >= 0 (per-instance
+        overridable, 0 disables the fast path); negative = auto, i.e.
+        the protocol default (ACE1 30 s, ACE2 5 s).
+        """
+        timeout = getattr(instance, "disconnect_pause_timeout", -1.0)
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            timeout = -1.0
+        if timeout >= 0:
+            return timeout
+        try:
+            return float(instance.protocol.default_disconnect_pause_timeout())
+        except Exception:
+            return 30.0
+
+    def _check_fast_disconnect_pause(self, eventtime):
+        """Pause quickly when the ACE feeding the active tool dies mid-print.
+
+        Scoped to the instance owning ace_current_index — an idle unit
+        flapping on the bus never triggers this.  Fires at most once per
+        continuous outage; a successful reconnect re-arms it.  Reuses the
+        existing connection-issue pause/dialog machinery.
+        """
+        current_tool = self.state.get("ace_current_index", -1)
+        if current_tool is None or current_tool < 0:
+            return
+
+        try:
+            instance, _slot = get_ace_instance_and_slot_for_tool(current_tool)
+        except Exception:
+            return
+        if instance is None:
+            return
+
+        try:
+            status = instance.serial_mgr.get_connection_status()
+        except Exception:
+            return
+
+        if status.get("connected"):
+            # Outage over - re-arm for the next one
+            if self._fast_disconnect_pause_fired == instance.instance_num:
+                self._fast_disconnect_pause_fired = None
+            return
+
+        if self._fast_disconnect_pause_fired == instance.instance_num:
+            return  # already paused for this outage
+
+        timeout = self._resolve_disconnect_pause_timeout(instance)
+        if timeout <= 0:
+            return  # fast path disabled via config
+
+        disconnected_for = status.get("disconnected_for", 0.0) or 0.0
+        if disconnected_for < timeout:
+            return
+
+        # Only act while actually printing (not paused/standby)
+        print_stats = self.printer.lookup_object("print_stats", None)
+        if not print_stats:
+            return
+        try:
+            state = (print_stats.get_status(eventtime).get("state") or "").lower()
+        except Exception:
+            return
+        if state != "printing":
+            return
+
+        self._fast_disconnect_pause_fired = instance.instance_num
+        self.gcode.respond_info(
+            f"ACE: ACE[{instance.instance_num}] feeding active tool "
+            f"T{current_tool} disconnected for {disconnected_for:.0f}s "
+            f"(limit {timeout:.0f}s, protocol {instance.protocol_name}) - "
+            f"pausing print before the extruder starves"
+        )
+        issue_info = [{
+            "instance": instance.instance_num,
+            "connected": False,
+            "recent_reconnects": status.get("recent_reconnects", 0),
+            "time_connected": status.get("time_connected", 0.0),
+        }]
+        self._pause_for_connection_issue(issue_info)
+        self._connection_issue_shown = True
 
     def _handle_connection_issue(self, unstable_instances, eventtime):
         """
@@ -2122,6 +2439,12 @@ class AceManager:
         # below leaves a durable record of what was being attempted -- callers
         # no longer have to re-derive that from ace_filament_pos + sensors.
         self.state.set("ace_target_index", target_tool)
+
+        # Empty-slot guard (defense in depth - the command layer checks
+        # before homing already; this covers endless spool and direct
+        # callers). Raising here routes into the callers' existing
+        # failure handling: pause+prompt mid-print, abort at startup.
+        self.ensure_tool_slot_loaded(target_tool)
 
         toolhead_sensor = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_sensor = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
@@ -2355,6 +2678,10 @@ class AceManager:
         elif is_endless_spool:
             self.gcode.respond_info(
                 f"ACE: Endless spool mode - skipping unload of tool {current_tool} (already empty)"
+            )
+            self.disable_feed_assist_for_tool(
+                current_tool,
+                "outgoing empty tool before loading the next spool",
             )
             self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
 

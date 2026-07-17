@@ -146,6 +146,8 @@ class AceSerialManager:
 
         self._reconnect_timestamps = []      # List of monotonic times of reconnect attempts
         self._last_connected_time = 0.0      # Monotonic time of last successful connect
+        # Monotonic time the current outage began (first disconnect; None while connected)
+        self._disconnected_since = None
         self._counter_reset_time = 0.0       # Time when counter was last reset
         self.RECONNECT_BACKOFF_MIN = 5.0     # Minimum backoff delay (location not yet known)
         self.RECONNECT_BACKOFF_MAX = 30.0    # Maximum backoff delay (30 seconds)
@@ -725,6 +727,7 @@ class AceSerialManager:
 
                 # Record connection time for stability grace period tracking
                 self._last_connected_time = self.reactor.monotonic()
+                self._disconnected_since = None
 
                 # Clear supervision counters on successful connection
                 self._comm_timeout_timestamps = []
@@ -770,6 +773,15 @@ class AceSerialManager:
         with _CONNECTED_PORTS_LOCK:
             if self._port is not None and _CONNECTED_PORTS.get(self._port) == self.instance_num:
                 del _CONNECTED_PORTS[self._port]
+
+        # Keep the FIRST disconnect time of the current outage so
+        # disconnected_for measures the continuous outage duration even
+        # when the reconnect loop calls disconnect() repeatedly.
+        if self._connected and self._disconnected_since is None:
+            try:
+                self._disconnected_since = self.reactor.monotonic()
+            except Exception:
+                pass
 
         self._connected = False
         self.read_buffer = bytearray()
@@ -972,6 +984,12 @@ class AceSerialManager:
         if self._last_connected_time > 0:
             time_connected = now - self._last_connected_time
 
+        # Continuous outage duration (0.0 while connected or before the
+        # first-ever successful connect)
+        disconnected_for = 0.0
+        if not self.is_connected() and self._disconnected_since is not None:
+            disconnected_for = max(0.0, now - self._disconnected_since)
+
         # Get supervision health statistics
         now = self.reactor.monotonic()
         cutoff = now - self.COMM_SUPERVISION_WINDOW
@@ -987,6 +1005,7 @@ class AceSerialManager:
             "stable": self.is_connection_stable(),
             "recent_reconnects": recent_count,
             "time_connected": time_connected,
+            "disconnected_for": disconnected_for,
             "last_connected_time": self._last_connected_time,
             "next_retry": self._reconnect_backoff if not self.is_connected() else 0.0,
             "port": self._port or "unknown",

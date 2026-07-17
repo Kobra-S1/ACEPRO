@@ -240,7 +240,16 @@ class TestToolChangeIntegration(unittest.TestCase):
             
             # Create manager
             manager = AceManager(self.mock_config)
-            
+
+            # Manager init reloads persisted inventory (empty in these tests)
+            # over the fixture's ready inventory - restore ready slots so the
+            # empty-slot load guard doesn't block these toolchange scenarios.
+            for instance in manager.instances:
+                instance.inventory = [
+                    {'status': 'ready', 'temp': 210, 'material': 'PLA'}
+                    for _ in range(4)
+                ]
+
             # Patch check_and_wait_for_spool_ready to always return True
             # (we're testing tool change logic, not spool readiness logic)
             manager.check_and_wait_for_spool_ready = Mock(return_value=True)

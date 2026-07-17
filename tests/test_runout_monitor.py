@@ -2030,5 +2030,95 @@ class TestRunoutDebounce:
         assert mon._runout_false_count == 0
 
 
+class TestResumeWithoutFilamentNet:
+    """Safety net: a resume with no filament at the toolhead pauses once.
+
+    A failed tool reload inside the RESUME macro
+    was swallowed and BASE_RESUME printed into air; runout detection
+    cannot catch it (baseline already absent, no present→absent edge).
+    """
+
+    def setup_method(self):
+        self.printer = Mock()
+        self.gcode = Mock()
+        self.reactor = Mock()
+        self.manager = Mock()
+        self.manager.toolchange_in_progress = False
+        self.monitor = RunoutMonitor(
+            self.printer, self.gcode, self.reactor, Mock(), self.manager
+        )
+
+    def _pause_calls(self):
+        return [
+            c for c in self.gcode.run_script_from_command.call_args_list
+            if c == (("PAUSE",),) or "PAUSE" == str(c.args[0])
+        ]
+
+    def test_dry_resume_pauses_and_prompts_once(self):
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        assert self._pause_calls(), "expected PAUSE on dry resume"
+        prompts = [
+            c for c in self.gcode.run_script_from_command.call_args_list
+            if "Resumed Without Filament" in str(c)
+        ]
+        assert prompts
+        assert self.monitor._resume_no_filament_warned is True
+
+    def test_second_dry_resume_proceeds_unhindered(self):
+        # After the one warning, "Resume anyway" must actually resume
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        self.gcode.run_script_from_command.reset_mock()
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        assert not self._pause_calls()
+
+    def test_sensor_present_resets_latch_and_never_pauses(self):
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        self.monitor._check_resume_without_filament(5, sensor_present=True)
+        assert self.monitor._resume_no_filament_warned is False
+        self.gcode.run_script_from_command.reset_mock()
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        assert self._pause_calls()  # re-armed after a good load
+
+    def test_skipped_while_toolchange_in_progress(self):
+        self.manager.toolchange_in_progress = True  # literal True required
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        assert not self._pause_calls()
+        assert self.monitor._resume_no_filament_warned is False
+
+
+class TestRunoutDisablesAssist:
+    """Toolhead runout must disable the runout tool's feed assist.
+
+    The tail is past the toolhead - assist has nothing to push, and on
+    ACE2 a surviving assist keeps the device busy-by-design, deadlocking
+    any subsequent reload's wait_ready (60 s
+    timeout, swallowed, print resumed into air).
+    """
+
+    def setup_method(self):
+        self.printer = Mock()
+        self.gcode = Mock()
+        self.manager = Mock()
+        self.manager.toolchange_in_progress = False
+        self.manager.state.get = Mock(return_value=False)  # ES disabled
+        self.monitor = RunoutMonitor(
+            self.printer, self.gcode, Mock(), Mock(), self.manager
+        )
+
+    def test_handle_runout_disables_assist_for_tool(self):
+        self.monitor._handle_runout_detected(5)
+        self.manager.disable_feed_assist_for_tool.assert_called_once()
+        args = self.manager.disable_feed_assist_for_tool.call_args[0]
+        assert args[0] == 5
+
+    def test_disable_failure_does_not_break_runout_handling(self):
+        self.manager.disable_feed_assist_for_tool.side_effect = (
+            RuntimeError("io error")
+        )
+        self.monitor._handle_runout_detected(5)  # no raise
+        # Runout flow still completed (prompt shown, flag cleared)
+        assert self.monitor.runout_handling_in_progress is False
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

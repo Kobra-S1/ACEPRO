@@ -2101,14 +2101,32 @@ class TestPerformToolChange(unittest.TestCase):
         """Set up test fixtures with extensive mocking."""
         ACE_INSTANCES.clear()
         INSTANCE_MANAGERS.clear()
-        
+
+        # These tests exercise toolchange branches with loaded slots.
+        # Manager init would give every instance a fresh all-empty
+        # inventory (no persisted ace_inventory_* in the fixture vars),
+        # which the empty-slot load guard now rightly blocks - install
+        # ready inventories instead.
+        def _ready_inventories(mgr):
+            for inst in mgr.instances:
+                inst.inventory = [
+                    {"status": "ready", "temp": 0}
+                    for _ in range(SLOTS_PER_ACE)
+                ]
+
+        inv_patcher = patch.object(
+            AceManager, "_load_all_inventories", _ready_inventories
+        )
+        inv_patcher.start()
+        self.addCleanup(inv_patcher.stop)
+
         self.mock_config = Mock()
         self.mock_printer = Mock()
         self.mock_reactor = Mock()
         self.mock_gcode = Mock()
         self.mock_save_vars = Mock()
         self.mock_gcode_move = Mock()
-        
+
         self.mock_config.get_printer.return_value = self.mock_printer
         self.mock_printer.get_reactor.return_value = self.mock_reactor
         self.mock_printer.lookup_object.side_effect = self._mock_lookup_object
@@ -5754,8 +5772,8 @@ class TestExtruderMove(unittest.TestCase):
         self.mock_toolhead.move.assert_called_once_with([10, 20, 30, 43], 15)
         self.mock_toolhead.wait_moves.assert_called_once()
 
-class TestCycleSlotsWithSensorCheck(unittest.TestCase):
-    """Branch coverage for _cycle_slots_with_sensor_check."""
+class _ManagerCycleFixture(unittest.TestCase):
+    """Shared manager + mock-instance fixture for cycling/smart-unload tests."""
 
     def setUp(self):
         ACE_INSTANCES.clear()
@@ -5854,8 +5872,109 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         inst._retract = Mock()
         inst._stop_feed = Mock()
         inst._stop_retract = Mock()
+        inst._feed_assist_index = -1  # real instances always carry this attribute
         inst.rdm_overshoot_length = 50.0
         return inst
+
+
+class TestSmartUnloadCyclingFallback(_ManagerCycleFixture):
+    """smart_unload must escalate to slot cycling when the known tool's
+    direct unload leaves the filament path blocked.
+
+    Regression: ACE_SMART_UNLOAD without an argument resolved a (stale)
+    current tool, retracted only that slot
+    until it ran empty, then raised 'Path still blocked' and gave up
+    instead of cycling the remaining slots to find the real blocker.
+    """
+
+    def _prepare_manager(self):
+        instance = self._make_instance()
+        instance.rmd_triggered_unload_slot = Mock(return_value=True)
+        instance._smart_unload_slot = Mock(return_value=True)
+        manager = self._build_manager(lambda *a, **k: instance)
+        # Manager init reloads inventories from (empty) persisted state -
+        # restore the slot the tests unload from, like the cycling tests do.
+        manager.instances[0].inventory = [
+            {"status": "ready"},
+            {"status": "ready"},
+            {"status": "empty"},
+            {"status": "empty"},
+        ]
+        manager.state.set = Mock()
+        manager._get_config_for_tool = Mock(return_value=500.0)
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager._identify_and_unload_by_cycling = Mock(return_value=True)
+        manager._turn_off_heater_if_idle = Mock()
+        self.variables["ace_current_index"] = 0
+        return manager, instance
+
+    def test_rdm_blocked_after_known_tool_unload_falls_back_to_cycling(self):
+        manager, instance = self._prepare_manager()
+        # Toolhead clear; path (RDM) stays blocked even after the retract
+        manager.get_instant_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free_instant = Mock(return_value=False)
+        # Live sensor read inside the fallback: RDM triggered, toolhead clear
+        manager.get_switch_state = Mock(side_effect=lambda name: name == SENSOR_RDM)
+
+        result = manager.smart_unload(
+            tool_index=0, prepare_toolhead=False, cycle_on_blocked=True
+        )
+
+        self.assertTrue(result)
+        instance.rmd_triggered_unload_slot.assert_called_once()
+        manager._identify_and_unload_by_cycling.assert_called_once()
+        args = manager._identify_and_unload_by_cycling.call_args[0]
+        self.assertEqual(args[0], 0)  # current tool passed through
+        self.assertEqual(args[1], 0)  # attempted tool passed through
+
+    def test_fallback_failure_returns_false_instead_of_raising(self):
+        manager, instance = self._prepare_manager()
+        manager._identify_and_unload_by_cycling = Mock(return_value=False)
+        manager.get_instant_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free_instant = Mock(return_value=False)
+        manager.get_switch_state = Mock(side_effect=lambda name: name == SENSOR_RDM)
+
+        result = manager.smart_unload(
+            tool_index=0, prepare_toolhead=False, cycle_on_blocked=True
+        )
+
+        self.assertFalse(result)
+        manager._identify_and_unload_by_cycling.assert_called_once()
+
+    def test_toolhead_blocked_coordinated_retract_falls_back_to_cycling(self):
+        manager, instance = self._prepare_manager()
+        # Toolhead sensor triggered -> coordinated retraction branch
+        manager.get_instant_switch_state = Mock(return_value=True)
+        manager.is_filament_path_free_instant = Mock(return_value=False)
+        manager.get_switch_state = Mock(return_value=True)
+        manager._extruder_move = Mock()
+        manager._wait_toolhead_move_finished = Mock()
+        instance.protocol.feed_assist_causes_busy = Mock(return_value=True)
+
+        result = manager.smart_unload(
+            tool_index=0, prepare_toolhead=False, cycle_on_blocked=True
+        )
+
+        self.assertTrue(result)
+        manager._identify_and_unload_by_cycling.assert_called_once()
+
+    def test_no_cycling_without_opt_in_blocked_path_raises(self):
+        """Default (print toolchange / explicit TOOL=): a blocked path stays
+        a hard error - no cycling through innocent spools mid-print."""
+        manager, instance = self._prepare_manager()
+        manager.get_instant_switch_state = Mock(return_value=False)
+        manager.is_filament_path_free_instant = Mock(return_value=False)
+        manager.get_switch_state = Mock(side_effect=lambda name: name == SENSOR_RDM)
+
+        with self.assertRaises(Exception) as ctx:
+            manager.smart_unload(tool_index=0, prepare_toolhead=False)
+
+        self.assertIn("Path still blocked", str(ctx.exception))
+        manager._identify_and_unload_by_cycling.assert_not_called()
+
+
+class TestCycleSlotsWithSensorCheck(_ManagerCycleFixture):
+    """Branch coverage for _cycle_slots_with_sensor_check."""
 
     def test_use_extruder_identifies_and_unloads(self):
         instance = self._make_instance()

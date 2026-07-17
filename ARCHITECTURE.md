@@ -195,10 +195,38 @@ runout_monitor.stop_monitoring()            # Stop sensor polling
 set_runout_detection_active(active)         # Enable/disable detection
 
 # Connection Health Monitoring
-_check_connection_health(eventtime)         # Check all instances for stable connections
+_check_connection_health(eventtime)         # Check all instances for stable connections;
+                                            #   also runs the fast disconnect pause
+_check_fast_disconnect_pause(eventtime)     # Pause quickly when the ACTIVE tool's instance
+                                            #   is continuously disconnected mid-print past
+                                            #   disconnect_pause_timeout (protocol-aware:
+                                            #   ACE1 30s, ACE2 5s). Scoped to the active
+                                            #   tool; fires once per outage; re-arms on
+                                            #   reconnect. The instability-count path
+                                            #   (6 reconnects/180s) is unchanged and covers
+                                            #   flaky-cable alerting for all instances.
+_resolve_disconnect_pause_timeout(instance) # Config value if >= 0, else protocol default
 _handle_connection_issue(instances, time)   # Pause print (if printing) and show dialog
 _show_connection_issue_dialog(instances, is_printing)  # Mainsail dialog with details
 _close_connection_dialog()                  # Close dialog when connection restored
+
+# Resume Safety Net
+verify_feed_assist_for_tool(tool_index)     # Ensure feed assist is active on the loaded
+                                            #   tool's slot; re-enable if lost (called by
+                                            #   RunoutMonitor on paused → printing)
+
+# Load Guard
+ensure_tool_slot_loaded(tool_index)         # Raise before homing/heating/feeding when the
+                                            #   target slot reports empty (device state
+                                            #   first, inventory fallback). ACE2 firmware
+                                            #   ACKs feeds on empty slots and spins for
+                                            #   minutes until the sensor timeout; ACE1
+                                            #   fails fast. Checked at command entry
+                                            #   (before G28) and again in
+                                            #   perform_tool_change (endless spool,
+                                            #   direct callers). Failure routes into the
+                                            #   existing handling: pause + Retry prompt
+                                            #   mid-print, macro abort at startup.
 ```
 
 ### 2. AceInstance (`instance.py`)
@@ -255,7 +283,7 @@ _get_current_feed_assist_index()             # Query current feed assist slot
 _on_ace_connect()                            # Mark feed assist for deferred restoration
 _maybe_restore_pending_feed_assist()         # Restore after first successful heartbeat
 
-# Sensor Monitoring (New in 2024-12)
+# Sensor Monitoring
 _make_sensor_trigger_monitor(sensor_type)    # Create sensor state change monitor
                                              # Returns: monitor function with timing data
 
@@ -302,6 +330,52 @@ This enables precise timing measurements for:
 - Detecting stuck filament (late sensor triggers)
 - Optimizing movement speeds
 - Diagnosing mechanical issues
+
+**Feed Assist Loss Recovery (two layers):**
+ACE1 has a single gear assembly per unit — preloading a freshly inserted
+spool physically disables feed assist on the printing slot. ACE2 drives
+slots independently and keeps feed assist running while preloading another
+slot (assist pulses continue through a full preload), so it never needs
+the slot-load restore — its layer 2 covers other loss causes.
+Tangle detection is blind in that state (no pumping → no
+`cont_assist_time` signal), so recovery must be driven by the driver:
+1. **Slot-ready restore** (both generations, `_status_update_callback`):
+   any slot transitioning INTO `ready` marks a finished (pre)load cycle
+   and queues a restore of the remembered assist slot. Triggers on any
+   `* → ready` transition — the 1 Hz heartbeat almost always samples the
+   intermediate `preload`/`identifying` states, so the previous
+   `empty → ready`-only condition virtually never matched. The restore
+   goes through the retrying pending-restore queue rather than a direct
+   enable: slots report `ready` before the preload truly finishes, and
+   ACE1 units can watchdog-reset their USB during preload (Errno 5 write
+   errors) — the queue retries per heartbeat and survives a reconnect in
+   between. ACE1-family only (`feed_assist_causes_busy() ==
+   False`): on ACE2 a surviving assist keeps the device `busy` by design,
+   so a queued restore would burn its whole retry budget against
+   `wait_ready` — layer 2 owns ACE2 and queues only when the device is
+   provably `ready`.
+2. **Device-state reconciliation** (ACE2 only,
+   `_reconcile_feed_assist_state` on every heartbeat): ACE2 stays `busy`
+   the whole time assist is active, so a `ready` work status while the
+   driver believes assist is on means the firmware dropped it — after two
+   consecutive contradicting heartbeats the restore is queued. Catches
+   any silent ACE2 assist loss regardless of cause. ACE1 has no
+   equivalent signal (work status stays `ready` during assist) and relies
+   on layer 1.
+
+**Feed Fail-Fast on Firmware Slot Errors:**
+All load-feed sensor waits (`_feed_to_toolhead_with_extruder_assist`,
+`_feed_filament_to_verification_sensor` incl. its incremental loop) poll
+`_get_slot_feed_error()` and abort immediately when the slot enters the
+firmware error state (`gear_err`; ACE2 details the fault via
+`status_detail`: feed/rollback/assist/preload/stuck/tangled/motor error).
+ACE2 firmware aborts a blocked feed by itself after ~18 s while the old
+code waited blind through the sensor timeout plus 60 s of extruder-assist
+grinding — which can chew filament and leave broken
+fragments in the toolhead. A `FEED_ERROR_GRACE_S` (2 s) window after feed
+start ignores stale errors from a previous attempt (the 1 Hz heartbeat may
+not have refreshed yet; the feed command clears the error device-side).
+The extruder-assist phase is skipped entirely when a verdict is present.
 
 **Retract Early-Stop Behavior:**
 - `_retract()` supports two early-stop paths:
@@ -404,7 +478,8 @@ Mode     | Material | Color/RGB | Example
 - **Print State Tracking**: Know when printing is active (vs idle/paused)
 - **Runout Coordination**: Trigger endless spool or show prompts
 - **Print Start Baseline**: Re-initialize sensor baseline when print starts
-- **Optional Tangle Detection**: ACE Gen 1 — watch `cont_assist_time` heartbeat field for sustained pumping against resistance (requires active feed assist)
+- **Optional Tangle Detection**: watch `cont_assist_time` heartbeat field for sustained pumping against resistance (ACE1 + ACE2; requires active feed assist)
+- **Resume Feed-Assist Verification**: on paused → printing, re-enable feed assist on the loaded tool if it was silently lost (ACE power cycle / klippy restart)
 
 **Architecture:**
 RunoutMonitor is purely an observer - it does NOT change state directly. Instead:
@@ -501,12 +576,26 @@ reads present again, or on any baseline reset (pause, stop, no active tool).
 - Action: Re-initialize sensor baseline to current state
 - Purpose: Prevent false runout detection if print starts with wrong baseline
 
-**Tangle Detection (optional, ACE Gen 1 only):**
-- Enabled via `[ace] tangle_detection` with threshold `tangle_pump_time` (default 4.0 s, clamped to a 2.0 s minimum)
-- Watches the ACE-reported `cont_assist_time` heartbeat field; trips when it stays above the threshold (ACE pumping continuously against resistance). The first growing reading only arms the detector — it can never fire from a single stale sample; a value drop disarms it.
-- **Precondition — feed assist must be active**: the detector only monitors the Gen 1 instance whose feed assist is currently enabled. With feed assist off, `cont_assist_time` is not driven and tangle detection is effectively inactive.
-- **Coupled to runout monitoring**: the check runs inside the `RunoutMonitor` loop, so it is suspended whenever runout detection is (detection disabled, toolchange in progress, print paused/stopped, runout handling in progress).
+**Tangle Detection (optional, ACE1 and ACE2):**
+- Enabled via `[ace] tangle_detection` with threshold `tangle_pump_time` (default 5.0 s, clamped to a 3.0 s minimum), verdict window `tangle_verify_time` (default 7.0 s, 0 = pause immediately at the threshold) and hard ceiling `tangle_pump_time_hard` (default 8.0 s, clamped to 6.5 minimum)
+- Watches the ACE-reported `cont_assist_time` heartbeat field; a threshold crossing (ACE pumping continuously) requires two *distinct* growing heartbeat samples: the first growing reading only arms the detector, an unchanged value (re-read of the same 1 Hz sample by the 50 ms loop) never counts, and a value drop disarms. Re-enabling detection mid-print — via command **or** a direct dashboard pin flip — clears phase state, so a stale sample from before the toggle can never trigger.
+- **Only the current tool's instance is monitored** (its assist on its slot). Under the single-assist invariant any other instance's assist is stale state — a first-match scan could watch a stale outgoing ACE after an endless-spool swap and go blind to a tangle on the loaded tool. Without a resolvable tool the first pumping instance is used (manual assist).
+- **Runout vs tangle verdict**: a spool running out AT the ACE produces the same continuous-pumping signature as a tangle ("nothing left to push" vs "can't push") — the slot presence state disambiguates, with generation-specific timing:
+  - **ACE2** reports the slot `empty` immediately at sensor-clear, ~100 s *before* its starved assist starts cycling (pump ramps that self-reset at ~3.9 s, forever — just below the 5.0 s default threshold, which is why the threshold floor is 3.0). An **empty-slot gate** suppresses the detector entirely while the pumping slot reports empty, covering the whole tail transit. Because its slot state is sensor-live, a **threshold crossing with a non-empty slot pauses immediately** on ACE2 (~5 s after tangle onset) — no verdict window.
+  - **ACE1** keeps reporting `ready` until its starved assist gives up (continuous pump ~5 s → `unwinding`, which resets the counter → `empty`), so its empty report arrives ~4 s *after* the threshold crossing — firmware-fixed timing, print-speed independent. A threshold crossing therefore arms a **verdict window** (`tangle_verify_time`) instead of pausing: slot goes empty within it → runout, no pause, print continues on the remaining filament until the toolhead sensor triggers normal runout/endless-spool handling; a fresh sample at/above the **hard ceiling** `tangle_pump_time_hard` → confirmed tangle, pause now (~8 s after onset — starved pumping is firmware-capped at ~5-6 s, so only a real blockage reaches the ceiling); window expiry with the slot still non-empty → confirmed tangle, pause + prompt. There is deliberately **no counter-drop exit** from the window: ACE1's give-up unwind and ACE2's starved retry cycle both reset the counter mid-runout, and real-tangle ramps can dip — a drop proves nothing.
+- **ACE2 is covered on purpose** ACE2 firmware only self-detects blocked *commanded* feeds (slot → `gear_err`, fast-flashing LED, error persists until the next command to that slot). During **feed assist** — the mid-print case — it pumps against a tangle indefinitely and never errors. ACE2 reports `cont_assist_time` in milliseconds; the protocol decoder normalizes to seconds so the detector is unit-agnostic.
+- **Precondition — feed assist must be active**: the detector only monitors the instance whose feed assist is currently enabled. With feed assist off, `cont_assist_time` is not driven and tangle detection is effectively inactive.
+- **Coupled to runout monitoring**: the check runs inside the `RunoutMonitor` loop, so it is suspended whenever runout detection is (detection disabled, toolchange in progress, print paused/stopped, runout handling in progress). Any of those resets clear the verdict window too.
 - Live toggle via `ACE_TANGLE_DETECTION ENABLE=0/1`, or expose a Mainsail/Fluidd slider by uncommenting `[output_pin TANGLE_DETECTION]` in the printer config example. When the pin is configured it is authoritative — both the command and the in-prompt "Disable Detection & Resume" button flip the pin so the dashboard never drifts out of sync with the runtime state.
+
+**Resume Feed-Assist Verification:**
+On every paused → printing transition with a loaded tool, `RunoutMonitor`
+schedules `manager.verify_feed_assist_for_tool()` (in its own reactor
+greenlet — it blocks on `wait_ready`). If feed assist is not active on the
+loaded tool's slot, it is re-enabled. Safety net for feed assist silently
+lost to an ACE power cycle, a klippy restart (see instance restore below),
+or a busy-skipped reconnect restore — without it a resumed print extrudes
+nothing (immediately on ACE2, which clamps the filament when not feeding).
 
 ### 5. AceSerialManager (`serial_manager.py`)
 
@@ -964,9 +1053,12 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
-| `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (Gen 1 only; requires active feed assist) |
-| `tangle_pump_time` | 4.0 | Seconds of continuous ACE pumping before declaring a tangle (clamped to 2.0 minimum) |
-| `ace_connection_supervision` | True | Monitor connections; pause and alert on instability |
+| `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (ACE1 + ACE2; requires active feed assist). Shipped printer configs set it to True and enable the `[output_pin TANGLE_DETECTION]` dashboard slider (authoritative when present) |
+| `tangle_pump_time` | 5.0 | Seconds of continuous ACE pumping before suspecting a tangle (clamped to 3.0 minimum — ACE2's starved-runout assist retry cycles up to ~3.9 s) |
+| `tangle_verify_time` | 7.0 | ACE1 verdict window after a threshold crossing: slot reported empty within it → spool runout, no pause; expiry with slot non-empty → tangle pause. ACE2 skips the window (sensor-live slot state pauses at the crossing). 0 = pause immediately at the threshold (false-pauses on ACE1 runouts) |
+| `tangle_pump_time_hard` | 8.0 | Continuous-pumping hard ceiling (clamped to 6.5 minimum): starved pumping is firmware-capped below it, so reaching it pauses immediately, bypassing the verify window |
+| `ace_connection_supervision` | True | Monitor connections; pause and alert on instability. Also gates the fast disconnect pause |
+| `disconnect_pause_timeout` | -1 (auto) | Seconds the ACTIVE tool's instance may be continuously disconnected mid-print before pausing. Auto = protocol default (ACE1 30 s, ACE2 5 s — ACE2 clamps filament when not feeding). 0 disables the fast path; per-instance overridable |
 | `moonraker_lane_sync_enabled` | True | Sync slot metadata to Moonraker `lane_data` namespace |
 | `moonraker_lane_sync_unknown_material_mode` | `empty` | How to publish placeholder materials: `passthrough`/`empty`/`map` |
 | `moonraker_lane_sync_unknown_material_markers` | `???,unknown,n/a,none` | Values treated as “unknown” for mapping/empty |
@@ -1244,8 +1336,8 @@ def ace_get_instance_and_slot(gcmd):
 # - Move to flush position after cut
 # - Safety: M400 waits ensure moves complete before next operation
 # 
-# Bug Fix (2024-12-07): Added G91/G90 Z-lift sequence to prevent
-# toolhead collision with cutter arm during print toolchanges
+# G91/G90 Z-lift sequence prevents toolhead collision with the cutter
+# arm during print toolchanges
 
 [gcode_macro RESUME]
 # Resume after pause:
