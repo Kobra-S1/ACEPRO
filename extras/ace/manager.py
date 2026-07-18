@@ -170,11 +170,22 @@ class AceManager:
         self.state = PersistentState(self.printer, self.gcode, persistence_mode=persistence_mode)
         self.gcode.respond_info(f"ACE: Persistence mode: {persistence_mode}")
         self.variables = self.state.get_all()
-        initial_ace_enabled = bool(self.state.get("ace_global_enabled", True))
+        # ACE global-enable authority:
+        #   * if a runtime enable/disable has ever been persisted, that saved
+        #     value wins so users keep their explicit choice across reboots;
+        #   * otherwise fall back to the configured [output_pin ACE_Pro] value,
+        #     so a fresh install honours `value: 0` and stays disabled instead
+        #     of trying (and failing) to connect to absent ACE hardware.
+        if "ace_global_enabled" in self.variables:
+            initial_ace_enabled = bool(self.variables.get("ace_global_enabled"))
+            ace_enabled_source = "saved variables"
+        else:
+            initial_ace_enabled = self._configured_ace_pro_enabled(default=True)
+            ace_enabled_source = "[output_pin ACE_Pro] config value"
 
         self.gcode.respond_info(
             f"ACE: Initializing with ace_global_enabled={initial_ace_enabled} "
-            f"(from saved variables)"
+            f"(from {ace_enabled_source})"
         )
 
         self._ace_pro_enabled = initial_ace_enabled
@@ -2036,9 +2047,36 @@ class AceManager:
         self.state.set_and_save("ace_global_enabled", enabled)
         self._ace_pro_enabled = enabled
 
+    def _configured_ace_pro_enabled(self, default=True):
+        """Initial ACE-enable state from the [output_pin ACE_Pro] config value.
+
+        Used only on a fresh printer, before any runtime enable/disable has
+        been persisted to save_variables. Reading the configured pin value lets
+        the printer config disable ACE by default (``value: 0``) so Klippy does
+        not attempt to connect to ACE hardware that is not present. Uses the
+        same >0.5 threshold as the ACE_Pro checks in the printer macros.
+        """
+        try:
+            ace_pin = self.printer.lookup_object("output_pin ACE_Pro", None)
+            if ace_pin is None:
+                return default
+            value = ace_pin.get_status(self.reactor.monotonic()).get("value", 0.0)
+            return bool(float(value) > 0.5)
+        except Exception as e:
+            self.gcode.respond_info(f"ACE: Could not read ACE_Pro pin default: {e}")
+            return default
+
     def get_ace_global_enabled(self):
-        """Get global ACE Pro enabled state from persistent storage."""
-        return bool(self.state.get("ace_global_enabled", True))
+        """Get global ACE Pro enabled state (live in-memory authority).
+
+        Mirrors ``self._ace_pro_enabled``, which is seeded at startup from the
+        persisted ``ace_global_enabled`` variable when present, otherwise from
+        the configured [output_pin ACE_Pro] value, and is kept current by every
+        enable/disable transition. Returning the in-memory flag keeps command
+        gating consistent with the startup decision even before the state has
+        been persisted to disk.
+        """
+        return bool(self._ace_pro_enabled)
 
     def is_ace_enabled(self):
         """Check if ACE Pro unit is enabled via output pin."""
