@@ -239,6 +239,14 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
         """
         return True
 
+    def default_disconnect_pause_timeout(self) -> float:
+        """ACE2 clamps the filament whenever it is not actively feeding.
+
+        A dead ACE2 starves the extruder within seconds — pause quickly
+        rather than waiting out a recovery that cannot un-starve the print.
+        """
+        return 5.0
+
     def handle_bound_shared_bus_unsolicited(self, instance, response) -> bool:
         """Route one bound shared-bus response without leaking ACE2 commands upward."""
         command = response.get("command")
@@ -415,7 +423,10 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                     "temp": _pb_first(fields, 3, 0),
                     "humidity": _pb_first(fields, 4, 0),
                     "feed_assist_count": _pb_first(fields, 7, 0),
-                    "cont_assist_time": _pb_first(fields, 8, 0),
+                    # ACE2 firmware reports cont_assist_time in milliseconds
+                    # (ACE1 reports seconds).  Normalize to seconds here so
+                    # consumers (tangle detection) are unit-agnostic.
+                    "cont_assist_time": _pb_first(fields, 8, 0) / 1000.0,
                     "raw_fields": fields,
                     "slots": slots,
                 },

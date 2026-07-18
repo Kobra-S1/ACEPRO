@@ -236,6 +236,10 @@ def cmd_ACE_GET_STATUS(gcmd):
             # Track which keys we've explicitly handled
             handled_keys = set()
 
+            # ACE2 responses carry raw protobuf debug data (bytes values,
+            # not JSON-serializable and unreadable in gcode output)
+            handled_keys.add('raw_fields')
+
             # Main status and temperature
             lines.append(f"Status: {result.get('status', 'unknown')}")
             handled_keys.add('status')
@@ -385,23 +389,25 @@ def cmd_ACE_GET_STATUS(gcmd):
                             else:
                                 slot_parts.append(f"spool_total={total}m")
 
-                    # Any unknown slot fields
+                    # Any unknown slot fields (default=repr: ACE2 payloads
+                    # may contain non-JSON-serializable values like bytes)
                     for key, value in slot.items():
                         if key not in slot_handled:
                             if isinstance(value, (dict, list)):
-                                slot_parts.append(f"{key}={json.dumps(value)}")
+                                slot_parts.append(f"{key}={json.dumps(value, default=repr)}")
                             else:
                                 slot_parts.append(f"{key}={value}")
 
                     slot_line = f"  Slot: {', '.join(slot_parts)}"
                     lines.append(slot_line)
 
-            # Catch any unknown top-level keys
+            # Catch any unknown top-level keys (default=repr: ACE2 payloads
+            # may contain non-JSON-serializable values like bytes)
             unknown_keys = []
             for key, value in result.items():
                 if key not in handled_keys:
                     if isinstance(value, (dict, list)):
-                        unknown_keys.append(f"{key}={json.dumps(value)}")
+                        unknown_keys.append(f"{key}={json.dumps(value, default=repr)}")
                     else:
                         unknown_keys.append(f"{key}={value}")
 
@@ -1456,14 +1462,21 @@ def cmd_ACE_SMART_UNLOAD(gcmd):
         gcmd.respond_info("ACE: Global ACE Pro support disabled - smart unload ignored")
         return
 
-    tool_index = gcmd.get_int("TOOL", -1)
+    explicit_tool = gcmd.get_int("TOOL", -1)
+    tool_index = explicit_tool
     if tool_index < 0:
         tool_index = manager.state.get("ace_current_index", -1)
 
     gcmd.respond_info(f"ACE: Smart unload tool {tool_index}")
 
     try:
-        success = manager.smart_unload(tool_index)
+        # Without an explicit TOOL= this is the operator-level "free my
+        # filament path" command: it may escalate to cycling all slots when
+        # the direct unload leaves the path blocked. With TOOL= (and for all
+        # internal callers) a blocked path stays a hard error.
+        success = manager.smart_unload(
+            tool_index, cycle_on_blocked=(explicit_tool < 0)
+        )
         if success:
             gcmd.respond_info("ACE: Smart unload succeeded")
             manager.state.set_and_save("ace_current_index", -1)
@@ -1575,22 +1588,29 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     printer = get_printer()
 
     try:
-        toolhead = printer.lookup_object('toolhead')
-        reactor = printer.get_reactor()
-        kin_status = toolhead.get_kinematics().get_status(reactor.monotonic())
-        homed_axes = kin_status.get('homed_axes', '')
-
-        if 'xyz' not in homed_axes:
-            gcode = printer.lookup_object("gcode")
-            gcode.respond_info("ACE: Printer not homed, homing now...")
-            gcode.run_script_from_command("G28")
-
-    except Exception as e:
-        gcode = printer.lookup_object("gcode")
-        gcode.respond_info(f"ACE: Warning - could not verify homing: {e}")
-
-    try:
         current_tool = manager.state.get("ace_current_index", -1)
+
+        # Empty-slot guard BEFORE homing/heating/feeding: ACE2 firmware ACKs
+        # a feed on an empty slot and spins for minutes until the toolhead
+        # sensor timeout. Raising routes into the failure handling below
+        # (pause + Retry prompt mid-print, macro abort at startup, plain
+        # message when idle).
+        manager.ensure_tool_slot_loaded(tool_index)
+
+        try:
+            toolhead = printer.lookup_object('toolhead')
+            reactor = printer.get_reactor()
+            kin_status = toolhead.get_kinematics().get_status(reactor.monotonic())
+            homed_axes = kin_status.get('homed_axes', '')
+
+            if 'xyz' not in homed_axes:
+                gcode = printer.lookup_object("gcode")
+                gcode.respond_info("ACE: Printer not homed, homing now...")
+                gcode.run_script_from_command("G28")
+
+        except Exception as e:
+            gcode = printer.lookup_object("gcode")
+            gcode.respond_info(f"ACE: Warning - could not verify homing: {e}")
 
         status = manager.perform_tool_change(current_tool, tool_index)
         printer.lookup_object("gcode").respond_info(f"ACE: perform_tool_change result status: {status}")
@@ -1602,11 +1622,13 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
         print_stats = printer.lookup_object('print_stats', None)
         is_printing = False
+        print_state = ''
 
         if print_stats:
             reactor = printer.get_reactor()
             stats = print_stats.get_status(reactor.monotonic())
-            is_printing = stats.get('state') in ['printing', 'paused']
+            print_state = stats.get('state') or ''
+            is_printing = print_state in ['printing', 'paused']
 
         # Check if this is a startup toolchange (G9111) vs regular print toolchange.
         # During startup we must NOT pin the requested tool on failure just because
@@ -1616,8 +1638,9 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         if ace_state and hasattr(ace_state, 'variables'):
             is_startup = ace_state.variables.get('startup_toolchange', 0) == 1
 
-        # Keep existing print/pause recovery behavior (set requested tool),
-        # but use smarter fallback while idle/startup.
+        # Decide which tool is physically in the path after the failure —
+        # in every context the deciding evidence is filament_pos: "nozzle"/
+        # "splitter" means the previous tool never left the path.
         fallback_tool = current_tool if 'current_tool' in locals() else manager.state.get("ace_current_index", -1)
         filament_pos = None
         try:
@@ -1626,7 +1649,21 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             filament_pos = None
 
         if is_printing and not is_startup:
-            active_tool = tool_index
+            # Mid-print failure. Pinning the REQUESTED tool as current is only
+            # valid when the sequence got past the unload (target filament may
+            # be partially in the path, e.g. "feed to toolhead failed").
+            # If filament_pos still reads "nozzle"/"splitter", the failure
+            # happened BEFORE the previous tool was unloaded (e.g. the
+            # empty-slot pre-flight guard) — the previous tool is still
+            # physically loaded, so it must stay the current tool. Otherwise
+            # the Retry prompt re-runs T<n> with current==target and lands in
+            # the "already loaded" reselection path, which trusts the poisoned
+            # index, skips the real toolchange, and enables a second feed
+            # assist in parallel with the still-loaded previous tool's.
+            if filament_pos in (FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER):
+                active_tool = fallback_tool
+            else:
+                active_tool = tool_index
         else:
             # Idle/startup failure. Decide which tool is physically in the path.
             if filament_pos == FILAMENT_STATE_BOWDEN:
@@ -1656,9 +1693,15 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
         gcode.respond_info(f"ACE: Tool change to T{tool_index} FAILED: {e}")
         if is_printing:
-            gcode.respond_info(
-                f"ACE: State updated - current tool marked as T{tool_index} (failed load, print recovery)"
-            )
+            if active_tool == tool_index:
+                gcode.respond_info(
+                    f"ACE: State updated - current tool marked as T{tool_index} (failed load, print recovery)"
+                )
+            else:
+                gcode.respond_info(
+                    f"ACE: State preserved - current tool remains T{active_tool} "
+                    f"(failed before unload, previous tool still loaded)"
+                )
         else:
             if active_tool == -1 and filament_pos == FILAMENT_STATE_BOWDEN:
                 gcode.respond_info("ACE: State updated - no active tool (idle/startup failure after unload)")
@@ -1716,6 +1759,20 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
             except Exception as dialog_error:
                 gcode.respond_info(f"Failed to show error dialog: {dialog_error}")
+
+            # A failure while print_stats still reports PAUSED means this
+            # toolchange was issued by a resume-in-flight (the RESUME macro
+            # re-activating the tool before BASE_RESUME).  The PAUSE above
+            # is then a no-op - the printer never left the paused state -
+            # and returning normally would let the RESUME macro continue:
+            # purge with no filament, BASE_RESUME, and printing into air.
+            # Raising aborts the remaining macro lines; the Retry prompt
+            # above stays up and the printer stays paused.
+            if print_state == 'paused':
+                raise gcmd.error(
+                    f"Tool change to T{tool_index} failed - aborting resume, "
+                    f"printer stays paused. Use the prompt to retry or cancel."
+                )
         else:
             # No RESUME cycle will follow this failure (idle/manual toolchange,
             # or startup toolchange that aborts the macro via gcmd.error below)
@@ -1728,9 +1785,18 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             manager.state.set("ace_target_index", -1)
 
             gcode.run_script_from_command("M104 S0")
-            gcode.respond_info("ACE: Initial toolchange failed, cancel print and switching extruder heater off")
 
-            raise gcmd.error(f"Tool change to T{tool_index} failed during startup: {str(e)}")
+            if is_startup:
+                gcode.respond_info(
+                    "ACE: Initial toolchange failed, cancel print and switching extruder heater off"
+                )
+                raise gcmd.error(
+                    f"Tool change to T{tool_index} failed during startup: {str(e)}"
+                )
+
+            # Plain idle/manual toolchange - no print is running, nothing to cancel
+            gcode.respond_info("ACE: Toolchange failed, switching extruder heater off")
+            raise gcmd.error(f"Tool change to T{tool_index} failed: {str(e)}")
 
 
 def cmd_ACE_SET_RETRACT_SPEED(gcmd):

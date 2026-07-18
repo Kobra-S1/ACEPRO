@@ -217,7 +217,7 @@ class TestAceProtoProtocolAdapter:
                     "temp": 31,
                     "humidity": 40,
                     "feed_assist_count": 3,
-                    "cont_assist_time": 12,
+                    "cont_assist_time": 0.012,
                     "raw_fields": {
                         1: [(0, 1)],
                         2: [(2, b"\x08\x02\x10- Z")],
@@ -283,7 +283,7 @@ class TestAceProtoProtocolAdapter:
                     "temp": 0,
                     "humidity": 0,
                     "feed_assist_count": 0,
-                    "cont_assist_time": 0,
+                    "cont_assist_time": 0.0,
                     "raw_fields": {
                         1: [(0, 77)],
                         2: [(2, b"\x08c\x10(")],

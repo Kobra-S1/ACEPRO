@@ -1297,7 +1297,11 @@ class TestFeedAssist(unittest.TestCase):
         instance._on_ace_connect()
         self.assertEqual(instance._pending_feed_assist_restore, 2)
         
-        # Simulate first successful heartbeat (all empty slots to avoid RFID queries)
+        # Simulate first successful heartbeat.  The assist slot (2) must
+        # report ready: restores are skipped for device-reported EMPTY
+        # slots (the spool ran out - re-enabling assist there only pokes
+        # the firmware's starved retry cycling).  Other slots stay
+        # empty to avoid RFID queries.
         heartbeat_response = {
             "code": 0,
             "result": {
@@ -1305,7 +1309,7 @@ class TestFeedAssist(unittest.TestCase):
                 "slots": [
                     {"index": 0, "status": "empty"},
                     {"index": 1, "status": "empty"},
-                    {"index": 2, "status": "empty"},
+                    {"index": 2, "status": "ready"},
                     {"index": 3, "status": "empty"},
                 ]
             }
@@ -3621,6 +3625,9 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
         instance._feed = Mock()
         instance._stop_feed = Mock()
         instance.dwell = Mock()
+        instance.feed_filament_with_wait_for_response = Mock(
+            return_value={"code": 0, "msg": "success"}
+        )
         instance.total_max_feeding_length = 80  # Keep loop tight for test
 
         manager = Mock()
@@ -3631,17 +3638,73 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
         with patch('ace.instance.time.time', side_effect=self._fake_time(step=1.1)):
             instance._feed_filament_to_verification_sensor(2, SENSOR_TOOLHEAD, feed_length=50)
 
-        self.assertEqual(
-            instance._feed.call_args_list,
-            [
-                call(2, 50, instance.feed_speed),
-                call(2, instance.incremental_feeding_length, instance.incremental_feeding_speed),
-            ],
+        instance._feed.assert_called_once_with(2, 50, instance.feed_speed)
+        instance.feed_filament_with_wait_for_response.assert_called_once_with(
+            2, instance.incremental_feeding_length, instance.incremental_feeding_speed
         )
         instance._stop_feed.assert_called_once_with(2)
         manager.state.set.assert_called_once_with(
             "ace_filament_pos",
             FILAMENT_STATE_TOOLHEAD
+        )
+
+    @patch('ace.instance.AceSerialManager')
+    def test_incremental_feed_forbidden_not_counted_as_fed(self, mock_serial_mgr_class):
+        """A FORBIDDEN (rejected) incremental feed must not count as fed
+        filament - the loop retries it instead of burning budget on phantom
+        millimeters (rejected feeds push the
+        loop into total_max_feeding_length ~300mm early)."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance._feed = Mock()
+        instance._stop_feed = Mock()
+        instance.dwell = Mock()
+        instance.incremental_feeding_length = 10.0
+        instance.total_max_feeding_length = 60  # room for exactly one counted increment
+        instance.feed_filament_with_wait_for_response = Mock(
+            side_effect=[
+                {"code": 0, "msg": "FORBIDDEN"},   # rejected - must not count
+                {"code": 0, "msg": "success"},     # counted -> reaches 60 cap
+            ]
+        )
+
+        manager = Mock()
+        manager.get_switch_state = Mock(return_value=False)  # sensor never trips
+        INSTANCE_MANAGERS[0] = manager
+
+        with patch('ace.instance.time.time', side_effect=self._fake_time(step=1.1)):
+            with self.assertRaises(ValueError) as ctx:
+                instance._feed_filament_to_verification_sensor(2, SENSOR_TOOLHEAD, feed_length=50)
+
+        # 60mm accounted = 50 main + 1 counted increment; the FORBIDDEN one
+        # was retried, hence two sync feed calls for one counted increment.
+        self.assertIn("Fed 60", str(ctx.exception))
+        self.assertEqual(instance.feed_filament_with_wait_for_response.call_count, 2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_incremental_feed_forbidden_streak_aborts(self, mock_serial_mgr_class):
+        """Persistent FORBIDDEN rejections abort with a clear error instead
+        of retrying forever."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        instance._feed = Mock()
+        instance._stop_feed = Mock()
+        instance.dwell = Mock()
+        instance.total_max_feeding_length = 500
+        instance.feed_filament_with_wait_for_response = Mock(
+            return_value={"code": 0, "msg": "FORBIDDEN"}
+        )
+
+        manager = Mock()
+        manager.get_switch_state = Mock(return_value=False)
+        INSTANCE_MANAGERS[0] = manager
+
+        with patch('ace.instance.time.time', side_effect=self._fake_time(step=1.1)):
+            with self.assertRaises(ValueError) as ctx:
+                instance._feed_filament_to_verification_sensor(2, SENSOR_TOOLHEAD, feed_length=50)
+
+        self.assertIn("device refuses to feed", str(ctx.exception))
+        self.assertEqual(
+            instance.feed_filament_with_wait_for_response.call_count,
+            AceInstance.INCREMENTAL_FEED_FORBIDDEN_MAX,
         )
 
     @patch('ace.instance.AceSerialManager')
@@ -3669,6 +3732,9 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
         instance._feed = Mock()
         instance._stop_feed = Mock()
         instance.dwell = Mock()
+        instance.feed_filament_with_wait_for_response = Mock(
+            return_value={"code": 0, "msg": "success"}
+        )
         instance.total_max_feeding_length = 60  # Force early failure
 
         manager = Mock()
@@ -3680,12 +3746,9 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
                 instance._feed_filament_to_verification_sensor(3, SENSOR_TOOLHEAD, feed_length=50)
 
         self.assertIn("sensor not triggered", str(ctx.exception).lower())
-        self.assertEqual(
-            instance._feed.call_args_list,
-            [
-                call(3, 50, instance.feed_speed),
-                call(3, instance.incremental_feeding_length, instance.incremental_feeding_speed),
-            ],
+        instance._feed.assert_called_once_with(3, 50, instance.feed_speed)
+        instance.feed_filament_with_wait_for_response.assert_called_once_with(
+            3, instance.incremental_feeding_length, instance.incremental_feeding_speed
         )
         instance._stop_feed.assert_called_once_with(3)
         manager.state.set_and_save.assert_not_called()
@@ -4068,6 +4131,37 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
         self.assertIn('early_stop_callback', call_kwargs)
         self.assertIsNotNone(call_kwargs['early_stop_callback'])
         instance._update_feed_assist.assert_called_once_with(2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_no_assist_restore_during_toolchange(self, mock_serial_mgr_class):
+        """During a toolchange the orchestration owns assist state: the
+        saved assist must NOT be re-armed after the retract (a restore
+        would re-enable the old tool's assist on ACE[0]
+        while ACE[1] was feeding the new tool - double assist)."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        manager = Mock()
+        manager.toolchange_in_progress = True  # literal True required
+        manager.has_rdm_sensor.return_value = True
+        manager.get_instant_switch_state = Mock(return_value=False)
+
+        instance._disable_feed_assist = Mock()
+        instance._get_current_feed_assist_index = Mock(return_value=2)
+        instance._update_feed_assist = Mock()
+
+        def mock_retract(slot, length, speed, early_stop_callback=None):
+            if early_stop_callback:
+                early_stop_callback()
+            return {'code': 0, 'msg': 'OK'}
+        instance._retract = Mock(side_effect=mock_retract)
+
+        times = self._time_generator(step=0.4)
+        with patch('ace.instance.time.time', side_effect=lambda: next(times)):
+            result = instance.rmd_triggered_unload_slot(
+                manager, slot=1, length=100, overshoot_length=20)
+
+        self.assertTrue(result)
+        instance._disable_feed_assist.assert_called_once_with(1)
+        instance._update_feed_assist.assert_not_called()
 
     @patch('ace.instance.AceSerialManager')
     def test_sensor_never_clears_returns_false_restores_feed_assist(self, mock_serial_mgr_class):

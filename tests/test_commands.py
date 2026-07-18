@@ -2042,6 +2042,73 @@ class TestAceChangeTool:
         gcode.run_script_from_command.assert_any_call("G28")
 
 
+class TestToolChangeFailureDuringResume:
+    """A toolchange failure while print_stats reports PAUSED must raise.
+
+    The RESUME macro re-activates the tool (T<n>) before BASE_RESUME.  If
+    that reload fails, the handler's PAUSE is a no-op (never left pause)
+    and swallowing the error lets the macro continue: purge with no
+    filament, BASE_RESUME, printing into air.
+    Raising gcmd.error aborts the remaining macro lines instead.
+    """
+
+    def _make_printer(self, print_state):
+        printer = Mock()
+        gcode = Mock()
+        toolhead = Mock()
+        kin = Mock()
+        kin.get_status = Mock(return_value={"homed_axes": "xyz"})
+        toolhead.get_kinematics = Mock(return_value=kin)
+        stats = Mock(get_status=Mock(return_value={"state": print_state}))
+        printer.lookup_object = Mock(
+            side_effect=lambda name, default=None: {
+                "toolhead": toolhead,
+                "gcode": gcode,
+                "print_stats": stats,
+            }.get(name, gcode)
+        )
+        reactor = Mock()
+        reactor.monotonic = Mock(return_value=0.0)
+        printer.get_reactor = Mock(return_value=reactor)
+        return printer, gcode
+
+    def _make_manager(self):
+        manager = Mock()
+        manager.get_ace_global_enabled.return_value = True
+        manager.perform_tool_change = Mock(
+            side_effect=RuntimeError("wait_ready timed out after 60s")
+        )
+        manager.state.get = Mock(return_value=-1)
+        return manager
+
+    def test_failure_while_paused_raises_to_abort_resume(self, mock_gcmd,
+                                                         setup_mocks):
+        manager = self._make_manager()
+        printer, gcode = self._make_printer("paused")
+        # gcmd.error must behave like Klipper's: a CommandError class that
+        # carries the message (the fixture's default swallows it)
+        mock_gcmd.error = RuntimeError
+        with patch('ace.commands.get_printer', return_value=printer):
+            with pytest.raises(RuntimeError, match="aborting resume"):
+                ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 5)
+        # The Retry prompt was still shown before the raise
+        prompts = [
+            c for c in gcode.run_script_from_command.call_args_list
+            if "Tool Change Failed" in str(c)
+        ]
+        assert prompts
+
+    def test_failure_while_printing_pauses_without_raise(self, mock_gcmd,
+                                                         setup_mocks):
+        # Mid-print failure (T from the gcode stream): PAUSE works there,
+        # the pause+prompt+swallow behavior must stay
+        manager = self._make_manager()
+        printer, gcode = self._make_printer("printing")
+        with patch('ace.commands.get_printer', return_value=printer):
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 5)  # no raise
+        gcode.run_script_from_command.assert_any_call('PAUSE')
+
+
 class TestAceSetRetractSpeed:
     def test_set_retract_speed_success(self, mock_gcmd, setup_mocks):
         """Test ACE_SET_RETRACT_SPEED with valid parameters."""

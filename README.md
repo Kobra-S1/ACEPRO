@@ -57,7 +57,10 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Endless Spool**: Automatic filament switching with exact/material/next-ready match modes
 - ✅ **Persistent State**: Inventory and settings saved across restarts
 - ✅ **Runout Detection**: Real-time state-change detection (toolhead + optional RDM)
-- ✅ **Tangle Detection (ACE Gen 1)**: Pauses the print when the ACE pumps continuously against a blocked spool, via the firmware-reported `cont_assist_time` field
+- ✅ **Tangle Detection (ACE 1 + ACE 2)**: Pauses the print when the ACE pumps continuously against a blocked spool, via the firmware-reported `cont_assist_time` field. ACE 2 firmware never self-detects tangles during feed assist, so host-side monitoring covers it too
+- ✅ **Fast Disconnect Pause**: Pauses within seconds when the ACE feeding the active tool dies mid-print (protocol-aware: ACE 2 clamps the filament and starves the extruder immediately; ACE 1 gets a lenient timeout since the extruder can still pull through it)
+- ✅ **Resume Feed-Assist Verification**: Re-enables feed assist on resume if it was silently lost (ACE power cycle, klippy restart) — prevents "resumed but extruding nothing"
+- ✅ **Feed Fail-Fast**: Load feeds honor the ACE firmware's own error verdict (`feed_error`, `stuck_error`, `tangled_error`, …) and abort within seconds to avoid extruder-assist filament grinding
 - ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
 - ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
 - ✅ **RFID Inventory Sync**: Reads tag material/color on ready state and syncs into Klipper inventory/UI
@@ -88,7 +91,7 @@ The browser-based dashboard (adapted from ValgACE) gives you a full ACE view wit
 
 ## 🏗️ Architecture
 
-![Architecture Diagram](architecture.png)
+<img src="architecture.png" alt="Architecture Diagram" width="50%">
 
 This implementation is organized into separate modules:
 
@@ -97,14 +100,15 @@ ace/
 ├── __init__.py           # Module initialization
 ├── manager.py            # AceManager - orchestrates all ACE units
 ├── instance.py           # AceInstance - per-unit handler
-├── protocol.py           # Protocol seam: ACE1 JSON & ACE2 protobuf adapters,
-│                         #   command catalog, request builders, wire codecs,
-│                         #   transport rules, baud/port selection
+├── protocol.py           # Protocol base: AceProtocolAdapter class, command
+│                         #   specs, shared request builders, auto-detection
+├── protocol_ace1.py      # ACE1 JSON protocol adapter (frame codec)
+├── protocol_ace2.py      # ACE2 protobuf adapter, command catalog, wire helpers
 ├── ace2_bus.py           # ACE2 shared-bus session: UID discovery, device-id
 │                         #   binding, assignment planning
 ├── serial_manager.py     # Serial transport: connect, frame I/O, request queue
 ├── endless_spool.py      # Automatic filament switching logic
-├── runout_monitor.py     # Filament runout detection during printing
+├── runout_monitor.py     # Filament runout & tangle detection during printing
 ├── commands.py           # G-code command handlers
 ├── config.py             # Configuration constants and helpers
 ├── persistent_state.py   # Deferred-flush saved_variables wrapper
@@ -112,19 +116,30 @@ ace/
 
 config/
 ├── ace_K3.cfg            # Kobra 3 ACE configuration
+├── ace_K3M.cfg           # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg           # Kobra S1 ACE configuration
 ├── printer_K3.cfg        # Kobra 3 printer macros
+├── printer_K3M.cfg       # Kobra K3M printer macros (BETA)
 ├── printer_KS1.cfg       # Kobra S1 printer macros
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
 ├── ace_macros_generic.cfg # Shared ACE helper macros
-└── spoolman_logic.cfg          # Logic for Spoolman ID mapping and tool hooks
+└── spoolman_logic.cfg    # Logic for Spoolman ID mapping and tool hooks
 
 extras/
 ├── ace/                  # ACE core module (multi-instance manager)
 ├── temperature_ace.py    # Optional ACE temperature sensor for Klipper
 └── virtual_pins.py       # Helper for ACE macros
 
-├── ARCHITECTURE.md       
+installer.sh              # Menu-driven installer (entry point)
+installer/                # Installer modules (ui, detect, backup, steps)
+ace_status_integration/   # Moonraker ACE status component + web dashboard
+KlipperScreen/            # ACE Pro KlipperScreen panel (acepro.py)
+patches/                  # KlipperScreen core patches (ACE subscription)
+
+├── ARCHITECTURE.md       # System design, components, data flow
+├── PROTOCOL.md           # ACE serial protocol documentation
+├── PROTOCOL_REDETECTION.md   # Protocol auto-detection details
+├── CONNECTION_SUPERVISION.md # Serial connection supervision notes
 ├── example_cmds.txt
 └── README.md             # This file
 ```
@@ -143,18 +158,144 @@ extras/
 
 
 ### ACE Pro USB Pin Configuration / Adapter
-![Connector Pinout](/img/connector.png)
+
+Which cable you need depends on the ACE generation:
+
+| ACE unit | Signals on the 4-pin connector | What you need |
+|----------|--------------------------------|---------------|
+| **ACE Pro (gen 1)** | Native USB data | 4-pin → USB-A data cable — build or buy one, see below |
+| **ACE 2 Pro** | RS-485 | The **KS1/K3 ACE2 conversion cable** (RS485-to-USB) from the Anycubic ACE2 KS1/K3 kit. A self-built USB cable will **not** work. |
+
+> **IMPORTANT (ACE 2 Pro):** A Kobra-X or KS1-MAX ACE2 cable will **not** work on a KS1/K3/RPi!
+> You need the KS1/K3 ACE2 conversion cable / RS485-to-USB adapter first.
+
+#### The original cable and connector genders
+
 Connect the ACE Pro to a regular USB port and configure the sensor pins according to your board layout.
-If using an ACE2 PRO, you need the KS1/K3 adapter cable which comes with the KS1/K3 ACE2 kit.
-The ACE2 PRO uses RS-485 natively; for connecting it to a KS1 or K3 (and RPi), a converter to USB is required, which Anycubic provides as part of the ACE2 KS1/K3 kit.
-IMPORTANT: If you have a Kobra-X or Anycubic KS1-MAX ACE2 PRO cable, that won't work! You need to buy a KS1/K3 ACE2 conversion cable / RS485-2-USB adapter first.
-![USB Adapter ((c) Gwebster)](/img/Ace2USB_gwebster.png)
+The stock Anycubic cable connects the ACE to the printer like this:
 
-Other variations to get a standard USB connection to the ACE can be found on printables.com:
+```
+  ACE unit                  original Anycubic cable                 printer
+┌──────────────┐    ┌────────────┐          ┌────────────┐    ┌──────────────┐
+│ 6-pin FEMALE │◄───┤ 6-pin MALE ├━━━━━━━━━━┤ 4-pin MALE ├───►│ 4-pin FEMALE │
+│    socket    │    │    plug    │          │    plug    │    │    socket    │
+└──────────────┘    └────────────┘          └────────────┘    └──────────────┘
+```
 
-https://www.printables.com/model/1163780-anycubic-ace-pro-usb-a-adapter
+> **Connector genders** here refer to the **plastic housing**: a **male** plug's housing
+> sticks out and carries metal **sockets** inside; a **female** connector's housing is
+> recessed and carries the metal **pins**. Don't let the metal parts confuse you.
 
-https://www.printables.com/model/1227630-anycubic-acepro-back-cover-for-usb-c
+There are two ways to give the ACE a standard USB-A connection — pick **one**:
+
+| | Variant A (adapt the printer end) | Variant B (adapt the ACE end) |
+|---|---|---|
+| Original cable | kept, unmodified | not used |
+| You build | 4-pin **female** → USB-A adapter | 6-pin **male** plug → USB-A cable |
+| Donor part | ACE extension cable (cut off one end) | 6-pin male plug / pigtail |
+
+Whichever variant you build, only **three wires** are connected: `D+`, `D-` and `GND`.
+**Never connect VBUS / 5V** — the ACE has its own power supply.
+
+#### Variant A — the "extension cable hack" (keep the original cable)
+
+The original cable stays untouched. Its 4-pin male plug (the end that normally goes
+into the printer) plugs into a small adapter you build: cut a 4-pin molex ACE
+**extension cable**, reuse the **female** side, and solder a USB-A connector to the
+cut end:
+
+```
+ ACE ──(original cable)── 4-pin MALE plug ──► │ 4-pin FEMALE ─── USB-A │
+                                              └──── you build this ────┘
+```
+
+```
+ 4-pin MALE plug                       4-pin FEMALE side
+ (on the original cable)               (your adapter, from ext. cable)
+ view: looking INTO the sockets,       view: looking INTO the pins,
+ latch tab on TOP                      latch tab on TOP
+
+       ┌───┐ latch                           ┌───┐ latch
+ ┌─────┴───┴─────┐                     ┌─────┴───┴─────┐
+ │   D-  │  D+   │                     │   D+  │  D-   │
+ ├───────┼───────┤                     ├───────┼───────┤
+ │   NC  │  GND  │                     │  GND  │  NC   │
+ └───────────────┘                     └───────────────┘
+
+ NC = not connected — never wire VBUS/5V to this pin.
+ The two faces are mirror images of each other.
+ This is expected for mating connectors, not a labeling error!
+
+ Orientation aids on the female face: the latch tab sits on TOP of the
+ housing, and a small molded ▲ sits top-center between D+ and D-.
+```
+
+```
+ USB-A plug
+ (view: looking INTO the plug, plastic insert at the BOTTOM)
+
+ ┌────────────────────────────┐
+ │  GND     D+     D-    VBUS │
+ │ pin 4   pin 3  pin 2  pin1 │
+ │                        ✗   │    ✗ = DO NOT CONNECT
+ └────────────────────────────┘
+```
+
+Wiring — identify pins **by position** (diagrams above), never by wire color:
+
+| ACE signal | USB-A pin |
+|------------|-----------|
+| `D+`  | pin 3 (`D+`) |
+| `D-`  | pin 2 (`D-`) |
+| `GND` | pin 4 (`GND`) |
+| NC    | pin 1 (`VBUS`) — leave unconnected on **both** sides |
+
+#### Variant B — build an adapter for the ACE socket directly
+
+This replaces the original cable entirely: a 6-pin male plug goes straight into the
+ACE's 6-pin female socket, with a USB-A cable soldered to it:
+
+```
+ ACE 6-pin FEMALE socket ──► │ 6-pin MALE plug ─── USB-A │
+                             └───── you build this ──────┘
+```
+
+Again only `D+`, `D-` and `GND` are wired, to the USB-A pins exactly as in the
+Variant A table:
+
+```
+ 6-pin MALE plug (goes into the ACE backport)
+ view: looking INTO the sockets, latch tab on TOP
+
+        ┌────┐ latch
+ ┌──────┴────┴─────────┐
+ │  D-  │  D+  │  --   │
+ ├──────┼──────┼───────┤
+ │  ✗   │ GND  │  --   │
+ └─────────────────────┘
+
+ ✗  = DO NOT CONNECT (power position)
+ -- = unused, no contact fitted
+```
+
+The signal block sits in the **left two columns** — the same 2×2 layout as the 4-pin
+plug above, plus an unused third column. The ACE's female backport socket is the
+mirror image of this face. If in doubt, cross-check by measuring **continuity**
+through the original cable from its documented 4-pin male end.
+
+> ⚠️ Wire colors in USB cables and pre-crimped pigtails **vary between manufacturers** — do not copy colors from photos.
+> After soldering, use a multimeter to verify the pin assignment and check for shorts **before** plugging anything in.
+
+Ready-made / printable adapter options on printables.com:
+
+- https://www.printables.com/model/1163780-anycubic-ace-pro-usb-a-adapter
+- https://www.printables.com/model/1227630-anycubic-acepro-back-cover-for-usb-c
+
+**Reference photos** (click to enlarge):
+
+| 4-pin male plug (original cable) | Adapter build photos, both variants ((c) Gwebster) |
+|:---:|:---:|
+| [<img src="img/connector.png" alt="Connector pinout photo" width="120">](img/connector.png) | [<img src="img/Ace2USB_gwebster.png" alt="USB adapter build photos" width="240">](img/Ace2USB_gwebster.png) |
 
 ## 📦 Installation
 
@@ -185,14 +326,52 @@ chmod +x installer.sh
 ./installer.sh
 ```
 
-The script will:
-- Prompt for your printer model (Kobra 3 or Kobra S1)
-- Create symlinks for the ACE module
-- Backup and install printer configuration
-- Copy printer_generic_macros.cfg to your config folder (with backup prompt)
-- Link ACE configuration and macro files
-- Optional: Install KlipperScreen panel
-- Optional: Restart Klipper service
+The installer shows a menu (similar to KIAUH): select your printer model first,
+then pick the components to install or update:
+
+- ACE driver (Klipper extras symlinks)
+- Generic config files (printer_generic_macros.cfg, ace_macros_generic.cfg)
+- printer.cfg for your printer model (off by default when one already exists)
+- ACE configuration (ace_<MODEL>.cfg)
+- Spoolman integration (spoolman_logic.cfg, off by default unless already installed)
+- Moonraker ACE status component
+- Dashboard files (Mainsail / Fluidd)
+- KlipperScreen (panel, core patch, KlipperScreen.conf entries)
+
+The main menu shows the detected install status of every component:
+
+```
+╔════════════════════════════════════════════════════════════╗
+║                 ACE Pro Driver — Installer                 ║
+╟────────────────────────────────────────────────────────────╢
+║ Printer:    Kobra 3                                        ║
+║ Config dir: ~/printer_data/config                          ║
+╟────────────────────────────────────────────────────────────╢
+║ 1) Install / Update     Driver:         Installed          ║
+║ 2) Select printer       Generic config: Installed          ║
+║ 3) Backups              printer.cfg:    Present            ║
+║ 4) Paths                ACE config:     Installed          ║
+║                         Spoolman:       Installed          ║
+║                         Moonraker:      Partial            ║
+║                         Mainsail dash:  Installed          ║
+║                         Fluidd dash:    Installed          ║
+║                         KlipperScreen:  Partial            ║
+╟────────────────────────────────────────────────────────────╢
+║ Q) Quit                                                    ║
+╚════════════════════════════════════════════════════════════╝
+```
+
+Every replaced file is backed up into `~/printer_data/config/acepro_backups/<timestamp>/`.
+The Backups menu can restore a previous run, prune old backups, and migrate
+legacy `*.backup_*` files out of the config root.
+
+For scripted/headless use there is a non-interactive mode:
+
+```bash
+./installer.sh --printer K3 --all              # everything, no questions
+./installer.sh --printer K3 --components driver,ace-config
+./installer.sh --help                          # all options
+```
 
 **Recommended for most users** - handles all steps including backups and conflict detection.
 
@@ -323,16 +502,19 @@ Configuration files are located in the `config/` folder. Choose the appropriate 
 ```
 config/
 ├── ace_K3.cfg                  # Kobra 3 ACE configuration
+├── ace_K3M.cfg                 # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg                 # Kobra S1 ACE configuration
 ├── ace_macros_generic.cfg      # Shared ACE macros for all printers
 ├── printer_generic_macros.cfg  # Shared printer macros (pause/resume/velocity/purge)
 ├── printer_K3.cfg              # Kobra 3 printer macros & settings
-└── printer_KS1.cfg             # Kobra S1 printer macros & settings
+├── printer_K3M.cfg             # Kobra K3M printer macros & settings (BETA)
+├── printer_KS1.cfg             # Kobra S1 printer macros & settings
+└── spoolman_logic.cfg          # Optional Spoolman ID mapping and tool hooks
 ```
 
 ### Include Hierarchy
 
-The configuration uses a modular include structure. The `printer_KS1.cfg` or `printer_K3.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
+The configuration uses a modular include structure. The `printer_KS1.cfg`, `printer_K3.cfg` or `printer_K3M.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
 
 **For Anycubic Kobra S1:**
 ```
@@ -585,7 +767,14 @@ Link `extras/temperature_ace.py` into Klipper extras (see installation) and rest
 
 ### Other `[ace]` options worth knowing
 
-- `tangle_detection` / `tangle_pump_time`: Enable ACE-side tangle detection (ACE Gen 1; default off; threshold 4.0 s, clamped to a 2.0 s minimum). Pauses the print when ACE has been pumping continuously past the threshold, i.e. feeding against a blockage at the spool. Reads the firmware-reported `cont_assist_time` field, so it only works while feed assist is active on the printing Gen 1 unit; it also runs inside the runout monitor loop and is therefore suspended whenever runout detection is (paused, toolchange, detection disabled). Toggle live during a print with `ACE_TANGLE_DETECTION ENABLE=0/1`, or uncomment `[output_pin TANGLE_DETECTION]` in the config example to get a Mainsail/Fluidd slider — when the slider is configured it is the source of truth, the command keeps it in sync.
+- `tangle_detection` / `tangle_pump_time` / `tangle_verify_time` / `tangle_pump_time_hard`: Enable ACE-side tangle detection (ACE 1 and ACE 2; **enabled by default in the shipped printer configs**, including a Mainsail/Fluidd dashboard slider — the bare code default is off for configs that don't set it). Reads the firmware-reported `cont_assist_time` field (ACE 2 reports milliseconds — normalized internally), so it only works while feed assist is active on the printing unit; it also runs inside the runout monitor loop and is therefore suspended whenever runout detection is (paused, toolchange, detection disabled). ACE 2's own firmware only detects blocked *commanded* feeds (slot LED flashes, `gear_err`); during printing it would pump against a tangle forever — hence host-side detection covers both generations.
+  A spool running out **at the ACE** pumps exactly like a tangle ("nothing left to push" vs "can't push"), so the slot presence state decides the verdict instead of pausing blindly:
+  - Slot reports **empty** → spool runout: the print keeps running on the remaining filament until the toolhead sensor triggers normal runout/endless-spool handling — no false tangle pause.
+  - **ACE 2** (slot state follows its sensor live): a `tangle_pump_time` crossing (default 5.0 s, clamped to 3.0 — ACE 2's starved-runout retry cycles up to ~3.9 s, so lower values sit inside that band) with a non-empty slot **is** a tangle → pause immediately, ~5 s after onset.
+  - **ACE 1** (slot state lags ~4 s behind the crossing): the crossing opens a `tangle_verify_time` verdict window (default 7.0 s); pumping reaching `tangle_pump_time_hard` (default 8.0 s, clamped to 6.5 — starved pumping is firmware-capped below it) or the window expiring with a non-empty slot pauses, ~8 s after onset.
+  **Tip — printing without endless spool?** Set `tangle_verify_time: 0` to pause right at the threshold (~5 s) on ACE 1 too. The cost is an occasional early, tangle-labeled pause when a spool runs out at the ACE (only when its starved pumping happens to cross the threshold before the firmware gives up) — harmless without endless spool, since that runout pauses the print anyway; with endless spool **on**, keep the window, or false pauses will interrupt the silent automatic swap.
+  Toggle live during a print with `ACE_TANGLE_DETECTION ENABLE=0/1` or the `TANGLE_DETECTION` slider — when the slider is configured it is the source of truth, the command keeps it in sync. To disable entirely: set `tangle_detection: False` and comment out the `[output_pin TANGLE_DETECTION]` block.
+- `disconnect_pause_timeout`: Seconds the ACE feeding the **active tool** may be continuously disconnected mid-print before the print is paused (default -1 = auto: 30 s for ACE 1, 5 s for ACE 2). ACE 2 clamps the filament whenever it is not actively feeding, so a dead ACE 2 starves the extruder within seconds; ACE 1 lets the extruder drag filament through and usually recovers from brief connection blips on its own. Set 0 to disable the fast path (the reconnect-count instability supervision still applies). Per-instance overridable, e.g. `30,1:5`. Requires `ace_connection_supervision` (default on).
 - `persistence_mode`: `deferred` (default) makes `set_and_save` defer disk writes until a safe `flush`; `immediate` writes to disk right away.
 - `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings).
 
