@@ -210,7 +210,11 @@ class TestGlobalEnableDisable(unittest.TestCase):
             'ace_global_enabled': True,
         }
         self.mock_save_vars.allVariables = self.variables
-        
+
+        # Configured [output_pin ACE_Pro] value seen at startup; individual
+        # tests override this to exercise the fresh-install config seed.
+        self.ace_pin_value = 1
+
         self.mock_config.get.side_effect = self._mock_config_get
         self.mock_config.getint.side_effect = self._mock_config_getint
         self.mock_config.getfloat.side_effect = self._mock_config_getfloat
@@ -223,7 +227,8 @@ class TestGlobalEnableDisable(unittest.TestCase):
             return self.mock_save_vars
         elif name == 'output_pin ACE_Pro':
             mock_pin = Mock()
-            mock_pin.get_status = Mock(return_value={'value': 1})
+            mock_pin.get_status = Mock(
+                return_value={'value': self.ace_pin_value})
             return mock_pin
         return default
 
@@ -294,6 +299,51 @@ class TestGlobalEnableDisable(unittest.TestCase):
             False
         )
         self.assertFalse(manager._ace_pro_enabled)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_fresh_install_config_pin_zero_disables_ace(
+            self, mock_endless_spool, mock_ace_instance):
+        """No saved state + [output_pin ACE_Pro] value:0 -> ACE disabled.
+
+        Regression: previously the enable state defaulted to True regardless of
+        the configured pin, so ACE tried to connect to absent hardware.
+        """
+        # Fresh install: nothing persisted yet.
+        self.variables.pop('ace_global_enabled', None)
+        self.ace_pin_value = 0
+
+        manager = AceManager(self.mock_config)
+
+        self.assertFalse(manager._ace_pro_enabled)
+        self.assertFalse(manager.get_ace_global_enabled())
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_fresh_install_config_pin_one_enables_ace(
+            self, mock_endless_spool, mock_ace_instance):
+        """No saved state + [output_pin ACE_Pro] value:1 -> ACE enabled."""
+        self.variables.pop('ace_global_enabled', None)
+        self.ace_pin_value = 1
+
+        manager = AceManager(self.mock_config)
+
+        self.assertTrue(manager._ace_pro_enabled)
+        self.assertTrue(manager.get_ace_global_enabled())
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_persisted_state_overrides_config_pin(
+            self, mock_endless_spool, mock_ace_instance):
+        """A persisted enable/disable wins over the configured pin value."""
+        # User has explicitly disabled ACE before; pin still configured on.
+        self.variables['ace_global_enabled'] = False
+        self.ace_pin_value = 1
+
+        manager = AceManager(self.mock_config)
+
+        self.assertFalse(manager._ace_pro_enabled)
+        self.assertFalse(manager.get_ace_global_enabled())
 
 
 class TestHandleReady(unittest.TestCase):
