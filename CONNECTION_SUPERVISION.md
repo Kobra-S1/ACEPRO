@@ -67,6 +67,13 @@ fewer, so the surplus unit kept a stale id from an earlier session).
 A late reply for a request that **timed out** (id never dispatched) is *not*
 a duplicate — it keeps the normal `UNSOLICITED` handling described above.
 
+**Broadcast exemption**: `DISCOVER_DEVICE` replies are never treated as
+duplicates. Discovery is a broadcast — every unit on the bus answers the
+same request id, so a second reply is expected data (the race loser) and is
+routed to the shared-bus demultiplexer, which records it as a present unit.
+Dropping it would blind discovery to all but the race winner (field-observed
+as an endless `found 1/2 ... will retry` loop with a correct `ace_count`).
+
 `duplicate_count` (last 30 s) is exposed in `get_connection_status()` under
 `supervision`, and `ACE_GET_CONNECTION_STATUS` appends it to the Layer-1
 line whenever it is non-zero:

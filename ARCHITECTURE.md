@@ -653,6 +653,10 @@ bus.
   toward Layer-1 comm supervision (see CONNECTION_SUPERVISION.md)
 - A late reply for a request that timed out (never dispatched) is NOT a
   duplicate and keeps the normal UNSOLICITED handling
+- `DISCOVER_DEVICE` replies are exempt: discovery is a broadcast, so a
+  second reply with the same request id is the race loser's answer -
+  expected discovery data that must reach the shared-bus demultiplexer
+  (which records it as a present unit), never a collision signal
 
 **Status Debug Logging on Shared Buses:**
 - With `status_debug_logging`, the serial manager's change-detection tracker
@@ -663,6 +667,11 @@ bus.
   `SLOT CHANGE ready <-> empty` on every heartbeat when two healthy units
   have different slot occupancy). Untagged (ACE1) responses keep the flat
   per-serial-manager state.
+- The `GET_STATUS raw_fields` dump is change-gated per device as well. This
+  is not cosmetic: at heartbeat rate the untracked flip-flop plus per-response
+  raw dumps produced ~10 `respond_info` lines/s, which saturated klippy's
+  gcode response pipe (field-observed `BlockingIOError [Errno 11]` in
+  `gcode._respond_raw`).
 
 **Protocol Configuration:**
 ```python

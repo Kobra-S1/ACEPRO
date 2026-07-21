@@ -1797,6 +1797,40 @@ class TestDuplicateResponseDetection:
         status = self.manager.get_connection_status()
         assert status["supervision"]["duplicate_count"] == 1
 
+    def test_broadcast_discover_reply_is_not_treated_as_duplicate(self):
+        """
+        Regression (hardware test log klippy(9)): DISCOVER_DEVICE is a
+        broadcast - every unit on the bus answers the SAME request id, so a
+        second reply is expected discovery data (the race loser), not an
+        identity collision. The duplicate filter ran before the unsolicited
+        router and swallowed exactly the reply the discovery capture needs:
+        with ace_count=2 the discovery loop then sat at 'found 1/2 ... will
+        retry' forever whenever one unit won both broadcasts.
+        """
+        cb = Mock()
+        with self.manager._lock:
+            self.manager._callback_map[3] = cb
+            self.manager.inflight[3] = 0.0
+        unsolicited_cb = Mock(return_value=True)
+        self.manager.set_unsolicited_response_callback(unsolicited_cb)
+
+        loser_reply = {
+            "id": 3,
+            "command": "DISCOVER_DEVICE",
+            "result": {"uid1": 44, "uid2": 55, "uid3": 66},
+        }
+        self._read_frames(
+            {"id": 3, "command": "DISCOVER_DEVICE",
+             "result": {"uid1": 11, "uid2": 22, "uid3": 33}},
+            loser_reply,
+        )
+
+        cb.assert_called_once()
+        unsolicited_cb.assert_called_once_with(loser_reply)
+        assert not any("DUPLICATE" in line for line in self._log_lines()), \
+            "broadcast race-loser reply was dropped as a duplicate instead " \
+            "of reaching the discovery capture"
+
     def test_never_dispatched_id_stays_generic_unsolicited(self):
         """A late reply for a timed-out request has no dispatched id on
         record - it must keep today's UNSOLICITED handling, not be
@@ -1880,6 +1914,41 @@ class TestSharedBusStatusDebugDemux:
             f"{len(changes)}: interleaved device streams are tracked as one "
             f"device and flip-flop on every heartbeat: {changes}"
         )
+
+    def test_raw_fields_dump_is_change_gated(self):
+        """
+        Regression (2xACE2 field log #2): the GET_STATUS raw_fields dump was
+        logged for EVERY response - with two units that is 2 respond_info
+        lines/sec forever, which (together with the flip-flop lines) saturated
+        the gcode response pipe until BlockingIOError [Errno 11] in
+        gcode._respond_raw. The dump must only be emitted when the payload
+        actually changed for that device.
+        """
+        response = self._status_response(1, "ready")
+        response["result"]["raw_fields"] = {1: [(0, 1)], 9: [(2, b'\x10\x02')]}
+
+        for _ in range(3):
+            self.manager._status_update_callback(response)
+
+        raw_lines = [
+            args[0] for args, _ in self.mock_gcode.respond_info.call_args_list
+            if "raw_fields" in args[0]
+        ]
+        assert len(raw_lines) == 1, (
+            f"unchanged raw_fields dumped {len(raw_lines)} times - floods the "
+            f"console/response pipe at heartbeat rate"
+        )
+
+        # A real change must still be dumped
+        changed = self._status_response(1, "ready")
+        changed["result"]["raw_fields"] = {1: [(0, 1)], 9: [(2, b'')]}
+        self.manager._status_update_callback(changed)
+
+        raw_lines = [
+            args[0] for args, _ in self.mock_gcode.respond_info.call_args_list
+            if "raw_fields" in args[0]
+        ]
+        assert len(raw_lines) == 2
 
     def test_untagged_responses_keep_flat_state_tracking(self):
         """ACE1 responses carry no device_id - the legacy flat attributes

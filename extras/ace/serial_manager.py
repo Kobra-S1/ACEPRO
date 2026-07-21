@@ -129,6 +129,7 @@ class AceSerialManager:
         self.last_temp = None
         self.last_feed_assist_count = None
         self.last_cont_assist_time = None
+        self.last_raw_fields = None
         # Shared-bus responses are tagged with a device_id; their debug
         # change-detection state lives here per device so the interleaved
         # status streams of multiple units don't false-flip against one
@@ -1242,6 +1243,14 @@ class AceSerialManager:
         if rid is None:
             return False
 
+        # DISCOVER_DEVICE is a broadcast: every unit on the bus answers the
+        # SAME request id, so a second reply is expected discovery data (the
+        # race loser), not an identity collision. It must flow on to the
+        # unsolicited demultiplexer, which records it as a present unit -
+        # dropping it here would blind discovery to all but the race winner.
+        if response.get('command') == 'DISCOVER_DEVICE':
+            return False
+
         now = self.reactor.monotonic()
         cutoff = now - self.RECENT_DISPATCH_WINDOW
         self._recently_dispatched_ids = {
@@ -1514,6 +1523,7 @@ class AceSerialManager:
                 last_temp=None,
                 last_feed_assist_count=None,
                 last_cont_assist_time=None,
+                last_raw_fields=None,
             )
             self._device_debug_states[device_id] = state
         return state
@@ -1558,10 +1568,14 @@ class AceSerialManager:
         if current_status is None:
             return
 
-        if raw_fields is not None:
+        # Change-gated: at heartbeat rate an unconditional dump floods the
+        # gcode response pipe (field-observed BlockingIOError in _respond_raw
+        # with two ACE2 units at 1 Hz each)
+        if raw_fields is not None and raw_fields != state.last_raw_fields:
             self.gcode.respond_info(
                 f"{label}: GET_STATUS raw_fields: {raw_fields}"
             )
+            state.last_raw_fields = raw_fields
 
         # Detect overall status/action change
         status_changed = (current_status != state.last_status or
