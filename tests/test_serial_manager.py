@@ -1652,10 +1652,11 @@ class TestDispatchResponse:
         """Create serial manager for dispatch testing."""
         with patch('ace.serial_manager.serial'):
             from ace.serial_manager import AceSerialManager
-            
+
             self.mock_gcode = Mock()
             self.mock_reactor = Mock()
-            
+            self.mock_reactor.monotonic = Mock(return_value=0.0)
+
             self.manager = AceSerialManager(
                 gcode=self.mock_gcode,
                 reactor=self.mock_reactor,
@@ -1693,9 +1694,212 @@ class TestDispatchResponse:
         """Dispatch should handle response without ID."""
         response = {"result": "ok"}  # No ID
         cb, was_solicited = self.manager.dispatch_response(response)
-        
+
         assert cb is None
         assert was_solicited is False
+
+
+class TestDuplicateResponseDetection:
+    """
+    Regression (2xACE2 field log): two units sharing one bus device_id both
+    answer every targeted request. The first reply consumes the callback; the
+    second reply for the SAME request id used to be routed as a generic
+    unsolicited response - feeding contradictory status/inventory from the
+    ghost unit into runtime state (slot flip-flop, RFID churn) and hiding the
+    identity collision. A reply for an already-answered request id must be
+    recognized as a duplicate, dropped (never routed), and surfaced as a
+    device_id-collision warning.
+    """
+
+    def setup_method(self):
+        with patch('ace.serial_manager.serial'):
+            from ace.serial_manager import AceSerialManager
+
+            self.mock_gcode = Mock()
+            self.mock_reactor = Mock()
+            self.mock_reactor.NOW = 10.0
+            self.mock_reactor.NEVER = 999.0
+            self.mock_reactor.register_timer = Mock()
+            self.mock_reactor.monotonic = Mock(return_value=100.0)
+
+            self.manager = AceSerialManager(
+                gcode=self.mock_gcode,
+                reactor=self.mock_reactor,
+                instance_num=0,
+                ace_enabled=True
+            )
+        self.manager._serial = Mock()
+        self.manager._status_update_callback = Mock()
+        self.manager.read_buffer = bytearray()
+        # get_connection_status() calls ensure_connect_timer(); a scheduled
+        # timer keeps it from disconnect()ing (which wipes the counters)
+        self.manager.connect_timer = Mock()
+
+    def _make_frame(self, payload_dict):
+        payload = json.dumps(payload_dict).encode('utf-8')
+        crc = struct.pack('<H', self.manager._calc_crc(payload))
+        return b'\xFF\xAA' + struct.pack('<H', len(payload)) + payload + crc + b'\xFE'
+
+    def _read_frames(self, *payloads):
+        frames = b''.join(self._make_frame(p) for p in payloads)
+        self.manager._serial.read.return_value = frames
+        self.manager._reader(eventtime=1.0)
+
+    def _log_lines(self):
+        return [args[0] for args, _ in self.mock_gcode.respond_info.call_args_list]
+
+    def test_duplicate_reply_is_dropped_and_flagged(self):
+        cb = Mock()
+        with self.manager._lock:
+            self.manager._callback_map[7] = cb
+            self.manager.inflight[7] = 0.0
+        unsolicited_cb = Mock(return_value=True)
+        self.manager.set_unsolicited_response_callback(unsolicited_cb)
+
+        # Both units answer request 7: first reply solicited, second duplicate
+        self._read_frames(
+            {"id": 7, "command": "GET_STATUS", "result": "unit-a"},
+            {"id": 7, "command": "GET_STATUS", "result": "unit-b"},
+        )
+
+        cb.assert_called_once()
+        unsolicited_cb.assert_not_called()
+        assert any("DUPLICATE" in line and "ID=7" in line for line in self._log_lines()), \
+            "duplicate reply was not flagged as DUPLICATE"
+
+    def test_duplicate_reply_warns_about_device_id_collision(self):
+        cb = Mock()
+        with self.manager._lock:
+            self.manager._callback_map[7] = cb
+            self.manager.inflight[7] = 0.0
+
+        self._read_frames(
+            {"id": 7, "command": "GET_STATUS", "result": "unit-a"},
+            {"id": 7, "command": "GET_STATUS", "result": "unit-b"},
+        )
+
+        assert any("device_id" in line and "collision" in line for line in self._log_lines()), \
+            "no identity-collision warning was emitted for a duplicate reply"
+
+    def test_duplicate_replies_count_toward_comm_supervision(self):
+        cb = Mock()
+        with self.manager._lock:
+            self.manager._callback_map[7] = cb
+            self.manager.inflight[7] = 0.0
+
+        self._read_frames(
+            {"id": 7, "command": "GET_STATUS", "result": "unit-a"},
+            {"id": 7, "command": "GET_STATUS", "result": "unit-b"},
+        )
+
+        assert len(self.manager._comm_unsolicited_timestamps) == 1, \
+            "duplicate reply must still count toward Layer-1 comm supervision"
+        status = self.manager.get_connection_status()
+        assert status["supervision"]["duplicate_count"] == 1
+
+    def test_never_dispatched_id_stays_generic_unsolicited(self):
+        """A late reply for a timed-out request has no dispatched id on
+        record - it must keep today's UNSOLICITED handling, not be
+        misreported as a collision."""
+        self._read_frames({"id": 55, "command": "GET_STATUS", "result": "late"})
+
+        lines = self._log_lines()
+        assert any("UNSOLICITED" in line and "ID=55" in line for line in lines)
+        assert not any("DUPLICATE" in line for line in lines)
+
+    def test_dispatched_id_expires_from_duplicate_window(self):
+        cb = Mock()
+        with self.manager._lock:
+            self.manager._callback_map[7] = cb
+            self.manager.inflight[7] = 0.0
+
+        self._read_frames({"id": 7, "command": "GET_STATUS", "result": "unit-a"})
+
+        # Second reply arrives long after the duplicate-detection window
+        self.mock_reactor.monotonic.return_value = 100.0 + self.manager.RECENT_DISPATCH_WINDOW + 1.0
+        self._read_frames({"id": 7, "command": "GET_STATUS", "result": "unit-b"})
+
+        lines = self._log_lines()
+        assert any("UNSOLICITED" in line and "ID=7" in line for line in lines)
+        assert not any("DUPLICATE" in line for line in lines)
+
+
+class TestSharedBusStatusDebugDemux:
+    """
+    Regression (2xACE2 field log #2, ace_count=2): on a shared bus the debug
+    status tracker receives the interleaved GET_STATUS streams of every unit
+    but kept ONE flat last-state - two healthy units with different slot
+    occupancy produced a false 'SLOT CHANGE ready <-> empty' flip on every
+    heartbeat (126 flips in ~5 min), labeled as one device. Change detection
+    must be keyed by the response's device_id.
+    """
+
+    def setup_method(self):
+        with patch('ace.serial_manager.serial'):
+            from ace.serial_manager import AceSerialManager
+
+            self.mock_gcode = Mock()
+            self.mock_reactor = Mock()
+            self.mock_reactor.monotonic = Mock(return_value=100.0)
+
+            self.manager = AceSerialManager(
+                gcode=self.mock_gcode,
+                reactor=self.mock_reactor,
+                instance_num=0,
+                ace_enabled=True
+            )
+
+    def _status_response(self, device_id, slot2_status):
+        return {
+            "id": 1,
+            "command": "GET_STATUS",
+            "device_id": device_id,
+            "result": {
+                "status": "ready",
+                "action": "none",
+                "temp": 25,
+                "slots": [{"index": 2, "status": slot2_status}],
+            },
+        }
+
+    def _change_lines(self):
+        return [
+            args[0] for args, _ in self.mock_gcode.respond_info.call_args_list
+            if "SLOT[2] CHANGE" in args[0]
+        ]
+
+    def test_interleaved_device_status_streams_do_not_flip_flop(self):
+        # Two heartbeat rounds of two healthy units with different occupancy
+        for _ in range(2):
+            self.manager._status_update_callback(self._status_response(1, "ready"))
+            self.manager._status_update_callback(self._status_response(2, "empty"))
+
+        changes = self._change_lines()
+        assert len(changes) == 2, (
+            "expected one initial SLOT CHANGE per device (baseline), got "
+            f"{len(changes)}: interleaved device streams are tracked as one "
+            f"device and flip-flop on every heartbeat: {changes}"
+        )
+
+    def test_untagged_responses_keep_flat_state_tracking(self):
+        """ACE1 responses carry no device_id - the legacy flat attributes
+        must keep working (existing tests and tools poke them directly)."""
+        response = {
+            "id": 1,
+            "result": {
+                "status": "busy",
+                "action": "feeding",
+                "temp": 25,
+                "slots": [],
+            },
+        }
+        self.manager.last_status = "ready"
+        self.manager.last_action = "none"
+
+        self.manager._status_update_callback(response)
+
+        assert self.manager.last_status == "busy"
+        assert self.manager.last_action == "feeding"
 
 
 class TestOnConnectCallback:

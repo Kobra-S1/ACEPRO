@@ -3411,6 +3411,29 @@ class AceManager:
 
     def _handle_shared_bus_unsolicited(self, bus_session, response):
         """Route unmatched ACE2 shared-bus responses to their logical instance."""
+        # DISCOVER_DEVICE is a broadcast: with multiple units on one bus, all
+        # of them answer, but only the first reply reaches the discovery
+        # callback - the others land here (they carry no device_id, so the
+        # routing below can never claim them). Record them as present so
+        # discovery sees every unit that really answered this cycle instead
+        # of leaving the race loser invisible - an invisible unit keeps its
+        # stale device_id and answers as a ghost on another unit's identity.
+        if response.get("command") == "DISCOVER_DEVICE":
+            result = response.get("result")
+            if not isinstance(result, dict):
+                return False
+            device = bus_session.note_present_device(
+                result.get("uid1", 0),
+                result.get("uid2", 0),
+                result.get("uid3", 0),
+            )
+            logging.info(
+                "ACE: shared-bus DISCOVER_DEVICE reply (broadcast race loser) "
+                "recorded as present unit UID=%s",
+                device.identity.uid_tuple,
+            )
+            return True
+
         device_id = response.get("device_id")
         if not device_id:
             return False
@@ -3473,7 +3496,6 @@ class AceManager:
         # supposed to be here; anything less than that is incomplete and
         # must be retried by the caller, never silently accepted.
         expected_count = len(shared_instances)
-        discovered_devices = []
         misses = 0
         for _ in range(expected_count):
             response = self._send_shared_bus_request(
@@ -3485,33 +3507,56 @@ class AceManager:
                 continue
 
             result = response["result"]
-            device = bus_session.note_present_device(
+            bus_session.note_present_device(
                 result.get("uid1", 0),
                 result.get("uid2", 0),
                 result.get("uid3", 0),
             )
-            discovered_devices.append(device)
+
+        # All units that provably answered this cycle. This includes replies
+        # that missed their solicited callback (broadcast race losers, late
+        # frames) and were captured by _handle_shared_bus_unsolicited - on a
+        # multi-unit bus every DISCOVER broadcast is answered by every unit,
+        # so callback-delivered replies alone systematically undercount.
+        present_devices = list(bus_session.iter_present_devices())
 
         # Record how many distinct ACE2 units actually answered this cycle -
         # the ground truth used by over-subscription self-heal (Direction B):
         # if more logical instances are bound to this bus than units exist, the
         # surplus were mis-assigned (e.g. a missing ACE1 absorbed by the shared
         # bus at startup) and get handed back to a dedicated transport.
-        self._last_discovered_unit_count[id(bus_session)] = len(
-            list(bus_session.iter_present_devices())
-        )
+        self._last_discovered_unit_count[id(bus_session)] = len(present_devices)
 
-        if not discovered_devices:
+        if not present_devices:
             self.gcode.respond_info(
                 f"ACE[{instance.instance_num}]: ACE2 discovery returned no devices on shared bus"
             )
             return 0
 
-        if misses:
+        if len(present_devices) < expected_count:
             self.gcode.respond_info(
                 f"ACE[{instance.instance_num}]: ACE2 discovery found "
-                f"{len(discovered_devices)}/{expected_count} expected units "
+                f"{len(present_devices)}/{expected_count} expected units "
                 f"({misses} unanswered) - will retry until all are found"
+            )
+        elif len(present_devices) > expected_count:
+            # More physical units than the config declares. Left alone, the
+            # surplus unit would keep whatever device_id it had before - in
+            # the field that was another unit's id, so both answered every
+            # targeted request: contradictory status/inventory, RS-485 frame
+            # collisions, endless reconnects. The assignment plan below hands
+            # every present unit a distinct id, which stops the collision,
+            # but the surplus unit stays unused until ace_count matches.
+            uid_list = ", ".join(
+                str(device.identity.uid_tuple) for device in present_devices
+            )
+            self.gcode.respond_info(
+                f"ACE[{instance.instance_num}]: WARNING: "
+                f"{len(present_devices)} ACE2 units answered discovery but "
+                f"'ace_count' expects only {expected_count} (UIDs: {uid_list}). "
+                f"The surplus unit(s) get a spare device id so they stop "
+                f"colliding on the bus, but they stay unused - update "
+                f"'ace_count' in the [ace] config if all units should be active."
             )
 
         # Fill only still-unbound logical instances, using only units that

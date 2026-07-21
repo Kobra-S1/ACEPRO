@@ -521,9 +521,13 @@ def cmd_ACE_GET_CONNECTION_STATUS(gcmd):
 
             health_status = "healthy" if (timeout_cnt < timeout_thr or unsol_cnt < unsol_thr) else "UNHEALTHY"
             sup_status = "enabled" if sup_enabled else "disabled"
+            # Duplicate replies = two units answering one device_id (identity
+            # collision); only shown when present so the healthy case stays clean
+            dup_cnt = sup.get("duplicate_count", 0)
+            dup_info = f", {dup_cnt} duplicates (device_id collision!)" if dup_cnt else ""
             lines.append(
                 f"  ├─ Layer 1 - Serial Health: {health_status} ({sup_status}) - "
-                f"{timeout_cnt}/{timeout_thr} timeouts, {unsol_cnt}/{unsol_thr} unsolicited (last {int(sup_window)}s)"
+                f"{timeout_cnt}/{timeout_thr} timeouts, {unsol_cnt}/{unsol_thr} unsolicited (last {int(sup_window)}s){dup_info}"
             )
 
             # Layer 2: Exponential Backoff

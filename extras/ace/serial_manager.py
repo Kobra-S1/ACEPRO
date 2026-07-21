@@ -16,6 +16,7 @@ import queue
 import logging
 import traceback
 import re
+from types import SimpleNamespace
 from serial import SerialException
 import serial.tools.list_ports
 
@@ -128,6 +129,12 @@ class AceSerialManager:
         self.last_temp = None
         self.last_feed_assist_count = None
         self.last_cont_assist_time = None
+        # Shared-bus responses are tagged with a device_id; their debug
+        # change-detection state lives here per device so the interleaved
+        # status streams of multiple units don't false-flip against one
+        # flat last-state. Untagged (ACE1) responses keep the flat
+        # attributes above.
+        self._device_debug_states = {}
 
         self._ace_pro_enabled = ace_enabled
         self._status_debug_logging = bool(status_debug_logging)
@@ -168,6 +175,17 @@ class AceSerialManager:
         self._comm_unsolicited_timestamps = []  # List of unsolicited message times
         self._last_supervision_check = 0.0      # Last time we checked health
         self.SUPERVISION_CHECK_INTERVAL = 5.0   # Check every 5 seconds
+
+        # Duplicate-response detection: a reply for a request id that was
+        # already answered can only come from a second device answering on
+        # the same bus identity (ACE2 device_id collision) or a firmware
+        # retransmit. Such replies must never reach runtime state - which of
+        # the two devices they came from is unknowable.
+        self.RECENT_DISPATCH_WINDOW = 30.0      # Remember answered ids this long
+        self.DUPLICATE_WARN_INTERVAL = 60.0     # Rate limit for collision warning
+        self._recently_dispatched_ids = {}      # rid -> monotonic dispatch time
+        self._comm_duplicate_timestamps = []    # Duplicate reply times (health stats)
+        self._last_duplicate_warn_time = None
 
     def enable_ace_pro(self):
         """Enable ACE Pro and reconnect if not connected."""
@@ -732,6 +750,8 @@ class AceSerialManager:
                 # Clear supervision counters on successful connection
                 self._comm_timeout_timestamps = []
                 self._comm_unsolicited_timestamps = []
+                self._comm_duplicate_timestamps = []
+                self._recently_dispatched_ids = {}
 
                 # Call on_connect callback if registered
                 callbacks = []
@@ -790,6 +810,8 @@ class AceSerialManager:
         # Clear supervision counters on disconnect
         self._comm_timeout_timestamps = []
         self._comm_unsolicited_timestamps = []
+        self._comm_duplicate_timestamps = []
+        self._recently_dispatched_ids = {}
 
         # Stop writer timer
         if self.writer_timer:
@@ -998,6 +1020,8 @@ class AceSerialManager:
 
         timeout_count = len(self._comm_timeout_timestamps)
         unsolicited_count = len(self._comm_unsolicited_timestamps)
+        self._comm_duplicate_timestamps = [t for t in self._comm_duplicate_timestamps if t > cutoff]
+        duplicate_count = len(self._comm_duplicate_timestamps)
         time_since_check = now - self._last_supervision_check
 
         return {
@@ -1015,6 +1039,7 @@ class AceSerialManager:
                 "timeout_threshold": self.COMM_TIMEOUT_THRESHOLD,
                 "unsolicited_count": unsolicited_count,
                 "unsolicited_threshold": self.COMM_UNSOLICITED_THRESHOLD,
+                "duplicate_count": duplicate_count,
                 "window_seconds": self.COMM_SUPERVISION_WINDOW,
                 "check_interval": self.SUPERVISION_CHECK_INTERVAL,
                 "time_since_check": time_since_check,
@@ -1192,7 +1217,62 @@ class AceSerialManager:
                 if cb:
                     self.inflight.pop(rid, None)
 
+        if cb is not None:
+            now = self.reactor.monotonic()
+            cutoff = now - self.RECENT_DISPATCH_WINDOW
+            self._recently_dispatched_ids = {
+                r: t for r, t in self._recently_dispatched_ids.items() if t > cutoff
+            }
+            self._recently_dispatched_ids[rid] = now
+
         return cb, cb is not None
+
+    def _handle_duplicate_response(self, response):
+        """Detect and absorb a second reply to an already-answered request.
+
+        Returns True if the response duplicates a recently dispatched request
+        id. On an ACE2 shared bus this is the signature of two units holding
+        the same device_id (bus identity collision): both answer every
+        targeted request, the first reply consumes the callback and the
+        second lands here. The duplicate is dropped - its payload may come
+        from either unit, so routing it into runtime state would corrupt
+        status/inventory with the ghost unit's data.
+        """
+        rid = response.get('id')
+        if rid is None:
+            return False
+
+        now = self.reactor.monotonic()
+        cutoff = now - self.RECENT_DISPATCH_WINDOW
+        self._recently_dispatched_ids = {
+            r: t for r, t in self._recently_dispatched_ids.items() if t > cutoff
+        }
+        if rid not in self._recently_dispatched_ids:
+            return False
+
+        self._comm_duplicate_timestamps.append(now)
+        comm_cutoff = now - self.COMM_SUPERVISION_WINDOW
+        self._comm_duplicate_timestamps = [
+            t for t in self._comm_duplicate_timestamps if t > comm_cutoff
+        ]
+        # A duplicate is also an out-of-sync signal for Layer-1 supervision
+        self._track_comm_unsolicited()
+
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: DUPLICATE response "
+            f"(ID={rid}, command={response.get('command', 'n/a')}): "
+            f"request was already answered - dropping"
+        )
+        if (self._last_duplicate_warn_time is None
+                or now - self._last_duplicate_warn_time >= self.DUPLICATE_WARN_INTERVAL):
+            self._last_duplicate_warn_time = now
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: WARNING: duplicate responses mean "
+                f"two ACE units are answering on the same bus device_id "
+                f"(identity collision) - check that 'ace_count' matches the "
+                f"number of connected ACE units"
+            )
+        return True
 
     def set_heartbeat_callback(self, callback):
         """
@@ -1395,6 +1475,10 @@ class AceSerialManager:
                 except Exception as e:
                     self.gcode.respond_info(f"ACE[{self.instance_num}]: Callback error: {e}")
             else:
+                # A second reply to an already-answered request must never be
+                # routed anywhere (device_id collision - sender unknowable)
+                if self._handle_duplicate_response(ret):
+                    continue
                 # Try unsolicited callback first
                 if self.unsolicited_response_callback and self.unsolicited_response_callback(ret):
                     continue
@@ -1407,6 +1491,33 @@ class AceSerialManager:
 
         return eventtime + 0.05
 
+    def _get_status_debug_state(self, device_id):
+        """Return the change-detection state holder for one status stream.
+
+        Shared-bus responses are tagged with a device_id: each device gets
+        its own state so the interleaved streams of multiple units don't
+        false-flip against one flat last-state (two healthy units with
+        different slot occupancy would otherwise log a slot change on every
+        heartbeat). Untagged (ACE1) responses keep using the flat attributes
+        on self.
+        """
+        if device_id is None:
+            return self
+        state = self._device_debug_states.get(device_id)
+        if state is None:
+            state = SimpleNamespace(
+                last_status=None,
+                last_action=None,
+                last_slot_states={},
+                last_slot_payloads={},
+                last_dryer_status=None,
+                last_temp=None,
+                last_feed_assist_count=None,
+                last_cont_assist_time=None,
+            )
+            self._device_debug_states[device_id] = state
+        return state
+
     def _status_update_callback(self, response):
         """
         Handle status updates with detailed change detection.
@@ -1417,6 +1528,9 @@ class AceSerialManager:
         - Individual slot status
         - Dryer status
         - Temperature changes
+
+        Change detection is tracked per shared-bus device_id (see
+        _get_status_debug_state).
         """
         if not response or "result" not in response:
             return
@@ -1424,6 +1538,12 @@ class AceSerialManager:
         result = response.get("result")
         if not result:
             return
+
+        device_id = response.get("device_id")
+        state = self._get_status_debug_state(device_id)
+        label = f"ACE[{self.instance_num}]"
+        if device_id is not None:
+            label = f"ACE[{self.instance_num}][dev {device_id}]"
 
         # Extract current state
         current_status = result.get("status")
@@ -1440,36 +1560,36 @@ class AceSerialManager:
 
         if raw_fields is not None:
             self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: GET_STATUS raw_fields: {raw_fields}"
+                f"{label}: GET_STATUS raw_fields: {raw_fields}"
             )
 
         # Detect overall status/action change
-        status_changed = (current_status != self.last_status or
-                          current_action != self.last_action)
+        status_changed = (current_status != state.last_status or
+                          current_action != state.last_action)
 
         if status_changed:
-            last_display = f"{self.last_status}/{self.last_action}" if self.last_status else 'unknown'
+            last_display = f"{state.last_status}/{state.last_action}" if state.last_status else 'unknown'
             self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: STATUS CHANGE: "
+                f"{label}: STATUS CHANGE: "
                 f"'{last_display}' -> '{current_status}/{current_action}'"
             )
-            self.last_status = current_status
-            self.last_action = current_action
+            state.last_status = current_status
+            state.last_action = current_action
 
         # Detect feed assist counters
-        if feed_assist_count is not None and feed_assist_count != self.last_feed_assist_count:
+        if feed_assist_count is not None and feed_assist_count != state.last_feed_assist_count:
             self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: FEED ASSIST COUNT: "
-                f"'{self.last_feed_assist_count}' -> '{feed_assist_count}'"
+                f"{label}: FEED ASSIST COUNT: "
+                f"'{state.last_feed_assist_count}' -> '{feed_assist_count}'"
             )
-            self.last_feed_assist_count = feed_assist_count
+            state.last_feed_assist_count = feed_assist_count
 
-        if cont_assist_time is not None and cont_assist_time != self.last_cont_assist_time:
+        if cont_assist_time is not None and cont_assist_time != state.last_cont_assist_time:
             self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: CONT ASSIST TIME: "
-                f"'{self.last_cont_assist_time}' -> '{cont_assist_time}'"
+                f"{label}: CONT ASSIST TIME: "
+                f"'{state.last_cont_assist_time}' -> '{cont_assist_time}'"
             )
-            self.last_cont_assist_time = cont_assist_time
+            state.last_cont_assist_time = cont_assist_time
 
         # Detect slot status changes
         for slot in slots:
@@ -1477,50 +1597,50 @@ class AceSerialManager:
             slot_status = slot.get("status", "unknown")
 
             if slot_idx is not None:
-                last_slot_status = self.last_slot_states.get(slot_idx)
+                last_slot_status = state.last_slot_states.get(slot_idx)
 
                 if slot_status != last_slot_status:
                     last_display = last_slot_status if last_slot_status else 'unknown'
                     self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: SLOT[{slot_idx}] CHANGE: "
+                        f"{label}: SLOT[{slot_idx}] CHANGE: "
                         f"'{last_display}' -> '{slot_status}'"
                     )
-                    self.last_slot_states[slot_idx] = slot_status
+                    state.last_slot_states[slot_idx] = slot_status
 
             # Detect any slot field change and dump full slot payload
             if slot_idx is not None:
-                last_payload = self.last_slot_payloads.get(slot_idx)
+                last_payload = state.last_slot_payloads.get(slot_idx)
                 if last_payload != slot:
                     slot_dump = json.dumps(slot, sort_keys=True)
                     self.gcode.respond_info(
-                        f"ACE[{self.instance_num}]: SLOT[{slot_idx}] DATA: {slot_dump}"
+                        f"{label}: SLOT[{slot_idx}] DATA: {slot_dump}"
                     )
-                    self.last_slot_payloads[slot_idx] = slot
+                    state.last_slot_payloads[slot_idx] = slot
 
         # Detect dryer status changes
         dryer_state = dryer_status.get("status", "stop")
-        if dryer_state != self.last_dryer_status:
+        if dryer_state != state.last_dryer_status:
             if dryer_state != "stop":
                 target_temp = dryer_status.get("target_temp", 0)
                 remain_time = dryer_status.get("remain_time", 0)
                 self.gcode.respond_info(
-                    f"ACE[{self.instance_num}]: DRYER: "
-                    f"'{self.last_dryer_status or 'stop'}' -> '{dryer_state}' "
+                    f"{label}: DRYER: "
+                    f"'{state.last_dryer_status or 'stop'}' -> '{dryer_state}' "
                     f"(target={target_temp}°C, remaining={remain_time}s)"
                 )
             else:
                 self.gcode.respond_info(
-                    f"ACE[{self.instance_num}]: DRYER: stopped"
+                    f"{label}: DRYER: stopped"
                 )
-            self.last_dryer_status = dryer_state
+            state.last_dryer_status = dryer_state
 
         # Detect significant temperature changes (>5°C)
-        if self.last_temp is not None:
-            temp_delta = abs(current_temp - self.last_temp)
+        if state.last_temp is not None:
+            temp_delta = abs(current_temp - state.last_temp)
             if temp_delta >= 5:
                 self.gcode.respond_info(
-                    f"ACE[{self.instance_num}]: TEMP CHANGE: "
-                    f"{self.last_temp}°C -> {current_temp}°C "
+                    f"{label}: TEMP CHANGE: "
+                    f"{state.last_temp}°C -> {current_temp}°C "
                     f"(Δ{temp_delta:+.1f}°C)"
                 )
-        self.last_temp = current_temp
+        state.last_temp = current_temp

@@ -38,6 +38,43 @@ ace_connection_supervision: False  # Disables this AND manager supervision
 - Counters cleared on disconnect
 - Old events (>30s) automatically pruned
 
+### Duplicate-Response Detection (ACE2 bus identity collision)
+
+**What it monitors**: Replies arriving for a request id that was **already answered**.
+
+The serial manager remembers every request id it dispatched a reply for during
+the last 30 s (`RECENT_DISPATCH_WINDOW`). A second reply carrying one of those
+ids can only come from a second device answering on the same bus identity —
+on an ACE2 shared bus that is the signature of **two units holding the same
+`device_id`** (e.g. two physical units chained while `ace_count` declares
+fewer, so the surplus unit kept a stale id from an earlier session).
+
+**What happens on a duplicate**:
+1. The reply is **dropped before any routing** — it is never delivered to the
+   unsolicited demultiplexer or any runtime callback. Which of the two devices
+   sent it is unknowable, so its status/inventory payload cannot be trusted
+   (previously such replies flowed into runtime state and caused slot-state
+   flip-flops and RFID/inventory churn every heartbeat).
+2. Logged: `"ACE[X]: DUPLICATE response (ID=N, command=...): request was
+   already answered - dropping"`
+3. A rate-limited warning (max once per 60 s, `DUPLICATE_WARN_INTERVAL`)
+   explains the likely cause: `"duplicate responses mean two ACE units are
+   answering on the same bus device_id (identity collision) - check that
+   'ace_count' matches the number of connected ACE units"`
+4. The event also counts toward the Layer-1 unsolicited threshold, so a
+   sustained collision still forces the reconnection recovery path.
+
+A late reply for a request that **timed out** (id never dispatched) is *not*
+a duplicate — it keeps the normal `UNSOLICITED` handling described above.
+
+`duplicate_count` (last 30 s) is exposed in `get_connection_status()` under
+`supervision`, and `ACE_GET_CONNECTION_STATUS` appends it to the Layer-1
+line whenever it is non-zero:
+
+```
+  ├─ Layer 1 - Serial Health: healthy (enabled) - 0/15 timeouts, 4/15 unsolicited (last 30s), 4 duplicates (device_id collision!)
+```
+
 ---
 
 ## Layer 2: Exponential Backoff (Connection Retry)
@@ -162,6 +199,8 @@ ace_connection_supervision: False  # Disables this AND manager supervision
 | `COMM_TIMEOUT_THRESHOLD` | 15 | Timeouts to trigger reconnection |
 | `COMM_UNSOLICITED_THRESHOLD` | 15 | Unsolicited msgs to trigger reconnection |
 | `SUPERVISION_CHECK_INTERVAL` | 5s | How often to check communication health |
+| `RECENT_DISPATCH_WINDOW` | 30s | Remember answered request ids for duplicate detection |
+| `DUPLICATE_WARN_INTERVAL` | 60s | Rate limit for the identity-collision warning |
 
 ---
 
@@ -205,7 +244,29 @@ Time  Event
 12:15 Dialog auto-closes, user can resume
 ```
 
-### Scenario 3: Manual Reconnect Override
+### Scenario 3: Two ACE2 Units Answering as One device_id (Identity Collision)
+
+```
+Setup: 2 physical ACE2 Pro units daisy-chained, but ace_count = 1
+       (the surplus unit kept device_id 1 from an earlier session)
+
+Time  Event
+----  -----
+10:00 Discovery: both units answer the DISCOVER_DEVICE broadcast
+10:00 "WARNING: 2 ACE2 units answered discovery but 'ace_count' expects only 1
+       (UIDs: ...)" - surplus unit is assigned a spare device id
+10:00 If the surplus unit still answers on a colliding id:
+10:01 "DUPLICATE response (ID=42, command=GET_STATUS): request was already
+       answered - dropping"
+10:01 "WARNING: duplicate responses mean two ACE units are answering on the
+       same bus device_id (identity collision) - check that 'ace_count'
+       matches the number of connected ACE units"
+----  Duplicates are dropped (no slot flip-flop / inventory churn), and
+      sustained collisions still count toward Layer-1 forced reconnection.
+Fix:  Set ace_count to the real number of chained units.
+```
+
+### Scenario 4: Manual Reconnect Override
 
 ```
 User: ACE_RECONNECT INSTANCE=0 DELAY=2
