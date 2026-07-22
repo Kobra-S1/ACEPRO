@@ -3275,12 +3275,47 @@ class TestConnectionStatusCommand:
         })
         
         ace.commands.cmd_ACE_GET_CONNECTION_STATUS(self.mock_gcmd)
-        
+
         # Verify output
         calls = [str(call) for call in self.mock_gcmd.respond_info.call_args_list]
         output = "\n".join(calls)
         assert "Connected (stable)" in output
         assert "ACE[0]:" in output
+        # No duplicates -> no collision noise in the healthy display
+        assert "duplicate" not in output
+
+    def test_duplicate_responses_shown_in_layer1_health(self):
+        """
+        Hardware-diagnosis aid (2xACE2 identity collision): when duplicate
+        replies were detected (two units answering the same device_id), the
+        Layer-1 line of ACE_GET_CONNECTION_STATUS must surface the count so a
+        tester can verify the collision (or its absence) without grepping
+        klippy.log.
+        """
+        self.mock_instance.serial_mgr.get_connection_status = Mock(return_value={
+            "connected": True,
+            "stable": True,
+            "time_connected": 120.0,
+            "recent_reconnects": 0,
+            "port": "/dev/ttyACM0",
+            "usb_topology": "2-1.1",
+            "supervision": {
+                "timeout_count": 0,
+                "timeout_threshold": 15,
+                "unsolicited_count": 4,
+                "unsolicited_threshold": 15,
+                "duplicate_count": 4,
+                "window_seconds": 30,
+            }
+        })
+
+        ace.commands.cmd_ACE_GET_CONNECTION_STATUS(self.mock_gcmd)
+
+        calls = [str(call) for call in self.mock_gcmd.respond_info.call_args_list]
+        output = "\n".join(calls)
+        assert "4 duplicates" in output, (
+            "duplicate_count not surfaced in ACE_GET_CONNECTION_STATUS output"
+        )
 
     def test_connected_stabilizing_status(self):
         """Test status display when connection is stabilizing."""

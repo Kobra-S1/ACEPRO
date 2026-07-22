@@ -640,6 +640,39 @@ bus.
 - Helps diagnose timeout vs late-arrival issues
 - Not an error - ACE may respond slower than timeout window
 
+**Duplicate Response Handling (ACE2 identity collision):**
+- Request ids answered in the last 30 s are remembered
+  (`RECENT_DISPATCH_WINDOW`); a second reply for one of them is a
+  **duplicate** - on a shared bus that means two units answered the same
+  `device_id` (identity collision, e.g. a surplus unit with a stale id)
+- Duplicates are dropped **before** unsolicited routing: their payload could
+  come from either unit, so replaying them would corrupt status/inventory
+  (field symptom: slot-state flip-flop + RFID churn every heartbeat)
+- Logged as `DUPLICATE response (ID=..., command=...)` plus a rate-limited
+  warning pointing at an `ace_count` / physical-unit mismatch; counted
+  toward Layer-1 comm supervision (see CONNECTION_SUPERVISION.md)
+- A late reply for a request that timed out (never dispatched) is NOT a
+  duplicate and keeps the normal UNSOLICITED handling
+- `DISCOVER_DEVICE` replies are exempt: discovery is a broadcast, so a
+  second reply with the same request id is the race loser's answer -
+  expected discovery data that must reach the shared-bus demultiplexer
+  (which records it as a present unit), never a collision signal
+
+**Status Debug Logging on Shared Buses:**
+- With `status_debug_logging`, the serial manager's change-detection tracker
+  (`_status_update_callback`) keys its last-known state by the response's
+  `device_id` and tags log lines `ACE[n][dev N]:` - the interleaved 1 Hz
+  status streams of multiple ACE2 units on one bus would otherwise
+  false-flip against a single flat state (logging a bogus
+  `SLOT CHANGE ready <-> empty` on every heartbeat when two healthy units
+  have different slot occupancy). Untagged (ACE1) responses keep the flat
+  per-serial-manager state.
+- The `GET_STATUS raw_fields` dump is change-gated per device as well. This
+  is not cosmetic: at heartbeat rate the untracked flip-flop plus per-response
+  raw dumps produced ~10 `respond_info` lines/s, which saturated klippy's
+  gcode response pipe (field-observed `BlockingIOError [Errno 11]` in
+  `gcode._respond_raw`).
+
 **Protocol Configuration:**
 ```python
 DEFAULT_TIMEOUT_S = 5.0                 # Request timeout
@@ -708,6 +741,24 @@ assignment on shared transports. After connect, the manager issues
 into `Ace2BusSession`, binds them deterministically to logical instance numbers,
 and then sends `ASSIGN_DEVICE_ID` requests in that planned order. This keeps
 discovery/address assignment below `AceInstance`, where it belongs.
+
+`DISCOVER_DEVICE` is a broadcast: every unit on the bus answers every
+request, but only the first reply reaches the solicited callback. The
+race-losing replies (no `device_id`, so unroutable) are captured by the
+manager's unsolicited handler and recorded into `Ace2BusSession` as present
+units. Discovery therefore evaluates *everything the bus session saw this
+cycle*, not only callback-delivered replies - without this, a multi-unit bus
+systematically undercounts (the same unit tends to win every race) and the
+unseen unit keeps a stale device id, answering as a ghost on another unit's
+identity (duplicate replies, slot flip-flop, RS-485 collisions, endless
+reconnects - the 2xACE2 field failure).
+
+If **more** units answer discovery than `ace_count` declares, a loud warning
+names all UIDs and asks the user to update `ace_count`. The surplus unit
+still gets a distinct spare device id from the assignment plan so it stops
+colliding on the wire, but it stays unused. (The reverse case - more
+*instances* than units - is handled by the over-subscription self-heal,
+Direction B, below.)
 
 Those logical-instance bindings are now also persisted through `PersistentState`.
 On a fresh startup or reconnect, `AceManager` clears stale runtime discovery

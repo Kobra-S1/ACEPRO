@@ -513,8 +513,10 @@ class TestSharedAce2Transport(unittest.TestCase):
 
         self.mock_printer.lookup_object.side_effect = lookup
 
+        self.ace_count_value = 2
+
         def getint(key, default=None):
-            vals = {"ace_count": 2}
+            vals = {"ace_count": self.ace_count_value}
             val = vals.get(key, default)
             return int(val) if val is not None else default
 
@@ -567,12 +569,13 @@ class TestSharedAce2Transport(unittest.TestCase):
         inst.filament_runout_sensor_name_rdm = "return_module"
         return inst
 
-    def _build_manager(self):
+    def _build_manager(self, ace_count=2):
+        self.ace_count_value = ace_count
         with patch("ace.manager.AceInstance", side_effect=self._instance_factory), \
              patch("ace.manager.AceSerialManager", side_effect=self._serial_manager_factory), \
              patch("ace.manager.EndlessSpool"), \
              patch("ace.manager.RunoutMonitor"):
-            return AceManager(self.mock_config, dummy_ace_count=2)
+            return AceManager(self.mock_config, dummy_ace_count=ace_count)
 
     def test_manager_reuses_shared_transport_for_ace2_instances(self):
         manager = self._build_manager()
@@ -1199,6 +1202,165 @@ class TestSharedAce2Transport(unittest.TestCase):
         manager._queue_shared_bus_instance_setup.assert_not_called()
         manager._start_shared_bus_runtime.assert_not_called()
         self.assertIn(id(bus_session), manager._shared_bus_retry_timers)
+
+    def test_unsolicited_discover_reply_is_recorded_as_present_device(self):
+        """
+        Regression (2xACE2 field log): DISCOVER_DEVICE is a broadcast - with
+        multiple units on one bus, all of them answer, but only the first
+        reply reaches the discovery callback. The others arrive without a
+        device_id and used to be dropped as generic UNSOLICITED noise, so the
+        losing unit stayed invisible to discovery forever (and kept answering
+        with a stale device_id as a ghost). Unmatched DISCOVER_DEVICE replies
+        must be recorded into the bus session as present devices.
+        """
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+
+        handled = manager._handle_shared_bus_unsolicited(bus_session, {
+            "id": 1,
+            "command": "DISCOVER_DEVICE",
+            "flags": 128,
+            "result": {"uid1": 44, "uid2": 55, "uid3": 66},
+        })
+
+        self.assertTrue(handled, "unmatched DISCOVER_DEVICE reply was dropped")
+        present = [d.identity.uid_tuple for d in bus_session.iter_present_devices()]
+        self.assertEqual(present, [(44, 55, 66)])
+
+    def test_discovery_finds_unit_whose_broadcast_reply_lost_the_race(self):
+        """
+        Regression (2xACE2 field log): both units answer every DISCOVER
+        broadcast; the same unit wins the race each time. The loser's reply
+        surfaces via the unsolicited path. Discovery must still count it as
+        present, bind it, and give both units distinct device ids - otherwise
+        the cycle ends "found 1/2" and retries forever while the unseen unit
+        keeps a stale device_id.
+        """
+        manager = self._build_manager()
+        bus_session = manager.instances[0].bus_session
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        def send_high_prio_request(request, callback):
+            if request["command"] == "DISCOVER_DEVICE":
+                # Unit A wins the race on every broadcast...
+                callback({"result": {"uid1": 11, "uid2": 22, "uid3": 33}})
+                # ...unit B's answer arrives as an unmatched response
+                manager._handle_shared_bus_unsolicited(bus_session, {
+                    "id": 1,
+                    "command": "DISCOVER_DEVICE",
+                    "flags": 128,
+                    "result": {"uid1": 44, "uid2": 55, "uid3": 66},
+                })
+            else:
+                callback({"code": 0, "msg": "SUCCESS"})
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        ready_count = manager._initialize_shared_bus_transport(manager.instances[0])
+
+        self.assertEqual(ready_count, 2)
+        device0 = bus_session.get_device_for_instance(0)
+        device1 = bus_session.get_device_for_instance(1)
+        self.assertIsNotNone(device1, "race-losing unit was never bound")
+        self.assertEqual(device0.identity.uid_tuple, (11, 22, 33))
+        self.assertEqual(device1.identity.uid_tuple, (44, 55, 66))
+        self.assertNotEqual(device0.device_id, device1.device_id)
+
+    def test_discovery_completes_when_reply_arrives_via_unsolicited_path_only(self):
+        """
+        Regression (2xACE2 field log): the discovery callback can miss its
+        reply entirely (frame lost to a bus collision / reply late), while a
+        parseable DISCOVER_DEVICE answer still reaches the unsolicited path
+        in the same cycle. Discovery must use everything the bus session saw
+        this cycle, not only callback-delivered replies - previously this
+        ended as "returned no devices" although a unit provably answered.
+        """
+        manager = self._build_manager(ace_count=1)
+        bus_session = manager.instances[0].bus_session
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        def send_high_prio_request(request, callback):
+            if request["command"] == "DISCOVER_DEVICE":
+                manager._handle_shared_bus_unsolicited(bus_session, {
+                    "id": 1,
+                    "command": "DISCOVER_DEVICE",
+                    "flags": 128,
+                    "result": {"uid1": 11, "uid2": 22, "uid3": 33},
+                })
+                callback(None)  # the solicited wait itself times out
+            else:
+                callback({"code": 0, "msg": "SUCCESS"})
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        ready_count = manager._initialize_shared_bus_transport(manager.instances[0])
+
+        self.assertEqual(ready_count, 1)
+        device0 = bus_session.get_device_for_instance(0)
+        self.assertIsNotNone(device0)
+        self.assertEqual(device0.identity.uid_tuple, (11, 22, 33))
+        self.assertIsNotNone(device0.device_id)
+
+    def test_surplus_units_warn_and_get_distinct_device_ids(self):
+        """
+        Regression (2xACE2 field log): two physical units on the bus but
+        ace_count=1. Previously the surplus unit was invisible (its broadcast
+        reply dropped), never got its own device id, and kept answering with
+        a stale device_id 1 - duplicate replies, slot-state flip-flop, RS-485
+        collisions, endless reconnects. Required behavior: warn loudly that
+        more units answered than ace_count declares, and assign the surplus
+        unit a distinct device id so it stops colliding on the wire.
+        """
+        manager = self._build_manager(ace_count=1)
+        bus_session = manager.instances[0].bus_session
+        shared_serial_mgr = manager.instances[0].serial_mgr
+
+        def send_high_prio_request(request, callback):
+            if request["command"] == "DISCOVER_DEVICE":
+                callback({"result": {"uid1": 11, "uid2": 22, "uid3": 33}})
+                manager._handle_shared_bus_unsolicited(bus_session, {
+                    "id": 1,
+                    "command": "DISCOVER_DEVICE",
+                    "flags": 128,
+                    "result": {"uid1": 44, "uid2": 55, "uid3": 66},
+                })
+            else:
+                callback({"code": 0, "msg": "SUCCESS"})
+
+        shared_serial_mgr.send_high_prio_request.side_effect = send_high_prio_request
+
+        ready_count = manager._initialize_shared_bus_transport(manager.instances[0])
+
+        self.assertEqual(ready_count, 1)
+
+        warnings = [
+            args[0] for args, _ in self.mock_gcode.respond_info.call_args_list
+            if "ace_count" in args[0] and "2" in args[0]
+        ]
+        self.assertTrue(
+            warnings,
+            "no warning that more ACE2 units answered discovery than ace_count expects",
+        )
+
+        assign_requests = [
+            call_args[0][0]
+            for call_args in shared_serial_mgr.send_high_prio_request.call_args_list
+            if call_args[0][0]["command"] == "ASSIGN_DEVICE_ID"
+        ]
+        assigned = {
+            (r["params"]["uid1"], r["params"]["uid2"], r["params"]["uid3"]):
+                r["params"]["device_id"]
+            for r in assign_requests
+        }
+        self.assertIn((11, 22, 33), assigned)
+        self.assertIn(
+            (44, 55, 66),
+            assigned,
+            "surplus unit got no device id assignment - it stays a ghost "
+            "answering with its stale id and keeps colliding on the bus",
+        )
+        self.assertNotEqual(assigned[(11, 22, 33)], assigned[(44, 55, 66)])
+
 
 class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
     """Coverage for prepare_toolhead_for_filament_retraction."""
