@@ -79,7 +79,8 @@ Usage: $0 [options]
 Without options an interactive menu is shown.
 
 Options:
-  --printer MODEL          Printer model (e.g. K3, KS1, K3M)
+  --printer MODEL          Printer model (e.g. K3, KS1, K3M, KS1M)
+                           K3M is BETA, KS1M is ALPHA and untested on hardware
   --all                    Select all components (non-interactive install)
   --components LIST        Comma separated component list (non-interactive):
                              driver, generic, printer-config, ace-config,
@@ -162,6 +163,21 @@ set_printer() {
     local model="$1"
     PRINTER_MODEL="$model"
     PRINTER_NAME=$(printer_display_name "$model")
+
+    local warning
+    warning=$(printer_maturity_warning "$model")
+    if [ -n "$warning" ]; then
+        echo
+        print_warning "$PRINTER_NAME"
+        while IFS= read -r line; do
+            print_warning "  $line"
+        done <<< "$warning"
+        echo
+        # Only block for acknowledgement in the interactive menu flow
+        if [ "$INTERACTIVE" -eq 1 ] && [ -t 0 ]; then
+            pause_for_key
+        fi
+    fi
 }
 
 printer_menu() {

@@ -23,7 +23,7 @@ This Anycubic-centric fork has structurally diverged from the original and focus
 - Purge sequence optimizations (avoids purging too much without intermediate flushing)
 - Adds more graceful error-handling if ACE rejects commands
 - Adding many console commands for experimentation ;)
-- Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5)
+- Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5), plus K3M (beta) and S1 Max (alpha, untested)
 - Expanding controls/panels in the ACE KlipperScreen panel
 - Standalone browser dashboard (ValgACE-inspired) served by Moonraker at `/ace.html`
 
@@ -118,9 +118,11 @@ config/
 ├── ace_K3.cfg            # Kobra 3 ACE configuration
 ├── ace_K3M.cfg           # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg           # Kobra S1 ACE configuration
+├── ace_KS1M.cfg          # Kobra S1 Max ACE configuration (ALPHA - UNTESTED)
 ├── printer_K3.cfg        # Kobra 3 printer macros
 ├── printer_K3M.cfg       # Kobra K3M printer macros (BETA)
 ├── printer_KS1.cfg       # Kobra S1 printer macros
+├── printer_KS1M.cfg      # Kobra S1 Max printer macros (ALPHA - UNTESTED)
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
 ├── ace_macros_generic.cfg # Shared ACE helper macros
 └── spoolman_logic.cfg    # Logic for Spoolman ID mapping and tool hooks
@@ -414,6 +416,12 @@ cp ~/ACEPRO/config/printer_KS1.cfg ~/printer_data/config/printer.cfg
 cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
 cp ~/ACEPRO/config/ace_KS1.cfg ~/printer_data/config/ace_KS1.cfg
 cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+
+# For Kobra S1 Max (ALPHA - never run on hardware, see the KS1M section below):
+cp ~/ACEPRO/config/printer_KS1M.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_KS1M.cfg ~/printer_data/config/ace_KS1M.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
 ```
 
 
@@ -504,17 +512,26 @@ config/
 ├── ace_K3.cfg                  # Kobra 3 ACE configuration
 ├── ace_K3M.cfg                 # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg                 # Kobra S1 ACE configuration
+├── ace_KS1M.cfg                # Kobra S1 Max ACE configuration (ALPHA - UNTESTED)
 ├── ace_macros_generic.cfg      # Shared ACE macros for all printers
 ├── printer_generic_macros.cfg  # Shared printer macros (pause/resume/velocity/purge)
 ├── printer_K3.cfg              # Kobra 3 printer macros & settings
 ├── printer_K3M.cfg             # Kobra K3M printer macros & settings (BETA)
 ├── printer_KS1.cfg             # Kobra S1 printer macros & settings
+├── printer_KS1M.cfg            # Kobra S1 Max printer macros & settings (ALPHA - UNTESTED)
 └── spoolman_logic.cfg          # Optional Spoolman ID mapping and tool hooks
 ```
 
+> [!CAUTION]
+> **`printer_KS1M.cfg` / `ace_KS1M.cfg` are ALPHA and have never been run on a
+> printer.** They were derived on paper from the stock go-klipper `printer.cfg`
+> of the Kobra S1 Max - nothing in them has been checked against real hardware.
+> See [Kobra S1 Max (KS1M) - alpha status](#kobra-s1-max-ks1m---alpha-status)
+> before using them.
+
 ### Include Hierarchy
 
-The configuration uses a modular include structure. The `printer_KS1.cfg`, `printer_K3.cfg` or `printer_K3M.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
+The configuration uses a modular include structure. The `printer_KS1.cfg`, `printer_KS1M.cfg`, `printer_K3.cfg` or `printer_K3M.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
 
 **For Anycubic Kobra S1:**
 ```
@@ -545,8 +562,43 @@ printer.cfg (copy from printer_K3.cfg)
 | File | Purpose | Size | Printer |
 |------|---------|------|---------|
 | `printer_K3.cfg` | Kobra 3 printer macros & settings | - | Anycubic Kobra 3 |
+| `printer_K3M.cfg` | Kobra K3M printer macros & settings (BETA) | - | Anycubic Kobra K3M |
 | `printer_KS1.cfg` | Kobra S1 printer macros & settings | - | Anycubic Kobra S1 |
+| `printer_KS1M.cfg` | Kobra S1 Max printer macros & settings (**ALPHA - UNTESTED**) | - | Anycubic Kobra S1 Max |
 | `printer_generic_macros.cfg` | Shared printer macros (pause/resume, velocity stack, purge helpers) | - | All printers |
+
+### Kobra S1 Max (KS1M) - alpha status
+
+> [!CAUTION]
+> **This configuration has never been run on a printer.** It is an initial,
+> paper-only port: `printer_KS1M.cfg` was built by taking `printer_KS1.cfg` and
+> substituting the hardware and geometry values read out of the stock
+> go-klipper `printer.cfg` for the Kobra S1 Max. No pin, no coordinate and no
+> timing value in it has been confirmed against real hardware.
+
+Treat every first run as a crash test, with a hand on the power switch. Known
+unverified areas:
+
+| Area | What is unverified | Likely symptom if wrong |
+|------|--------------------|-------------------------|
+| Toolhead filament sensor | `[filament_tracker filament_runout_nozzle]` pin polarity on `nozzle_mcu:PA5`/`PA6`. The MAX has no presence switch, only a quadrature encoder wheel. | Constant false runouts, or runouts never detected. See the note below. |
+| X/Y homing | The MAX homes off `PA6`/`PA15`, which look like the TMC `DIAG` lines rather than dedicated switches. | Axis drives into the frame, or homes instantly at the wrong position. |
+| Cutter / purge geometry | `CUT_TIP`, `TO_THROW_POSITION`, `TO_BLADE`, wipe pad coordinates. Taken from the stock macros where they exist, scaled from the KS1 where they do not. | Toolhead crashes into the chute, cutter or right-hand wall. |
+| Bed mesh | No `faulty_region_*` exclusion zones are defined - the KS1 ones do not apply to the 350x350 bed. | Probe strikes bed clips or leveling pins. |
+| ACE tube lengths | `parkposition_to_toolhead_length` is scaled from the stock unwind ratio, not measured. | Loads time out, or filament overshoots the nozzle. |
+| Chamber heater | Stock go-klipper reads the chamber NTC through the SoC IIO ADC, which vanilla Klipper cannot do. A commented `[heater_generic chamber_heater]` on `PB8`/`PA7` is provided as a starting point. | No chamber control, or a runaway heater if `PA7` is not the chamber NTC. |
+
+**About the toolhead sensor:** unlike the KS1, the Max has no static filament
+presence switch in the toolhead - only an encoder wheel. An encoder can answer
+"is filament moving while I extrude?" (clog, tangle, break) but it cannot answer
+"is filament present right now?" while everything is stationary. Static queries
+(`QUERY_FILAMENT_SENSOR` at idle, the `G9111` smart-skip check, resume-after-pause)
+are therefore unreliable on this hardware. If you have fitted a filament presence
+switch, use the commented `[filament_switch_sensor filament_runout_nozzle]` block
+in `printer_KS1M.cfg` instead - it is strictly more robust.
+
+Fixes, measurements and corrections from anyone with the actual machine are very
+welcome - please open an issue or PR with the values you found.
 
 ### Configuration Setup by Printer Model
 
@@ -583,6 +635,27 @@ If you build your own `printer.cfg`, include the shared files in this order:
 [include printer_generic_macros.cfg]
 [include ace_KS1.cfg]
 # ace_KS1.cfg includes ace_macros_generic.cfg for you
+```
+
+#### For Anycubic Kobra S1 Max (ALPHA - UNTESTED)
+
+> [!CAUTION]
+> Never run on real hardware. Read
+> [Kobra S1 Max (KS1M) - alpha status](#kobra-s1-max-ks1m---alpha-status) first
+> and expect to correct values yourself.
+
+```bash
+cp ~/ACEPRO/config/printer_KS1M.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_KS1M.cfg ~/printer_data/config/ace_KS1M.cfg
+ln -sf ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+```
+
+If you build your own `printer.cfg`, include the shared files in this order:
+```ini
+[include printer_generic_macros.cfg]
+[include ace_KS1M.cfg]
+# ace_KS1M.cfg includes ace_macros_generic.cfg for you
 ```
 
 ### Multi-Unit Configuration

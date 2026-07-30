@@ -36,7 +36,27 @@ printer_display_name() {
         K3)  echo "Kobra 3" ;;
         KS1) echo "Kobra S1" ;;
         K3M) echo "Kobra K3M (BETA)" ;;
+        KS1M) echo "Kobra S1 Max (ALPHA - UNTESTED)" ;;
         *)   echo "$1" ;;
+    esac
+}
+
+# Maturity warning for a printer model. Echoes nothing for models that have
+# been validated on real hardware; otherwise echoes one warning line per call.
+printer_maturity_warning() {
+    case "$1" in
+        K3M)
+            echo "The K3M config is BETA - verified only partially on real hardware."
+            ;;
+        KS1M)
+            echo "The Kobra S1 Max (KS1M) config is ALPHA and has NEVER been run on a printer."
+            echo "It was derived on paper from the stock go-klipper printer.cfg. Pin"
+            echo "assignments, bed mesh exclusion zones, the toolhead encoder polarity,"
+            echo "the cutter/purge coordinates and the ACE tube lengths are all UNVERIFIED."
+            echo "Expect crashes into the frame, false filament runouts and failed loads."
+            echo "Review every section against your machine, and keep a hand on the power"
+            echo "switch during the first homing, first cut and first purge."
+            ;;
     esac
 }
 
