@@ -1314,8 +1314,13 @@ class AceSerialManager:
         First request sent immediately, then repeated at heartbeat_interval.
         """
         if self.protocol.get_transport_spec().shared_bus:
+            # Not a missing capability: responses ARE demultiplexed here, by
+            # request id in dispatch_response().  A shared bus just has no
+            # single unit to poll, so each logical instance runs its own
+            # addressed heartbeat via AceInstance.start_shared_bus_heartbeat().
             logging.info(
-                "ACE[%s]: Heartbeat deferred for shared-bus transport until response demultiplexing exists",
+                "ACE[%s]: Transport-level heartbeat not used on a shared bus - "
+                "each instance heartbeats its own device id",
                 self.instance_num,
             )
             return
