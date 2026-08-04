@@ -1195,6 +1195,18 @@ def cmd_ACE_REDETECT(gcmd):
     manager.redetect_transports(gcmd=gcmd)
 
 
+def cmd_ACE_CLEANUP_STALE_VARS(gcmd):
+    """List or remove obsolete ACE-owned save_variables keys.
+
+    Dry run by default: lists stale binding and inventory keys. CONFIRM=1
+    deletes them - required because stale ace_inventory_N keys hold
+    user-entered spool data that cannot be rebuilt (startup only ever
+    auto-removes rebuildable binding keys).
+    """
+    manager = ace_get_manager(0)
+    manager.cleanup_stale_persistent_vars(gcmd)
+
+
 def cmd_ACE_RESET_SHARED_BUS_BINDINGS(gcmd):
     """Clear persisted ACE2 shared-bus instance↔UID bindings.
 
@@ -2458,6 +2470,8 @@ ACE_COMMANDS = [
     ("ACE_RESET_PERSISTENT_INVENTORY", cmd_ACE_RESET_PERSISTENT_INVENTORY, "Reset inventory to empty. INSTANCE="),
     ("ACE_RESET_SHARED_BUS_BINDINGS", cmd_ACE_RESET_SHARED_BUS_BINDINGS,
      "Clear persisted ACE2 shared-bus bindings. [RECONNECT=1|0] [DELAY=2.0]"),
+    ("ACE_CLEANUP_STALE_VARS", cmd_ACE_CLEANUP_STALE_VARS,
+     "List stale ACE saved variables; CONFIRM=1 deletes them (incl. old inventories)"),
     ("ACE_RESET_ACTIVE_TOOLHEAD", cmd_ACE_RESET_ACTIVE_TOOLHEAD, "Reset active toolhead state. INSTANCE="),
     ("ACE_DEBUG_SET_CURRENT_INDEX", cmd_ACE_DEBUG_SET_CURRENT_INDEX,
      "Override saved tool index. TOOL=<n> (0-based) or TOOL=-1 for no tool loaded"),

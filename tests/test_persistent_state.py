@@ -134,3 +134,62 @@ class TestPersistentStateFlushDirect:
         # dirty state remains when flush_direct fails before clear()
         assert state.has_pending
 
+
+class TestPersistentStateRemoveKeys:
+    """Covers remove_keys() RAM removal and direct file rewrite."""
+
+    def test_remove_keys_deletes_from_ram_and_rewrites_file(self, tmp_path):
+        filename = tmp_path / "saved_variables.cfg"
+        variables = {
+            "ace_inventory_0": [{"status": "empty"}],
+            "ace_inventory_2": [{"status": "ready"}],
+            "speed_factor": 1.0,
+        }
+        state, _printer, _gcode, save_vars = _make_state(
+            all_variables=variables,
+            filename=str(filename),
+        )
+
+        removed = state.remove_keys(["ace_inventory_2", "never_existed"])
+
+        assert removed == ["ace_inventory_2"]
+        assert "ace_inventory_2" not in save_vars.allVariables
+        assert "ace_inventory_0" in save_vars.allVariables
+
+        cfg = configparser.ConfigParser()
+        cfg.read(filename)
+        assert not cfg.has_option("Variables", "ace_inventory_2")
+        # unrelated variables survive the rewrite
+        assert cfg.get("Variables", "speed_factor") == repr(1.0)
+        assert cfg.get("Variables", "ace_inventory_0") == repr(
+            [{"status": "empty"}]
+        )
+
+    def test_remove_keys_without_matches_is_a_noop(self, tmp_path):
+        filename = tmp_path / "saved_variables.cfg"
+        state, _printer, _gcode, save_vars = _make_state(
+            all_variables={"ace_current_index": -1},
+            filename=str(filename),
+        )
+
+        removed = state.remove_keys(["ace_inventory_5"])
+
+        assert removed == []
+        assert save_vars.allVariables == {"ace_current_index": -1}
+        # no matches -> no disk write at all
+        assert not filename.exists()
+
+    def test_remove_keys_discards_dirty_marker(self, tmp_path):
+        filename = tmp_path / "saved_variables.cfg"
+        state, _printer, _gcode, _save_vars = _make_state(
+            all_variables={},
+            filename=str(filename),
+        )
+        state.set("ace_inventory_2", [{"status": "ready"}])
+        assert "ace_inventory_2" in state._dirty
+
+        removed = state.remove_keys(["ace_inventory_2"])
+
+        assert removed == ["ace_inventory_2"]
+        assert "ace_inventory_2" not in state._dirty
+
