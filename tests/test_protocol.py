@@ -489,3 +489,80 @@ class TestTransportDescriptionMatching:
 
         assert resolved_instance0 == "ace1_json"
         assert resolved_instance1 == "ace2_proto"
+
+
+class TestAceProtoResyncPreservesFrameBoundaries:
+    """A corrupted frame must not take the *next* reply down with it.
+
+    ``read()`` returns whatever bytes happen to have arrived, so a frame
+    header (0xFF 0xAA) is regularly split across two reads.  Both resync
+    paths in ``extract_responses`` discard the entire working buffer when no
+    complete header is found, which eats the leading 0xFF of a frame that is
+    still arriving - and the following, perfectly valid, response is then
+    unparseable too.
+
+    On the wire this is what turns one corruption event into two lost
+    requests: klippy logs show adjacent-id timeout pairs (20 of 41 timeouts
+    in one session) each immediately preceded by a resync notice.
+    """
+
+    def setup_method(self):
+        self.adapter = AceProtoProtocolAdapter()
+
+    @staticmethod
+    def _discover_frame(request_id):
+        """Build a valid DISCOVER_DEVICE response frame."""
+        payload = b"\x08\x0B\x10\x16\x18\x21"
+        inner = bytes(
+            [0x80, request_id & 0xFF, (request_id >> 8) & 0xFF, 0x00, len(payload)]
+        ) + payload
+        return b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+
+    def test_invalid_tail_keeps_split_header_byte(self):
+        """A frame with a destroyed terminator must not consume the first
+        byte of the next frame's header."""
+        corrupt = bytearray(self._discover_frame(request_id=8))
+        corrupt[-1] = 0x00  # destroy the 0xFE terminator
+
+        # Only the first byte of the next frame's header has arrived so far.
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(bytes(corrupt) + b"\xFF"), _calc_crc
+        )
+        assert responses == []
+        assert any("resync" in notice.lower() for notice in notices)
+
+        # Second read delivers the rest of a perfectly valid frame.
+        good = self._discover_frame(request_id=9)
+        responses, _, _ = self.adapter.extract_responses(
+            remaining + bytearray(good[1:]), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [9]
+
+    def test_junk_scan_keeps_split_header_byte(self):
+        """Dropping unparseable junk must likewise preserve a trailing 0xFF
+        that starts the next frame."""
+        junk = bytes(range(0x10, 0x30))  # 32 bytes, contains no 0xFF 0xAA
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(junk + b"\xFF"), _calc_crc
+        )
+        assert responses == []
+        assert any("junk" in notice.lower() for notice in notices)
+
+        good = self._discover_frame(request_id=11)
+        responses, _, _ = self.adapter.extract_responses(
+            remaining + bytearray(good[1:]), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [11]
+
+    def test_invalid_tail_still_recovers_a_complete_following_frame(self):
+        """Regression guard: the already-working case must keep working."""
+        corrupt = bytearray(self._discover_frame(request_id=12))
+        corrupt[-1] = 0x00
+        good = self._discover_frame(request_id=13)
+
+        responses, _, notices = self.adapter.extract_responses(
+            bytearray(bytes(corrupt) + good), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [13]
+        assert any("resync" in notice.lower() for notice in notices)

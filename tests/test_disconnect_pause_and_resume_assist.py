@@ -248,7 +248,44 @@ class TestVerifyFeedAssistForTool:
         inst._enable_feed_assist.assert_not_called()
 
     def test_skips_when_unconfirmed_toolchange_pending(self):
+        # A swap to a DIFFERENT tool is outstanding: arming assist on the
+        # tool we are verifying could have two ACEs pushing into one
+        # toolhead, so its retry must own assist.
         mgr = self._mgr_with_state(pos="nozzle", sensor=True, target=7)
+        inst = self._inst(assist_index=-1)
+        with patch(
+            "ace.manager.get_ace_instance_and_slot_for_tool",
+            return_value=(inst, 2),
+        ):
+            assert mgr.verify_feed_assist_for_tool(6) is False
+        inst._enable_feed_assist.assert_not_called()
+
+    def test_reenables_when_pending_target_is_this_very_tool(self):
+        """The pending toolchange is *this* tool, and it is loaded.
+
+        ace_target_index is left set when a toolchange raises, so a retry
+        that has already failed keeps the flag latched forever - and
+        _validate_startup_tool_state() skips while it is set, so not even a
+        klippy restart clears it.  Every later paused->printing transition
+        then declines assist and the print extrudes nothing.
+
+        There is no ambiguity to protect against here: the outstanding
+        target and the tool being verified are the same, and the loaded
+        guard below already proved filament is in the path.  Arming assist
+        on that tool cannot push a second spool into the toolhead.
+        """
+        mgr = self._mgr_with_state(pos="nozzle", sensor=True, target=6)
+        inst = self._inst(assist_index=-1)
+        with patch(
+            "ace.manager.get_ace_instance_and_slot_for_tool",
+            return_value=(inst, 2),
+        ):
+            assert mgr.verify_feed_assist_for_tool(6) is True
+        inst._enable_feed_assist.assert_called_once_with(2)
+
+    def test_still_skips_pending_target_when_tool_not_loaded(self):
+        """Same-tool pending target must not bypass the loaded guard."""
+        mgr = self._mgr_with_state(pos="bowden", sensor=False, target=6)
         inst = self._inst(assist_index=-1)
         with patch(
             "ace.manager.get_ace_instance_and_slot_for_tool",

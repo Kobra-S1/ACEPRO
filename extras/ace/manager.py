@@ -1194,8 +1194,14 @@ class AceManager:
                 # Start extruder retraction (10% faster for slack)
                 self._extruder_move(-abs(retract_length), retract_speed * 1.10, wait_for_move_end=False)
 
-                # Start ACE retraction — use RDM sensor for early stop if available
-                if self.has_rdm_sensor():
+                # Start ACE retraction — use the RDM early stop only when the
+                # RDM actually sees filament right now.  Its callback stops the
+                # retract on the first CLEAR sample, so an RDM that is already
+                # clear here would truncate the pull to nothing but the
+                # overshoot and report success with the bowden still loaded.
+                # Same precondition the toolhead-clear call site and Case 3 of
+                # _identify_and_unload_by_cycling apply.
+                if self.has_rdm_sensor() and self.get_instant_switch_state(SENSOR_RDM):
                     unload_ok = instance.rmd_triggered_unload_slot(
                         self, local_slot,
                         length=parkposition_to_toolhead_length + retract_length,
@@ -1994,17 +2000,30 @@ class AceManager:
         # candidate; with the old tool's assist also restored, two ACEs
         # push filament into one toolhead).  "Loaded" means filament_pos at
         # toolhead/nozzle, or the toolhead sensor seeing filament (covers a
-        # stale pos).  An unconfirmed in-flight toolchange
-        # (ace_target_index != -1) is retried by the RESUME macro, which
-        # arms assist itself.  Fail-open: unreadable state keeps the safety
-        # net's protective re-enable.
+        # stale pos).  An unconfirmed in-flight toolchange to a DIFFERENT
+        # tool (ace_target_index != tool_index) is retried by the RESUME
+        # macro, which arms assist itself.  Fail-open: unreadable state keeps
+        # the safety net's protective re-enable.
+        #
+        # A pending target equal to tool_index is deliberately NOT skipped.
+        # ace_target_index is left set when a toolchange raises, so a retry
+        # that has already failed latches it forever — and
+        # _validate_startup_tool_state() also skips while it is set, so not
+        # even a klippy restart clears it.  Every later paused→printing
+        # transition would decline assist and the print extrudes nothing.
+        # There is no ambiguity to protect against: the outstanding target
+        # and the tool being verified are the same, and the loaded guard
+        # below still has to prove filament is in the path, so this cannot
+        # arm a second spool into one toolhead.
         try:
             if self.toolchange_in_progress is True:
                 return False
-            if int(self.state.get("ace_target_index", -1)) != -1:
+            pending_target = int(self.state.get("ace_target_index", -1))
+            if pending_target != -1 and pending_target != tool_index:
                 self.gcode.respond_info(
                     f"ACE: Resume feed assist check skipped for T{tool_index} "
-                    f"- unconfirmed toolchange pending (its retry owns assist)"
+                    f"- unconfirmed toolchange to T{pending_target} pending "
+                    f"(its retry owns assist)"
                 )
                 return False
             pos = self.state.get("ace_filament_pos", None)
@@ -2562,16 +2581,25 @@ class AceManager:
                         f"  State: filament_pos='nozzle'\n"
                         f"  Toolhead sensor: {'TRIGGERED' if sensor_has_filament else 'clear'}\n"
                         f"  RDM sensor: {'TRIGGERED' if rdm_has_filament else 'CLEAR'}\n"
-                        f"  PROBLEM: Filament stuck at nozzle but path is broken (no filament in RDM)\n"
-                        f"  This indicates incomplete unload or broken filament in path.\n"
-                        f"  SOLUTION: Manually unload/retract stuck filament, then retry toolchange."
+                        f"  PROBLEM: filament_pos='nozzle' means the strand should\n"
+                        f"    span the RDM as well, so persisted state and sensors\n"
+                        f"    disagree.  Nothing has been fed or retracted - this is\n"
+                        f"    a consistency check, NOT a failed load.\n"
+                        f"  CAUSE: an incomplete unload or broken path, OR an RDM\n"
+                        f"    sensor that is not reporting filament it can see.\n"
+                        f"  SOLUTION: confirm the RDM reading first with\n"
+                        f"    QUERY_FILAMENT_SENSOR SENSOR=<rdm sensor name>.  If the\n"
+                        f"    path really is broken, clear it manually or use\n"
+                        f"    ACE_CHANGE_TOOL TOOL=-1 to force unload."
                     )
 
                     raise Exception(
-                        f"Invalid filament state for T{target_tool}: "
-                        f"Filament stuck at nozzle but RDM sensor is empty. "
-                        f"Cannot proceed - manual intervention required. "
-                        f"Use ACE_CHANGE_TOOL TOOL=-1 to force unload, or manually clear the path."
+                        f"Invalid filament state for T{target_tool}: state says "
+                        f"'nozzle' but the RDM sensor is empty, so persisted state "
+                        f"and sensors disagree. No filament was moved. Verify the "
+                        f"RDM sensor reports filament; if the path really is broken, "
+                        f"manual intervention is required - use ACE_CHANGE_TOOL "
+                        f"TOOL=-1 to force unload, or clear the path manually."
                     )
 
             if filament_pos == FILAMENT_STATE_NOZZLE:

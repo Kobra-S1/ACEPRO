@@ -2305,8 +2305,6 @@ class Panel(ScreenPanel):
 
     def _show_spool_amount_input(self, title, callback):
         self.current_view = "spool_keypad"
-        for child in self.content.get_children():
-            self.content.remove(child)
 
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         main_box.set_margin_left(10)
@@ -2332,12 +2330,10 @@ class Panel(ScreenPanel):
         self.spool_keypad = Keypad(
             self._screen,
             callback,
-            None,
-            self.return_to_spool_panel,
+            lambda widget: self.return_to_spool_panel(),
         )
         self.spool_keypad.clear()
-        self.spool_keypad.labels['entry'].set_text("0")
-        self.spool_keypad.show_pid(False)
+        self.spool_keypad.entry.set_text("0")
 
         main_box.pack_start(self.spool_keypad, True, True, 0)
 
@@ -2347,6 +2343,10 @@ class Panel(ScreenPanel):
         back_btn.connect("clicked", lambda w: self.return_to_spool_panel())
         main_box.pack_end(back_btn, False, False, 0)
 
+        # Clear the previous view only after the new one built successfully,
+        # so a construction failure cannot leave an empty (black) page.
+        for child in self.content.get_children():
+            self.content.remove(child)
         self.content.add(main_box)
         self.content.show_all()
 
