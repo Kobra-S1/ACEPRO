@@ -75,9 +75,12 @@ class TestSortAceCandidatePorts(unittest.TestCase):
     """
 
     def test_mixed_protocol_ports_ordered_by_physical_location(self):
-        # Root ACE (ACE1, native serial) closest to host; second ACE (ACE2 Pro,
-        # CH340 bridge) daisy-chained deeper - but happened to enumerate its
-        # /dev/ttyACMx path *before* the root unit this time.
+        # Depth-differing layout (e.g. the second device sits behind an extra
+        # hub level): the shallower root unit must sort first even though the
+        # deeper device enumerated its /dev/ttyACMx path earlier. Note a
+        # directly-chained ACE2 adapter is hubless and appears as a sibling,
+        # not deeper - that layout is covered by
+        # test_real_hardware_layout_ace2_adapter_is_sibling_not_deeper.
         ace2_port = _make_port("/dev/ttyACM0", "USB Single Serial", "6-1.3.1")
         ace1_port = _make_port("/dev/ttyACM1", "ACE", "6-1.3")
         unrelated_port = _make_port("/dev/ttyUSB5", "Arduino Uno", "6-1.4")
@@ -91,6 +94,27 @@ class TestSortAceCandidatePorts(unittest.TestCase):
         self.assertEqual(matches[0][3], "ace1_json")
         self.assertEqual(matches[1][2], "/dev/ttyACM0")
         self.assertEqual(matches[1][3], "ace2_proto")
+
+    def test_real_hardware_layout_ace2_adapter_is_sibling_not_deeper(self):
+        """Layout observed on real hardware (BTT CB2, ACE1 with chained ACE2).
+
+        The Gen1's built-in hub enumerates at 3-1; its own MCU hangs on hub
+        port 3 (3-1.3) and chain-out is hub port 4. The hubless ACE2 RS485
+        adapter plugged into chain-out therefore appears as a SIBLING at
+        3-1.4 - same hop depth, NOT one hop deeper. The upstream ACE1 must
+        still sort first (numeric port tiebreak within equal depth), and the
+        unrelated shallower probe must not enter the candidate list at all.
+        """
+        probe_port = _make_port("/dev/ttyACM0", "stm32g431xx", "1-1")
+        ace1_port = _make_port("/dev/ttyACM1", "ACE", "3-1.3")
+        ace2_port = _make_port("/dev/ttyACM2", "USB Single Serial", "3-1.4")
+
+        matches = sort_ace_candidate_ports([probe_port, ace2_port, ace1_port])
+
+        self.assertEqual(
+            [(match[2], match[3]) for match in matches],
+            [("/dev/ttyACM1", "ace1_json"), ("/dev/ttyACM2", "ace2_proto")],
+        )
 
     def test_ignores_non_ace_ports(self):
         unrelated_port = _make_port("/dev/ttyUSB5", "Arduino Uno", "6-1.4")
