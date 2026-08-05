@@ -38,8 +38,17 @@ from .protocol import (
 )
 from .serial_manager import AceSerialManager
 import logging
+import re
 import serial
 import time
+
+# ACE-owned save_variables namespaces whose key names encode instance
+# numbers or a bus grouping. Only exact numeric forms are considered
+# ACE's - anything else in saved_variables.cfg (foreign macros,
+# hand-made backups like "ace_inventory_backup") is never touched by
+# any cleanup path.
+_INVENTORY_KEY_RE = re.compile(r"^ace_inventory_(\d+)$")
+_BUS_BINDINGS_KEY_RE = re.compile(r"^ace2_bus_bindings_\d+(_\d+)*$")
 
 
 class FilamentTrackerAdapter:
@@ -361,6 +370,10 @@ class AceManager:
         Sets up toolhead reference, connects ACE instances, initializes sensors, starts monitoring.
         """
 
+        # Drop persisted keys from earlier configs before any shared-bus
+        # connect can read a stale binding key.
+        self._cleanup_stale_persistent_keys()
+
         # Set toolhead on all instances
         toolhead = self.printer.lookup_object("toolhead")
         for instance in self.instances:
@@ -394,6 +407,113 @@ class AceManager:
         self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
 
         self._start_monitoring()
+
+    def _find_stale_binding_keys(self):
+        """Return persisted ``ace2_bus_bindings_*`` keys no current bus group uses.
+
+        Every change in shared-bus grouping (e.g. after a mis-typed startup
+        or an ace_count change) persists bindings under a new
+        ``ace2_bus_bindings_<ids>`` name while the old one lingers with an
+        identical payload.
+
+        Returns ``[]`` when no shared bus was resolved this boot: with
+        protocol=auto and the ACE units powered off / not yet enumerated,
+        "config abandoned ACE2" is indistinguishable from "units are just
+        off right now", so no binding key can be called stale.
+        """
+        valid_keys = set()
+        has_shared_bus = False
+        for instance in self.instances:
+            bus_session = getattr(instance, "bus_session", None)
+            if bus_session is None:
+                continue
+            has_shared_bus = True
+            valid_keys.add(self._get_shared_bus_bindings_varname(
+                self._get_instances_for_bus_session(bus_session)
+            ))
+        if not has_shared_bus:
+            return []
+        return sorted(
+            key for key in self.state.get_all()
+            if _BUS_BINDINGS_KEY_RE.match(key) and key not in valid_keys
+        )
+
+    def _find_stale_inventory_keys(self):
+        """Return persisted ``ace_inventory_N`` keys with ``N >= ace_count``.
+
+        These hold user-entered spool data that cannot be rebuilt, so they
+        are never removed automatically - a temporarily lowered ace_count
+        (unit disconnected for a while) must not destroy the parked unit's
+        inventory. Removal happens only via ACE_CLEANUP_STALE_VARS.
+        """
+        stale_keys = []
+        for key in self.state.get_all():
+            match = _INVENTORY_KEY_RE.match(key)
+            if match and int(match.group(1)) >= self.ace_count:
+                stale_keys.append(key)
+        return sorted(stale_keys)
+
+    def _cleanup_stale_persistent_keys(self):
+        """Remove obsolete shared-bus binding keys at startup.
+
+        Only provably rebuildable state is auto-removed: stale binding keys
+        cache UID bindings that discovery rebuilds and re-persists, so
+        deleting them is safe even if the config-time grouping later changes
+        via ACE_REDETECT. Stale ``ace_inventory_N`` keys are deliberately
+        left alone (see ``_find_stale_inventory_keys``); the user removes
+        them explicitly with ACE_CLEANUP_STALE_VARS. Every removal is
+        reported to the console and log.
+        """
+        stale_keys = self._find_stale_binding_keys()
+        if not stale_keys:
+            return
+
+        removed = self.state.remove_keys(stale_keys)
+        for key in removed:
+            self.gcode.respond_info(
+                f"ACE: Removed stale persisted variable '{key}'"
+            )
+        logging.info(
+            "ACE: Removed %d stale persisted variable(s): %s",
+            len(removed), ", ".join(removed),
+        )
+
+    def cleanup_stale_persistent_vars(self, gcmd):
+        """Handle ACE_CLEANUP_STALE_VARS: list or delete all stale ACE keys.
+
+        Dry run by default - lists every stale key (binding keys plus
+        out-of-ace_count inventory keys) without touching anything.
+        ``CONFIRM=1`` deletes them; that explicit step is required because
+        stale inventory keys hold user-entered spool data.
+        """
+        confirm = bool(gcmd.get_int("CONFIRM", 0, minval=0, maxval=1))
+        stale_keys = (
+            self._find_stale_binding_keys() + self._find_stale_inventory_keys()
+        )
+        if not stale_keys:
+            gcmd.respond_info("ACE: No stale persisted variables found")
+            return
+
+        if not confirm:
+            for key in stale_keys:
+                gcmd.respond_info(
+                    f"ACE: Would remove stale persisted variable '{key}'"
+                )
+            gcmd.respond_info(
+                f"ACE: Dry run - {len(stale_keys)} stale variable(s) found. "
+                "Run ACE_CLEANUP_STALE_VARS CONFIRM=1 to delete them"
+            )
+            return
+
+        removed = self.state.remove_keys(stale_keys)
+        for key in removed:
+            gcmd.respond_info(
+                f"ACE: Removed stale persisted variable '{key}'"
+            )
+        logging.info(
+            "ACE: ACE_CLEANUP_STALE_VARS removed %d variable(s): %s",
+            len(removed), ", ".join(removed),
+        )
 
     def _handle_shutdown(self):
         """Called on Klipper emergency stop or fatal shutdown.

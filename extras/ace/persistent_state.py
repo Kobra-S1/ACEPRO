@@ -209,6 +209,30 @@ class PersistentState:
                 )
         self._dirty.clear()
 
+    def remove_keys(self, varnames):
+        """Delete variables from RAM and from ``saved_variables.cfg``.
+
+        Klipper's ``SAVE_VARIABLE`` command cannot delete a variable, so
+        removal rewrites the whole file directly via ``flush_direct()``.
+        Names not currently stored are ignored.
+
+        Args:
+            varnames: Iterable of variable names to delete.
+
+        Returns:
+            Sorted list of the names that were actually removed.
+        """
+        variables = self._variables()
+        removed = sorted(name for name in varnames if name in variables)
+        if not removed:
+            return []
+
+        for name in removed:
+            del variables[name]
+            self._dirty.discard(name)
+        self.flush_direct()
+        return removed
+
     def flush_direct(self):
         """Write ALL in-memory variables directly to ``saved_variables.cfg``.
 

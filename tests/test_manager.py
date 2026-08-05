@@ -12,6 +12,8 @@ Tests AceManager class which orchestrates multiple ACE Pro units:
 
 import unittest
 from unittest.mock import Mock, patch, PropertyMock, call
+import os
+import tempfile
 import time
 
 from ace.manager import AceManager, toolchange_in_progress_guard
@@ -1360,6 +1362,315 @@ class TestSharedAce2Transport(unittest.TestCase):
             "answering with its stale id and keeps colliding on the bus",
         )
         self.assertNotEqual(assigned[(11, 22, 33)], assigned[(44, 55, 66)])
+
+
+class TestStalePersistentKeyCleanup(unittest.TestCase):
+    """Cleanup of obsolete ACE-owned save_variables keys.
+
+    Stale keys accumulate on real printers when ace_count shrinks
+    (ace_inventory_N for removed instances) or when the shared-bus
+    grouping changes across restarts (each grouping persists under its
+    own ace2_bus_bindings_<ids> name).
+
+    Startup auto-cleanup covers only rebuildable state (binding keys -
+    discovery re-persists them). Inventory keys hold user-entered spool
+    data that cannot be rebuilt, so they are only removed by the
+    explicit ACE_CLEANUP_STALE_VARS CONFIRM=1 command. Foreign
+    save_variables entries are never touched by either path.
+    """
+
+    def setUp(self):
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+
+        self.mock_config = Mock()
+        self.mock_printer = Mock()
+        self.mock_reactor = Mock()
+        self.mock_gcode = Mock()
+        self.mock_save_vars = Mock()
+        self.mock_toolhead = Mock()
+
+        self.mock_config.get_printer.return_value = self.mock_printer
+        self.mock_printer.get_reactor.return_value = self.mock_reactor
+        self.mock_reactor.monotonic.return_value = 0.0
+        self.mock_reactor.register_timer = Mock(return_value=None)
+        self.mock_reactor.pause = Mock()
+
+        # Real file target so remove_keys() can rewrite it
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.mock_save_vars.filename = os.path.join(
+            self.tmpdir.name, "saved_variables.cfg"
+        )
+
+        # The reported field state: ace_count=2 on one shared ACE2 bus,
+        # with a stale ace_count=3 inventory and five binding-key variants
+        # from earlier groupings. Canonical: ace2_bus_bindings_0_1.
+        self.variables = {
+            "ace_global_enabled": True,
+            "ace_current_index": -1,
+            "ace_filament_pos": FILAMENT_STATE_BOWDEN,
+            "ace_inventory_0": [{"status": "ready"}],
+            "ace_inventory_1": [{"status": "empty"}],
+            "ace_inventory_2": [{"status": "empty"}],
+            "ace2_bus_bindings_0": {0: (1, 2, 3)},
+            "ace2_bus_bindings_0_1": {0: (1, 2, 3), 1: (4, 5, 6)},
+            "ace2_bus_bindings_1": {1: (4, 5, 6)},
+            "ace2_bus_bindings_1_2": {1: (4, 5, 6), 2: (7, 8, 9)},
+            "ace2_bus_bindings_2": {2: (7, 8, 9)},
+            "speed_factor": 1.0,  # foreign, not ACE-owned
+        }
+        self.mock_save_vars.allVariables = self.variables
+
+        def lookup(name, default=None):
+            if name == "gcode":
+                return self.mock_gcode
+            if name == "save_variables":
+                return self.mock_save_vars
+            if name == "toolhead":
+                return self.mock_toolhead
+            if name == "output_pin ACE_Pro":
+                pin = Mock()
+                pin.get_status = Mock(return_value={"value": 1})
+                return pin
+            return default
+
+        self.mock_printer.lookup_object.side_effect = lookup
+
+        self.ace_count_value = 2
+
+        def getint(key, default=None):
+            vals = {"ace_count": self.ace_count_value}
+            val = vals.get(key, default)
+            return int(val) if val is not None else default
+
+        def getfloat(key, default=None):
+            val = {"purge_multiplier": "1.0"}.get(key, default)
+            return float(val) if val is not None else default
+
+        def get(key, default=None):
+            return {
+                "filament_runout_sensor_name_rdm": "return_module",
+                "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+                "protocol": "ace2",
+                "baud": "auto",
+            }.get(key, default)
+
+        def getboolean(key, default=None):
+            return {
+                "feed_assist_active_after_ace_connect": True,
+                "rfid_inventory_sync_enabled": True,
+                "ace_connection_supervision": True,
+                "moonraker_lane_sync_enabled": False,
+            }.get(key, default if default is not None else False)
+
+        self.mock_config.getint.side_effect = getint
+        self.mock_config.getfloat.side_effect = getfloat
+        self.mock_config.get.side_effect = get
+        self.mock_config.getboolean.side_effect = getboolean
+
+    def _serial_manager_factory(self, *args, **kwargs):
+        serial_mgr = Mock(connect_to_ace=Mock(), disconnect=Mock(),
+                          send_high_prio_request=Mock())
+        serial_mgr._port = "/dev/ttyUSB0"
+        serial_mgr.protocol = kwargs.get("protocol")
+        serial_mgr.is_connected = Mock(return_value=False)
+        serial_mgr.get_connection_status = Mock(
+            return_value={"last_connected_time": 0.0}
+        )
+        return serial_mgr
+
+    def _instance_factory(self, instance_num, instance_config, printer,
+                          ace_enabled, **kwargs):
+        inst = Mock()
+        inst.instance_num = instance_num
+        inst.SLOT_COUNT = SLOTS_PER_ACE
+        inst.tool_offset = instance_num * SLOTS_PER_ACE
+        inst.baud = instance_config["baud"]
+        inst.serial_mgr = kwargs.get("serial_mgr")
+        inst.bus_session = kwargs.get("bus_session")
+        inst.protocol = kwargs.get("protocol")
+        inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        inst.filament_runout_sensor_name_rdm = "return_module"
+        return inst
+
+    def _build_manager(self, ace_count=2):
+        self.ace_count_value = ace_count
+        with patch("ace.manager.AceInstance", side_effect=self._instance_factory), \
+             patch("ace.manager.AceSerialManager", side_effect=self._serial_manager_factory), \
+             patch("ace.manager.EndlessSpool"), \
+             patch("ace.manager.RunoutMonitor"):
+            return AceManager(self.mock_config, dummy_ace_count=ace_count)
+
+    def _make_gcmd(self, confirm=0):
+        gcmd = Mock()
+        gcmd.get_int = Mock(return_value=confirm)
+        gcmd.respond_info = Mock()
+        return gcmd
+
+    def test_startup_cleanup_removes_only_stale_binding_keys(self):
+        manager = self._build_manager()
+
+        manager._cleanup_stale_persistent_keys()
+
+        self.assertNotIn("ace2_bus_bindings_0", self.variables)
+        self.assertNotIn("ace2_bus_bindings_1", self.variables)
+        self.assertNotIn("ace2_bus_bindings_1_2", self.variables)
+        self.assertNotIn("ace2_bus_bindings_2", self.variables)
+        # inventory keys hold user-entered spool data - never auto-removed,
+        # even when their instance number is outside the current ace_count
+        self.assertIn("ace_inventory_2", self.variables)
+
+    def test_startup_cleanup_keeps_valid_and_foreign_keys(self):
+        manager = self._build_manager()
+
+        manager._cleanup_stale_persistent_keys()
+
+        self.assertIn("ace_inventory_0", self.variables)
+        self.assertIn("ace_inventory_1", self.variables)
+        self.assertIn("ace2_bus_bindings_0_1", self.variables)
+        self.assertIn("speed_factor", self.variables)
+        self.assertIn("ace_current_index", self.variables)
+
+    def test_cleanup_ignores_non_numeric_ace_prefixed_keys(self):
+        """A hand-made key like ace_inventory_backup is not ACE-owned."""
+        self.variables["ace_inventory_backup"] = [{"status": "ready"}]
+        self.variables["ace2_bus_bindings_custom"] = {"note": "mine"}
+        manager = self._build_manager()
+
+        manager._cleanup_stale_persistent_keys()
+        manager.cleanup_stale_persistent_vars(self._make_gcmd(confirm=1))
+
+        self.assertIn("ace_inventory_backup", self.variables)
+        self.assertIn("ace2_bus_bindings_custom", self.variables)
+
+    def test_startup_cleanup_reports_every_removed_key(self):
+        manager = self._build_manager()
+
+        manager._cleanup_stale_persistent_keys()
+
+        reported = " ".join(
+            str(call_args[0][0])
+            for call_args in self.mock_gcode.respond_info.call_args_list
+        )
+        for key in ("ace2_bus_bindings_0", "ace2_bus_bindings_1",
+                    "ace2_bus_bindings_1_2", "ace2_bus_bindings_2"):
+            self.assertIn(key, reported)
+        self.assertNotIn("ace_inventory_2", reported)
+
+    def test_startup_cleanup_with_nothing_stale_reports_nothing(self):
+        for key in ("ace2_bus_bindings_0", "ace2_bus_bindings_1",
+                    "ace2_bus_bindings_1_2", "ace2_bus_bindings_2"):
+            del self.variables[key]
+        manager = self._build_manager()
+        self.mock_gcode.respond_info.reset_mock()
+
+        manager._cleanup_stale_persistent_keys()
+
+        removal_reports = [
+            call_args
+            for call_args in self.mock_gcode.respond_info.call_args_list
+            if "stale" in str(call_args[0][0]).lower()
+        ]
+        self.assertEqual(removal_reports, [])
+
+    def test_cleanup_keeps_binding_keys_when_no_shared_bus_resolved(self):
+        """ACE units powered off at boot must not wipe binding keys.
+
+        With protocol=auto and no hardware enumerated, instances fall back
+        to ace1_json and no shared-bus group exists at config time. That is
+        indistinguishable from "user abandoned ACE2", so binding keys must
+        be kept.
+        """
+        manager = self._build_manager()
+        for instance in manager.instances:
+            instance.bus_session = None
+
+        manager._cleanup_stale_persistent_keys()
+
+        for key in ("ace2_bus_bindings_0", "ace2_bus_bindings_0_1",
+                    "ace2_bus_bindings_1", "ace2_bus_bindings_1_2",
+                    "ace2_bus_bindings_2"):
+            self.assertIn(key, self.variables)
+
+    def test_handle_ready_runs_cleanup(self):
+        manager = self._build_manager()
+        manager._setup_sensors = Mock()
+        manager._start_monitoring = Mock()
+        manager._validate_startup_tool_state = Mock()
+
+        manager._handle_ready()
+
+        self.assertNotIn("ace2_bus_bindings_2", self.variables)
+        self.assertIn("ace2_bus_bindings_0_1", self.variables)
+        self.assertIn("ace_inventory_2", self.variables)
+
+    def test_inventory_survives_ace_count_round_trip(self):
+        """Temporarily lowering ace_count must not destroy parked inventory.
+
+        Scenario: user disconnects the second unit, runs with ace_count=1
+        for a while, then reconnects it and restores ace_count=2. The
+        second unit's hand-entered spool data must come back intact.
+        """
+        original_inventory = list(self.variables["ace_inventory_1"])
+
+        manager = self._build_manager(ace_count=1)
+        manager._cleanup_stale_persistent_keys()
+        self.assertIn("ace_inventory_1", self.variables)
+
+        manager = self._build_manager(ace_count=2)
+        manager._cleanup_stale_persistent_keys()
+        self.assertEqual(manager.instances[1].inventory, original_inventory)
+
+    def test_cleanup_command_dry_run_reports_without_deleting(self):
+        manager = self._build_manager()
+        gcmd = self._make_gcmd(confirm=0)
+
+        manager.cleanup_stale_persistent_vars(gcmd)
+
+        self.assertIn("ace_inventory_2", self.variables)
+        self.assertIn("ace2_bus_bindings_2", self.variables)
+        reported = " ".join(
+            str(call_args[0][0])
+            for call_args in gcmd.respond_info.call_args_list
+        )
+        for key in ("ace_inventory_2", "ace2_bus_bindings_0",
+                    "ace2_bus_bindings_1", "ace2_bus_bindings_1_2",
+                    "ace2_bus_bindings_2"):
+            self.assertIn(key, reported)
+        self.assertIn("CONFIRM=1", reported)
+
+    def test_cleanup_command_confirm_deletes_including_inventory(self):
+        manager = self._build_manager()
+        gcmd = self._make_gcmd(confirm=1)
+
+        manager.cleanup_stale_persistent_vars(gcmd)
+
+        self.assertNotIn("ace_inventory_2", self.variables)
+        self.assertNotIn("ace2_bus_bindings_0", self.variables)
+        self.assertNotIn("ace2_bus_bindings_1", self.variables)
+        self.assertNotIn("ace2_bus_bindings_1_2", self.variables)
+        self.assertNotIn("ace2_bus_bindings_2", self.variables)
+        self.assertIn("ace_inventory_0", self.variables)
+        self.assertIn("ace_inventory_1", self.variables)
+        self.assertIn("ace2_bus_bindings_0_1", self.variables)
+        self.assertIn("speed_factor", self.variables)
+
+    def test_cleanup_command_reports_when_nothing_stale(self):
+        for key in ("ace_inventory_2", "ace2_bus_bindings_0",
+                    "ace2_bus_bindings_1", "ace2_bus_bindings_1_2",
+                    "ace2_bus_bindings_2"):
+            del self.variables[key]
+        manager = self._build_manager()
+        gcmd = self._make_gcmd(confirm=0)
+
+        manager.cleanup_stale_persistent_vars(gcmd)
+
+        reported = " ".join(
+            str(call_args[0][0])
+            for call_args in gcmd.respond_info.call_args_list
+        )
+        self.assertIn("No stale", reported)
 
 
 class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):

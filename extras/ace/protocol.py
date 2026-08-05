@@ -186,13 +186,17 @@ def sort_ace_candidate_ports(
 
         location = get_port_usb_location(portinfo)
         location_key = parse_usb_location(location)
-        # Sort by hop-count (depth) first, then lexicographically within the
-        # same depth. Hop-count is what guarantees daisy-chain order: a unit
-        # chained through another unit's internal hub is *always* exactly one
-        # hop deeper than its upstream neighbor, regardless of which physical
-        # port number that unit's hub happens to wire its own MCU to. Sorting
-        # on the raw tuple alone can misorder units whose "own MCU" port
-        # number is numerically higher than their "chain-out" port number.
+        # Sort by hop-count (depth) first, then numerically within the same
+        # depth. Hub-bearing units (ACE1 has a built-in hub) nest each chained
+        # hub-bearing neighbor one hop deeper, so depth orders those chains
+        # correctly even when a unit wires its own MCU to a higher port number
+        # than its chain-out port (raw tuple order would misorder that case).
+        # Hubless devices (the ACE2 RS485 USB adapter) do NOT appear deeper:
+        # they attach as a *sibling* of the upstream unit's MCU on the same
+        # hub - verified on hardware: ACE1 MCU at 3-1.3, chained ACE2 adapter
+        # at 3-1.4. Equal-depth entries fall back to numeric port order; for
+        # dedicated-vs-shared candidates the ACE1-first normalization in
+        # _resolve_daisy_chain_topology decides the final order anyway.
         sort_key = (len(location_key), location_key)
         matches.append((sort_key, location, portinfo.device, matched[0], matched[1]))
 
