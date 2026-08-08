@@ -506,8 +506,13 @@ class AceSerialManager:
             )
             return
 
-        # Get current reconnect count for logging (don't add timestamp here - callback does it on failure)
+        # Record this connection loss for instability detection. Counting
+        # only failed connect attempts (as the callbacks below do) misses the
+        # dominant storm pattern: the device re-enumerates and every attempt
+        # succeeds on the first try, so the counter would stay at 0 through
+        # 90 reconnects/hour and instability detection would never trigger.
         now = self.reactor.monotonic()
+        self._reconnect_timestamps.append(now)
         cutoff = now - self.INSTABILITY_WINDOW
         self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
 
@@ -888,8 +893,8 @@ class AceSerialManager:
 
         Stable means:
         - Currently connected
-        - Connected for at least STABILITY_GRACE_PERIOD (30s)
-        - Less than INSTABILITY_THRESHOLD (3) reconnects in INSTABILITY_WINDOW (60s)
+        - Connected for at least STABILITY_GRACE_PERIOD
+        - Fewer than INSTABILITY_THRESHOLD reconnects in INSTABILITY_WINDOW
 
         Returns:
             bool: True if connected and stable

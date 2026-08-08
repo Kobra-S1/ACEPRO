@@ -2052,16 +2052,51 @@ class TestConnectionStability:
         assert len(self.manager._reconnect_timestamps) == 0
         assert self.manager._last_connected_time == 0.0
 
-    def test_reconnect_does_not_add_timestamp(self):
-        """reconnect() should not add timestamp - only callback failures do."""
+    def test_reconnect_adds_timestamp(self):
+        """reconnect() records each connection loss, not just failed retries.
+
+        If only failed connect attempts were counted, a link that dies every
+        40s but reconnects successfully on the first try every time would
+        keep the counter at 0 forever (observed in the field: 90 reconnects
+        in an hour, all logged as "0 reconnects in last 180s"), so
+        instability detection never triggered.
+        """
         self.manager.reactor.register_timer = Mock(return_value="timer")
         self.manager.reactor.NOW = 0.0
         self.manager.reactor.monotonic.return_value = 1000.0
-        
+
         self.manager.reconnect(delay=1)
-        
-        # reconnect() no longer adds timestamp - callback does on failure
-        assert len(self.manager._reconnect_timestamps) == 0
+
+        assert len(self.manager._reconnect_timestamps) == 1
+
+    def test_succeed_then_die_storm_marks_connection_unstable(self):
+        """A reconnect storm where every attempt succeeds must still trip
+        instability detection once the threshold is reached."""
+        self.manager.reactor.register_timer = Mock(return_value="timer")
+        self.manager.reactor.NOW = 0.0
+        # Every reconnect attempt succeeds instantly (device re-enumerated)
+        self.manager.auto_connect = Mock(return_value=True)
+
+        # Connection dies every 20s; reconnect succeeds each time
+        threshold = self.manager.INSTABILITY_THRESHOLD
+        for i in range(threshold):
+            now = 1000.0 + i * 20.0
+            self.manager.reactor.monotonic.return_value = now
+            self.manager.reconnect(delay=1)
+
+        # Currently connected and past the grace period, but the storm is
+        # within the instability window - must NOT be considered stable
+        last_death = 1000.0 + (threshold - 1) * 20.0
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._last_connected_time = last_death + 1.0
+        self.manager.reactor.monotonic.return_value = (
+            last_death + 1.0 + self.manager.STABILITY_GRACE_PERIOD + 5.0
+        )
+
+        assert self.manager._get_recent_reconnect_count() >= threshold
+        assert self.manager.is_connection_stable() is False
 
     def test_callback_failures_tracked(self):
         """Failed callback retries should add timestamps."""
@@ -2076,15 +2111,16 @@ class TestConnectionStability:
         self.manager.reactor.NOW = 0.0
         self.manager.auto_connect = Mock(return_value=False)
         
-        # Start reconnect
+        # Start reconnect (adds 1 timestamp for the connection loss itself)
         self.manager.reconnect(delay=1)
-        
+
         # Simulate 3 failed callbacks
         for t in [1000.0, 1010.0, 1020.0]:
             self.manager.reactor.monotonic.return_value = t
             captured_callback(t)
-        
-        assert len(self.manager._reconnect_timestamps) == 3
+
+        # 1 connection loss + 3 failed attempts
+        assert len(self.manager._reconnect_timestamps) == 4
 
     def test_old_timestamps_pruned_during_callback(self):
         """Timestamps older than INSTABILITY_WINDOW should be pruned on reconnect."""
@@ -2099,18 +2135,18 @@ class TestConnectionStability:
         self.manager.reactor.NOW = 0.0
         self.manager.auto_connect = Mock(return_value=False)
         
-        # Start first reconnect and fail - adds timestamp at 1000
+        # First reconnect at 1000 (1 timestamp) plus a failed attempt (1 more)
         self.manager.reconnect(delay=1)
         self.manager.reactor.monotonic.return_value = 1000.0
         captured_callback(1000.0)
-        
-        assert len(self.manager._reconnect_timestamps) == 1
-        
-        # Start second reconnect 200 seconds later (window is 180s)
+
+        assert len(self.manager._reconnect_timestamps) == 2
+
+        # Another failed attempt 200 seconds later (window is 180s)
         self.manager.reactor.monotonic.return_value = 1200.0
         captured_callback(1200.0)
-        
-        # Old timestamp should be pruned, only new one remains
+
+        # Old timestamps should be pruned, only new one remains
         assert len(self.manager._reconnect_timestamps) == 1
         assert self.manager._reconnect_timestamps[0] == 1200.0
 
@@ -2284,21 +2320,21 @@ class TestRetryLoopTimestampTracking:
         # Mock auto_connect to always fail
         self.manager.auto_connect = Mock(return_value=False)
         
-        # Initial reconnect call (does NOT add timestamp - only callback failures do)
+        # Initial reconnect call records the connection loss itself
         self.mock_reactor.monotonic.return_value = 1000.0
         self.manager.reconnect(delay=5)
-        
+
         assert captured_callback is not None
         initial_count = len(self.manager._reconnect_timestamps)
-        assert initial_count == 0  # reconnect() no longer adds timestamp
-        
+        assert initial_count == 1  # the connection loss that triggered reconnect
+
         # Simulate 6 retry callbacks (each failure adds a timestamp)
         for i in range(6):
             self.mock_reactor.monotonic.return_value = 1010.0 + (i * 10)
             captured_callback(1010.0 + (i * 10))
-        
-        # Should have 6 total timestamps (all from retries)
-        assert len(self.manager._reconnect_timestamps) == 6
+
+        # 1 connection loss + 6 failed retries
+        assert len(self.manager._reconnect_timestamps) == 7
 
     def test_successful_connect_stops_retry_loop(self):
         """Successful auto_connect should return NEVER to stop timer."""
