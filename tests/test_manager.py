@@ -6422,6 +6422,26 @@ class _ManagerCycleFixture(unittest.TestCase):
         return inst
 
 
+class TestDriverVersionLogging(_ManagerCycleFixture):
+    """Manager init must announce the ACEPRO driver version.
+
+    Klippy only logs its own repo's git version; without this line a
+    klippy.log gives no clue which ACEPRO commit produced it (support
+    logs had to be dated by message-wording archaeology).
+    """
+
+    def test_init_logs_driver_version(self):
+        instance = self._make_instance()
+        self._build_manager(lambda *a, **k: instance)
+
+        messages = [
+            str(call.args[0])
+            for call in self.mock_gcode.respond_info.call_args_list
+        ]
+        version_lines = [m for m in messages if "ACEPRO driver" in m]
+        self.assertEqual(len(version_lines), 1)
+
+
 class TestSmartUnloadCyclingFallback(_ManagerCycleFixture):
     """smart_unload must escalate to slot cycling when the known tool's
     direct unload leaves the filament path blocked.

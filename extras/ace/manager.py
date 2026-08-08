@@ -37,6 +37,7 @@ from .protocol import (
     transport_description_matches,
 )
 from .serial_manager import AceSerialManager
+from .version import get_driver_version
 import logging
 import re
 import serial
@@ -161,6 +162,13 @@ class AceManager:
 
         if self.ace_count < 1:
             raise config.error(f"ace_count must be >= 1, got {self.ace_count}")
+
+        # Identify the driver checkout in klippy.log — klippy only reports
+        # its own repo's version, so support logs carried no clue which
+        # ACEPRO commit produced them.
+        version_line = f"ACE: ACEPRO driver {get_driver_version()}"
+        logging.info(version_line)
+        self.gcode.respond_info(version_line)
 
         self.gcode.respond_info(f"ACE: Creating {self.ace_count} instance(s) with single AceManager")
 
