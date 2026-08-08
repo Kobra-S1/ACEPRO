@@ -303,6 +303,32 @@ class TestFindComPort:
         # candidate rather than opening a port instance 5 already owns.
         assert result == "/dev/ttyACM1"
 
+    def test_second_instance_binds_when_first_instances_port_is_claimed(self):
+        """Claimed ports consume their chain slot instead of shrinking the list.
+
+        Field failure: topology mapping was deferred at startup (one unit
+        mid-reset), ACE[0] claimed the shallow port via index fallback, and
+        ACE[1] then could never bind - the claimed port was dropped from the
+        match list, so matches[1] was forever out of range even while the
+        second device was visible in the enumeration log.
+        """
+        from ace import serial_manager
+
+        ports = [
+            SimpleNamespace(device="/dev/ttyACM3", description="ACE", hwid="LOCATION=1-1.2.3.3"),
+            SimpleNamespace(device="/dev/ttyACM4", description="ACE", hwid="LOCATION=1-1.2.3.4.3"),
+        ]
+        self.serial_mod.tools.list_ports.comports = lambda: ports
+
+        serial_manager._CONNECTED_PORTS["/dev/ttyACM3"] = 0  # claimed by instance 0
+        self.manager.instance_num = 1
+        try:
+            result = self.manager.find_com_port("ACE", instance=1)
+        finally:
+            serial_manager._CONNECTED_PORTS.pop("/dev/ttyACM3", None)
+
+        assert result == "/dev/ttyACM4"
+
     def test_does_not_skip_port_claimed_by_self(self):
         """A port this same instance already claimed (e.g. re-resolving
         after a transient blip) must remain selectable."""

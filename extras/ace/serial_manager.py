@@ -278,11 +278,19 @@ class AceSerialManager:
                     if owner != self.instance_num
                 }
 
+        # Ports claimed by other instances are excluded from selection but
+        # still occupy a position in the physical chain: without counting
+        # them, instance 1 would look for matches[1] after instance 0's
+        # port was dropped from the list and never bind even though its
+        # device is visible.
+        claimed_count = 0
+
         for portinfo in ports:
             if not transport_description_matches(device_name, portinfo.description):
                 continue
 
             if portinfo.device in claimed_elsewhere:
+                claimed_count += 1
                 logging.info(
                     f"ACE[{self.instance_num}] Skipping {portinfo.device} - "
                     f"already claimed by another instance"
@@ -314,13 +322,15 @@ class AceSerialManager:
         # Sort by physical daisy-chain position (depth-first, then location)
         matches.sort(key=lambda x: x[0])
 
+        effective_instance = max(0, instance - claimed_count)
+
         logging.info(f"ACE[{self.instance_num}] USB enumeration order:")
         for idx, (sort_key, loc, dev) in enumerate(matches):
-            marker = " <- SELECTED" if idx == instance else ""
+            marker = " <- SELECTED" if idx == effective_instance else ""
             logging.info(f"  [{idx}] {dev} at {loc}{marker}")
 
-        if len(matches) > instance:
-            return matches[instance][2]
+        if len(matches) > effective_instance:
+            return matches[effective_instance][2]
         return None
 
     def find_port_by_location(self, device_name, target_location, ports=None):
