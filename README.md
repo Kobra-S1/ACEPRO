@@ -1311,9 +1311,9 @@ Monitors ACE connection stability and automatically pauses prints if connection 
 
 ### How It Works
 
-1. **Reconnect Tracking** → Each failed connection attempt is timestamped
+1. **Reconnect Tracking** → Each connection loss and each failed connection attempt is timestamped
 2. **Health Monitoring** → Connection status checked every 2 seconds (low overhead)
-3. **Instability Detection** → If 6+ reconnects occur within 3 minutes, connection is flagged as unstable
+3. **Instability Detection** → If 4+ reconnects occur within 3 minutes, connection is flagged as unstable
 4. **During Print** → Print is paused, dialog shown informing user to fix the issue
 5. **When Idle** → Informational dialog shown (no pause)
 6. **Recovery** → Dialog auto-closes when connection stabilizes (connected for 30+ seconds)
@@ -1359,7 +1359,7 @@ ACE_GET_CONNECTION_STATUS
 # Example output:
 # === ACE Connection Status ===
 # ACE[0]: Connected (stable)
-# ACE[1]: Disconnected, 4/6 reconnects in 180s, next retry: 17s
+# ACE[1]: Disconnected, 3/4 reconnects in 180s, next retry: 17s
 ```
 ### Troubleshooting Connection Issues
 
@@ -1384,7 +1384,7 @@ If you see the connection issue dialog during a print, follow these steps:
    # ACE[0]: Connected (stable)
    
    # If you see "stabilizing" or reconnects, wait 30 seconds and check again:
-   # ACE[0]: Connected (stabilizing, 23s), 6/6 reconnects in 180s  ← WAIT
+   # ACE[0]: Connected (stabilizing, 23s), 4/4 reconnects in 180s  ← WAIT
    ```
 
 4. **When to Resume**

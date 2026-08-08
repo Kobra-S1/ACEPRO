@@ -2172,30 +2172,35 @@ class TestConnectionStability:
         self.manager.reactor.monotonic.return_value = 1025.0
         assert self.manager.is_connection_stable() is True
 
-    def test_is_connection_stable_fails_with_too_many_reconnects(self):
-        """is_connection_stable should return False with 6+ reconnects in 60s."""
+    def test_is_connection_stable_fails_at_threshold_reconnects(self):
+        """4 reconnects in the window must flag the connection unstable.
+
+        Threshold is 4 because a link that dies every ~45s (observed field
+        failure) only accumulates 3-5 events per 180s window - a threshold
+        of 6 was never reached and sustained flapping went unreported.
+        """
         self.manager._connected = True
         self.manager._serial = Mock()
         self.manager._serial.is_open = True
         self.manager._last_connected_time = 900.0  # Connected long ago
         self.manager.reactor.monotonic.return_value = 1000.0
-        
-        # Add 6 recent reconnects (threshold is 6)
-        self.manager._reconnect_timestamps = [945.0, 950.0, 955.0, 960.0, 965.0, 970.0]
-        
+
+        # 4 recent reconnects (at threshold)
+        self.manager._reconnect_timestamps = [945.0, 950.0, 960.0, 970.0]
+
         assert self.manager.is_connection_stable() is False
 
     def test_is_connection_stable_with_few_reconnects(self):
-        """is_connection_stable should be True with <6 reconnects in 60s."""
+        """is_connection_stable should be True below the reconnect threshold."""
         self.manager._connected = True
         self.manager._serial = Mock()
         self.manager._serial.is_open = True
         self.manager._last_connected_time = 900.0  # Connected long ago
         self.manager.reactor.monotonic.return_value = 1000.0
-        
-        # Only 5 reconnects (below threshold of 6)
-        self.manager._reconnect_timestamps = [950.0, 955.0, 960.0, 965.0, 970.0]
-        
+
+        # Only 3 reconnects (below threshold of 4)
+        self.manager._reconnect_timestamps = [950.0, 960.0, 970.0]
+
         assert self.manager.is_connection_stable() is True
 
     @patch('ace.serial_manager.serial')

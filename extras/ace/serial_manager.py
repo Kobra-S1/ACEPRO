@@ -148,7 +148,10 @@ class AceSerialManager:
         # Connection stability tracking
         # Rate-based detection: unstable if too many reconnects in short window
         self.INSTABILITY_WINDOW = 180.0      # Look at reconnects in last 3 minutes
-        self.INSTABILITY_THRESHOLD = 6       # 6+ reconnects in window = unstable
+        # 4+ reconnects in window = unstable. A link that dies every ~45s
+        # (observed field failure) accumulates only 3-5 events per window,
+        # so the previous threshold of 6 never flagged sustained flapping.
+        self.INSTABILITY_THRESHOLD = 4
         self.STABILITY_GRACE_PERIOD = 30.0   # Must stay connected 30s to be "stable"
         self.COUNTER_RESET_PERIOD = 180.0    # Reset counter after 3 min of stability
 
