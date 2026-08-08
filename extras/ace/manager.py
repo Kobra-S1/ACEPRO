@@ -1482,8 +1482,7 @@ class AceManager:
                 f"({retract_length}mm at {retract_speed}mm/s) to identify loaded tool"
             )
 
-            # Use existing cycling logic
-            return self._cycle_slots_with_sensor_check(
+            if self._cycle_slots_with_sensor_check(
                 current_tool_index,
                 attempted_tool_index,
                 retract_length,
@@ -1492,9 +1491,25 @@ class AceManager:
                 full_unload_length,
                 sensor_name=SENSOR_TOOLHEAD,
                 use_extruder=True
+            ):
+                return True
+
+            # Toolhead-based identification failed.  When the RDM also sees
+            # filament, escalate to RDM-monitored cycling (CASE 3 below)
+            # instead of giving up: it needs no toolhead-sensor movement at
+            # all and pulls with the ACE only, so it recovers cases the
+            # toolhead test cannot (field log: cycling failed on all slots
+            # and cancelled the print, while an RDM-monitored unload of the
+            # same slot succeeded seconds later).
+            if not (rdm_triggered and self.has_rdm_sensor()):
+                return False
+            self.gcode.respond_info(
+                "ACE: Toolhead-sensor cycling failed - escalating to "
+                "RDM-monitored cycling"
             )
 
-        # CASE 3: RDM triggered but toolhead clear - monitor RDM during ACE-only retraction
+        # CASE 3: RDM triggered (toolhead clear, or toolhead cycling failed) -
+        # monitor RDM during ACE-only retraction
         if rdm_triggered and self.has_rdm_sensor():
             # Get RDM-specific config
             tool_for_config = attempted_tool_index if attempted_tool_index >= 0 else current_tool_index
@@ -1517,7 +1532,7 @@ class AceManager:
             full_unload_length = parkposition_to_toolhead_length
 
             self.gcode.respond_info(
-                "ACE: RDM sensor triggered but toolhead sensor not - "
+                "ACE: RDM sensor triggered - "
                 f"Retracting and monitoring RDM sensor during ACE-only retraction "
                 f"({full_unload_length}mm at {rdm_retract_speed}mm/s)"
             )
@@ -1602,6 +1617,39 @@ class AceManager:
         # Cycle and test each slot
         identified_tool = None
 
+        def make_sensor_callback(inst_num, sname, overshoot_len, overshoot_spd, mstate):
+            """Early-stop callback polling `sname` during an ACE retraction."""
+            def sensor_early_stop_check():
+                elapsed = time.time() - mstate["start_time"]
+
+                sensor_has_filament = self.get_instant_switch_state(sname)
+
+                # Log every 2 seconds
+                if elapsed - mstate["last_log"] >= 2.0:
+                    state_str = "TRIGGERED" if sensor_has_filament else "CLEAR"
+                    self.gcode.respond_info(
+                        f"ACE[{inst_num}]: [{elapsed:.1f}s] {sname}={state_str}"
+                    )
+                    mstate["last_log"] = elapsed
+
+                if not sensor_has_filament and not mstate["cleared"]:
+                    mstate["cleared"] = True
+
+                    self.gcode.respond_info(
+                        f"ACE[{inst_num}]: {sname} cleared after {elapsed:.1f}s — "
+                        f"applying {overshoot_len}mm overshoot"
+                    )
+
+                    overshoot_time = overshoot_len / overshoot_spd
+                    if overshoot_time > 0:
+                        self.reactor.pause(
+                            self.reactor.monotonic() + overshoot_time
+                        )
+                    return f"{sname} clear at {elapsed:.1f}s"
+
+                return None
+            return sensor_early_stop_check
+
         for instance_num, slot, tool_num in slots_to_try:
             self.gcode.respond_info(
                 f"ACE[{instance_num}]: Testing slot {slot} (T{tool_num}) via {sensor_name}"
@@ -1640,6 +1688,61 @@ class AceManager:
                         identified_tool = (instance_num, slot, tool_num)
                         break
 
+                    # The coordinated retract only moves the tip from the
+                    # cutter to just past the extruder gears (that is what
+                    # toolhead_retraction_length is dimensioned for) — the
+                    # toolhead sensor sits above the release point, so even
+                    # the CORRECT slot still reads TRIGGERED here.  Once the
+                    # extruder has released the filament, only the loaded
+                    # slot's ACE can move it: continue with an ACE-only
+                    # retraction polling the sensor live.  Cap: the sensor is
+                    # extruder_feeding_length + toolhead_full_purge_length of
+                    # filament path above the primed tip; subtract what the
+                    # coordinated retract already pulled.  A wrong slot only
+                    # drags its own parked filament back by this bounded
+                    # length.
+                    continuation_max = max(
+                        0.0,
+                        instance.extruder_feeding_length
+                        + instance.toolhead_full_purge_length
+                        - retract_length,
+                    )
+                    if continuation_max > 0:
+                        monitor_state = {
+                            "cleared": False,
+                            "start_time": time.time(),
+                            "last_log": 0,
+                        }
+                        early_stop_cb = make_sensor_callback(
+                            instance_num, sensor_name,
+                            instance.rdm_overshoot_length,
+                            retract_speed, monitor_state,
+                        )
+                        self.gcode.respond_info(
+                            f"ACE[{instance_num}]: Sensor still triggered — "
+                            f"continuing with ACE-only retraction on slot {slot} "
+                            f"(max {continuation_max:.0f}mm @ {retract_speed}mm/s)"
+                        )
+                        instance.wait_ready()
+                        try:
+                            instance._retract(
+                                slot, length=continuation_max, speed=retract_speed,
+                                early_stop_callback=early_stop_cb,
+                            )
+                        except Exception as e:
+                            instance._stop_retract(slot)
+                            self.gcode.respond_info(
+                                f"ACE[{instance_num}]: Retract error on slot {slot}: {e}"
+                            )
+
+                        if monitor_state["cleared"]:
+                            self.gcode.respond_info(
+                                f"ACE[{instance_num}]: ✓ Sensor cleared during "
+                                f"continuation! T{tool_num} identified"
+                            )
+                            identified_tool = (instance_num, slot, tool_num)
+                            break
+
                 else:
                     # CASE 3: ACE-only retraction with sensor monitoring
                     # Uses early_stop_callback inside _retract() so the sensor
@@ -1677,39 +1780,6 @@ class AceManager:
                         "start_time": time.time(),
                         "last_log": 0,
                     }
-
-                    def make_sensor_callback(inst_num, sname, overshoot_len, overshoot_spd, mstate):
-                        """Factory to capture loop variables in closure."""
-                        def sensor_early_stop_check():
-                            elapsed = time.time() - mstate["start_time"]
-
-                            sensor_has_filament = self.get_instant_switch_state(sname)
-
-                            # Log every 2 seconds
-                            if elapsed - mstate["last_log"] >= 2.0:
-                                state_str = "TRIGGERED" if sensor_has_filament else "CLEAR"
-                                self.gcode.respond_info(
-                                    f"ACE[{inst_num}]: [{elapsed:.1f}s] {sname}={state_str}"
-                                )
-                                mstate["last_log"] = elapsed
-
-                            if not sensor_has_filament and not mstate["cleared"]:
-                                mstate["cleared"] = True
-
-                                self.gcode.respond_info(
-                                    f"ACE[{inst_num}]: {sname} cleared after {elapsed:.1f}s — "
-                                    f"applying {overshoot_len}mm overshoot"
-                                )
-
-                                overshoot_time = overshoot_len / overshoot_spd
-                                if overshoot_time > 0:
-                                    self.reactor.pause(
-                                        self.reactor.monotonic() + overshoot_time
-                                    )
-                                return f"{sname} clear at {elapsed:.1f}s"
-
-                            return None
-                        return sensor_early_stop_check
 
                     early_stop_cb = make_sensor_callback(
                         instance_num, sensor_name, overshoot_length,
