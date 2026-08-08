@@ -5174,6 +5174,25 @@ class TestHandleConnectionIssue(unittest.TestCase):
         self.manager._pause_for_connection_issue.assert_called_once_with(unstable)
         self.assertTrue(self.manager._connection_issue_shown)
 
+    def test_unstable_message_reports_actual_window(self):
+        """The dialog message must state the real instability window, not a
+        stale hardcoded 60s."""
+        unstable = [{
+            "instance": 0,
+            "connected": True,
+            "recent_reconnects": 4,
+            "time_connected": 45,
+            "window_seconds": 180,
+        }]
+        self.mock_print_stats.get_status.return_value = {"state": "printing"}
+
+        self.manager._handle_connection_issue(unstable, eventtime=0.0)
+
+        messages = " ".join(
+            str(call.args[0]) for call in self.mock_gcode.respond_info.call_args_list
+        )
+        assert "4 reconnects in 180s" in messages
+
     def test_shows_dialog_only_when_not_printing(self):
         unstable = [{"instance": 1, "connected": True, "recent_reconnects": 1, "time_connected": 12}]
         self.mock_printer.lookup_object.side_effect = lambda name, default=None: (
@@ -5975,6 +5994,7 @@ class TestCheckConnectionHealth(unittest.TestCase):
         inst.instance_num = 0
         inst.serial_mgr = Mock()
         inst.serial_mgr.INSTABILITY_THRESHOLD = 2
+        inst.serial_mgr.INSTABILITY_WINDOW = 180.0
         inst.serial_mgr.get_connection_status.return_value = {
             "stable": stable,
             "recent_reconnects": reconnects,

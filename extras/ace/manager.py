@@ -2372,6 +2372,7 @@ class AceManager:
                     "connected": status["connected"],
                     "recent_reconnects": status["recent_reconnects"],
                     "time_connected": status["time_connected"],
+                    "window_seconds": int(instance.serial_mgr.INSTABILITY_WINDOW),
                 })
 
             # Log when connection becomes stable again
@@ -2506,7 +2507,10 @@ class AceManager:
             if not info["connected"]:
                 status = "disconnected"
             elif info["recent_reconnects"] >= 3:
-                status = f"unstable ({info['recent_reconnects']} reconnects in 60s)"
+                status = (
+                    f"unstable ({info['recent_reconnects']} reconnects "
+                    f"in {info.get('window_seconds', 180)}s)"
+                )
             else:
                 status = f"stabilizing ({info['time_connected']:.0f}s connected)"
             instance_details.append(f"ACE {info['instance']}: {status}")
