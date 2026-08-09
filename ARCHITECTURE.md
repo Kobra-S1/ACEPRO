@@ -388,6 +388,21 @@ The extruder-assist phase is skipped entirely when a verdict is present.
   RDM sensor *during* the retraction — not after. The callback applies the overshoot delay inline
   when the sensor clears. Per-slot test length is capped to `full_unload − sensor_to_parking + overshoot`
   to avoid pulling a wrong slot's filament past the ACE entry sensor.
+- **Case-2 slot cycling** (toolhead sensor) is two-stage per slot: the coordinated
+  extruder+ACE retract of `toolhead_retraction_length` only moves the tip from the cutter to just
+  past the extruder gears (that is the length's design purpose — release the filament so the ACE
+  can pull), which is *below* the toolhead sensor, so even the correct slot still reads TRIGGERED
+  afterward. Stage two continues with an ACE-only retraction polling the toolhead sensor live
+  (same callback machinery as Case 3), capped at
+  `extruder_feeding_length + toolhead_full_purge_length − toolhead_retraction_length` — the sensor
+  sits that much filament path above the primed tip. Only the loaded slot's ACE can move the
+  filament once the extruder has released it, so the continuation is what actually discriminates
+  slots. A wrong slot merely drags its own parked filament back by the bounded cap.
+- **Case-2 → Case-3 escalation**: when toolhead-sensor cycling fails to identify any slot and the
+  RDM sensor also sees filament, `_identify_and_unload_by_cycling` escalates to RDM-monitored
+  cycling instead of failing (which would cancel the print). The RDM path needs no
+  toolhead-sensor movement and pulls with the ACE only, so it recovers cases the toolhead test
+  cannot (e.g. sensor stuck, or filament released from the extruder but parked below the sensor).
 
 ### 3. EndlessSpool (`endless_spool.py`)
 

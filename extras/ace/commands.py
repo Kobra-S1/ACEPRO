@@ -9,6 +9,7 @@ import json
 import traceback
 import logging
 
+from .version import get_driver_version
 from .config import (
     ACE_INSTANCES,
     INSTANCE_MANAGERS,
@@ -1903,6 +1904,7 @@ def cmd_ACE_DEBUG_STATE(gcmd):
             return
 
         gcmd.respond_info("=== ACE State Debug Info ===")
+        gcmd.respond_info(f"ACEPRO driver: {get_driver_version()}")
 
         def debug_instance_state(instance_num, mgr, instance):
             gcmd.respond_info(f"\nACE Manager[{instance_num}]:")

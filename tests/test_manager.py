@@ -5174,6 +5174,25 @@ class TestHandleConnectionIssue(unittest.TestCase):
         self.manager._pause_for_connection_issue.assert_called_once_with(unstable)
         self.assertTrue(self.manager._connection_issue_shown)
 
+    def test_unstable_message_reports_actual_window(self):
+        """The dialog message must state the real instability window, not a
+        stale hardcoded 60s."""
+        unstable = [{
+            "instance": 0,
+            "connected": True,
+            "recent_reconnects": 4,
+            "time_connected": 45,
+            "window_seconds": 180,
+        }]
+        self.mock_print_stats.get_status.return_value = {"state": "printing"}
+
+        self.manager._handle_connection_issue(unstable, eventtime=0.0)
+
+        messages = " ".join(
+            str(call.args[0]) for call in self.mock_gcode.respond_info.call_args_list
+        )
+        assert "4 reconnects in 180s" in messages
+
     def test_shows_dialog_only_when_not_printing(self):
         unstable = [{"instance": 1, "connected": True, "recent_reconnects": 1, "time_connected": 12}]
         self.mock_printer.lookup_object.side_effect = lambda name, default=None: (
@@ -5975,6 +5994,7 @@ class TestCheckConnectionHealth(unittest.TestCase):
         inst.instance_num = 0
         inst.serial_mgr = Mock()
         inst.serial_mgr.INSTABILITY_THRESHOLD = 2
+        inst.serial_mgr.INSTABILITY_WINDOW = 180.0
         inst.serial_mgr.get_connection_status.return_value = {
             "stable": stable,
             "recent_reconnects": reconnects,
@@ -6397,7 +6417,29 @@ class _ManagerCycleFixture(unittest.TestCase):
         inst._stop_retract = Mock()
         inst._feed_assist_index = -1  # real instances always carry this attribute
         inst.rdm_overshoot_length = 50.0
+        inst.extruder_feeding_length = 50.0
+        inst.toolhead_full_purge_length = 100.0
         return inst
+
+
+class TestDriverVersionLogging(_ManagerCycleFixture):
+    """Manager init must announce the ACEPRO driver version.
+
+    Klippy only logs its own repo's git version; without this line a
+    klippy.log gives no clue which ACEPRO commit produced it (support
+    logs had to be dated by message-wording archaeology).
+    """
+
+    def test_init_logs_driver_version(self):
+        instance = self._make_instance()
+        self._build_manager(lambda *a, **k: instance)
+
+        messages = [
+            str(call.args[0])
+            for call in self.mock_gcode.respond_info.call_args_list
+        ]
+        version_lines = [m for m in messages if "ACEPRO driver" in m]
+        self.assertEqual(len(version_lines), 1)
 
 
 class TestSmartUnloadCyclingFallback(_ManagerCycleFixture):
@@ -6781,6 +6823,103 @@ class TestCycleSlotsWithSensorCheck(_ManagerCycleFixture):
         self.assertTrue(result)
         self.assertGreater(len(slots_tested), 0)
         self.assertNotEqual(slots_tested[0], 1, "Empty current tool slot must not be tested first")
+
+    def test_use_extruder_continuation_clears_sensor_on_correct_slot(self):
+        """Field failure (KS1 klippy log): the coordinated retract only moves
+        the tip from the cutter to just past the extruder gears - still below
+        the toolhead sensor - so the correct slot read TRIGGERED and cycling
+        failed on all slots, cancelling the print.  The fix continues with an
+        ACE-only retraction polling the sensor live; only the loaded slot's
+        ACE can move the filament once the extruder has released it."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        manager.instances[0].inventory = [
+            {"status": "ready"},
+            {"status": "empty"},
+            {"status": "empty"},
+            {"status": "empty"},
+        ]
+        manager.execute_coordinated_retraction = Mock()
+
+        # Post-retract check reads TRIGGERED (3 readings); the sensor clears
+        # only when polled during the ACE-only continuation.
+        manager.get_instant_switch_state = Mock(
+            side_effect=[True, True, True] + [False] * 10
+        )
+
+        continuation_calls = []
+
+        def fake_retract(slot, length, speed, early_stop_callback=None):
+            continuation_calls.append({"slot": slot, "length": length})
+            if early_stop_callback is not None:
+                early_stop_callback()
+        instance._retract.side_effect = fake_retract
+
+        manager.reactor.pause = Mock()
+        manager.is_filament_path_free = Mock(return_value=True)
+
+        result = manager._cycle_slots_with_sensor_check(
+            current_tool_index=-1,
+            attempted_tool_index=-1,
+            retract_length=10,
+            retract_speed=5,
+            retract_speed_mmmin=600,
+            full_unload_length=500,
+            sensor_name=SENSOR_TOOLHEAD,
+            use_extruder=True,
+            sensor_to_parking_length=None,
+        )
+
+        self.assertTrue(result)
+        # Continuation length = extruder_feeding_length (50) +
+        # toolhead_full_purge_length (100) - already-retracted (10)
+        self.assertEqual(len(continuation_calls), 1)
+        self.assertEqual(continuation_calls[0]["slot"], 0)
+        self.assertEqual(continuation_calls[0]["length"], 140.0)
+        manager.state.set.assert_called_with(
+            "ace_filament_pos", FILAMENT_STATE_BOWDEN
+        )
+
+    def test_toolhead_cycling_failure_escalates_to_rdm_cycling(self):
+        """When toolhead-sensor cycling fails but the RDM sensor is triggered,
+        escalate to RDM-monitored cycling instead of giving up (which cancelled
+        the print in the field although the RDM path worked seconds later)."""
+        instance = self._make_instance()
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.get_switch_state = Mock(return_value=True)  # both sensors triggered
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager._get_config_for_tool = Mock(
+            side_effect=lambda tool, key: {
+                "parkposition_to_rdm_length": 350.0,
+                "parkposition_to_toolhead_length": 500.0,
+                "feed_speed": 100.0,
+            }[key]
+        )
+
+        cycling_calls = []
+
+        def fake_cycling(*args, **kwargs):
+            cycling_calls.append(kwargs)
+            # Toolhead pass fails, RDM pass succeeds
+            return kwargs["sensor_name"] == SENSOR_RDM
+        manager._cycle_slots_with_sensor_check = Mock(side_effect=fake_cycling)
+
+        result = manager._identify_and_unload_by_cycling(
+            current_tool_index=-1,
+            attempted_tool_index=0,
+            retract_length=10,
+            retract_speed=5,
+            retract_speed_mmmin=600,
+            full_unload_length=500,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(len(cycling_calls), 2)
+        self.assertEqual(cycling_calls[0]["sensor_name"], SENSOR_TOOLHEAD)
+        self.assertTrue(cycling_calls[0]["use_extruder"])
+        self.assertEqual(cycling_calls[1]["sensor_name"], SENSOR_RDM)
+        self.assertFalse(cycling_calls[1]["use_extruder"])
 
     def test_use_extruder_sensor_stays_triggered_cycles_all_slots(self):
         """Test cycling continues when sensor doesn't clear during use_extruder mode."""

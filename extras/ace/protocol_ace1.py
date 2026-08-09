@@ -43,6 +43,22 @@ class AceJsonProtocolAdapter(AceProtocolAdapter):
         data += b"\xFE"
         return bytes(data)
 
+    @staticmethod
+    def _keep_split_header(working: bytearray) -> tuple[bytearray, int]:
+        """Discard unusable bytes but retain a header split across reads.
+
+        A read() returns whatever has arrived, so the 0xFF 0xAA header
+        regularly straddles two reads.  Clearing the whole buffer on resync
+        eats that leading 0xFF, and the next - perfectly valid - frame then
+        starts with 0xAA and is itself discarded as junk.  One corruption
+        event would cost two replies.
+
+        Returns the surviving buffer and how many bytes were dropped.
+        """
+        if working and working[-1] == 0xFF:
+            return bytearray(b"\xFF"), len(working) - 1
+        return bytearray(), len(working)
+
     def extract_responses(
         self,
         buffer: bytearray,
@@ -60,8 +76,8 @@ class AceJsonProtocolAdapter(AceProtocolAdapter):
             if not (working[0] == 0xFF and working[1] == 0xAA):
                 header_idx = working.find(bytes([0xFF, 0xAA]))
                 if header_idx == -1:
-                    notices.append(f"Resync: dropped junk ({len(working)} bytes)")
-                    working = bytearray()
+                    working, dropped = self._keep_split_header(working)
+                    notices.append(f"Resync: dropped junk ({dropped} bytes)")
                     break
                 notices.append(f"Resync: skipping {header_idx} bytes")
                 working = working[header_idx:]
@@ -76,8 +92,14 @@ class AceJsonProtocolAdapter(AceProtocolAdapter):
             terminator_idx = 4 + payload_len + 2
             if working[terminator_idx] != 0xFE:
                 next_header = working.find(bytes([0xFF, 0xAA]), 1)
-                working = bytearray() if next_header == -1 else working[next_header:]
-                notices.append("Invalid frame tail, resyncing")
+                if next_header == -1:
+                    working, dropped = self._keep_split_header(working)
+                else:
+                    dropped = next_header
+                    working = working[next_header:]
+                notices.append(
+                    f"Invalid frame tail, resyncing (dropped {dropped} bytes)"
+                )
                 continue
 
             frame = bytes(working[:frame_len])

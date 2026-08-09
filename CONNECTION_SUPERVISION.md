@@ -112,7 +112,7 @@ line whenever it is non-zero:
 ## Layer 3: Manager Connection Stability Supervision
 
 **What it monitors**: Reconnection frequency (instability detection)  
-**Trigger condition**: 6+ reconnection attempts within 3 minutes
+**Trigger condition**: 4+ reconnection events (connection losses or failed attempts) within 3 minutes
 
 **What happens when triggered**:
 - **During printing**: 
@@ -196,7 +196,7 @@ line whenever it is non-zero:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `INSTABILITY_WINDOW` | 180s | Track reconnects in this window |
-| `INSTABILITY_THRESHOLD` | 6 | Reconnects to trigger unstable state |
+| `INSTABILITY_THRESHOLD` | 4 | Reconnects to trigger unstable state |
 | `STABILITY_GRACE_PERIOD` | 30s | Must be connected this long to be "stable" |
 | `COUNTER_RESET_PERIOD` | 180s | Reset counters after this stability |
 | `RECONNECT_BACKOFF_MIN` | 5s | Minimum reconnection delay |
@@ -242,8 +242,8 @@ Time  Event
 10:41 Reconnection attempt #5 fails, backoff = 25.3s
 11:06 Reconnection attempt #6 fails, backoff = 30s (max)
 11:36 Reconnection attempt #7 fails, backoff = 5s (cycled)
-      ... (6 attempts within 3 minutes)
-11:40 Manager supervision detects instability (6+ reconnects)
+      ... (4+ attempts within 3 minutes)
+11:40 Manager supervision detects instability (4+ reconnects)
 11:40 Print paused, dialog shown to user
 ----  User fixes power issue
 11:45 Connection succeeds, backoff reset to 5s

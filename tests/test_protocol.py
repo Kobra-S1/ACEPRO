@@ -1,11 +1,13 @@
 """Focused tests for protocol and ACE2 shared-bus scaffolding."""
 
+import json
 import struct
 
 import pytest
 
 from ace.ace2_bus import Ace2BusSession
 from ace.protocol import resolve_protocol_name, transport_description_matches
+from ace.protocol_ace1 import AceJsonProtocolAdapter
 from ace.protocol_ace2 import ACE2_COMMAND_CATALOG, AceProtoProtocolAdapter
 
 
@@ -560,6 +562,82 @@ class TestAceProtoResyncPreservesFrameBoundaries:
         corrupt = bytearray(self._discover_frame(request_id=12))
         corrupt[-1] = 0x00
         good = self._discover_frame(request_id=13)
+
+        responses, _, notices = self.adapter.extract_responses(
+            bytearray(bytes(corrupt) + good), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [13]
+        assert any("resync" in notice.lower() for notice in notices)
+
+
+class TestAceJsonResyncPreservesFrameBoundaries:
+    """Same split-header guarantees for the ACE1 JSON adapter.
+
+    The ACE1 wire format shares the 0xFF 0xAA header, so both resync paths
+    have the same failure mode the ACE2 adapter was fixed for: clearing the
+    whole buffer eats the leading 0xFF of a frame still arriving, and one
+    corruption event costs two replies.  Gen1 units are the ones actually
+    producing resync bursts in the field (735 junk drops in one klippy.log
+    session), so the fix matters most here.
+    """
+
+    def setup_method(self):
+        self.adapter = AceJsonProtocolAdapter()
+
+    @staticmethod
+    def _json_frame(request_id):
+        """Build a valid ACE1 JSON response frame."""
+        payload = json.dumps({"id": request_id, "result": {}}).encode("utf-8")
+        return (
+            b"\xFF\xAA"
+            + struct.pack("<H", len(payload))
+            + payload
+            + struct.pack("<H", _calc_crc(payload))
+            + b"\xFE"
+        )
+
+    def test_invalid_tail_keeps_split_header_byte(self):
+        """A frame with a destroyed terminator must not consume the first
+        byte of the next frame's header."""
+        corrupt = bytearray(self._json_frame(request_id=8))
+        corrupt[-1] = 0x00  # destroy the 0xFE terminator
+
+        # Only the first byte of the next frame's header has arrived so far.
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(bytes(corrupt) + b"\xFF"), _calc_crc
+        )
+        assert responses == []
+        assert any("resync" in notice.lower() for notice in notices)
+
+        # Second read delivers the rest of a perfectly valid frame.
+        good = self._json_frame(request_id=9)
+        responses, _, _ = self.adapter.extract_responses(
+            remaining + bytearray(good[1:]), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [9]
+
+    def test_junk_scan_keeps_split_header_byte(self):
+        """Dropping unparseable junk must likewise preserve a trailing 0xFF
+        that starts the next frame."""
+        junk = bytes(range(0x10, 0x30))  # 32 bytes, contains no 0xFF 0xAA
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(junk + b"\xFF"), _calc_crc
+        )
+        assert responses == []
+        assert any("junk" in notice.lower() for notice in notices)
+
+        good = self._json_frame(request_id=11)
+        responses, _, _ = self.adapter.extract_responses(
+            remaining + bytearray(good[1:]), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [11]
+
+    def test_invalid_tail_still_recovers_a_complete_following_frame(self):
+        """Regression guard: the already-working case must keep working."""
+        corrupt = bytearray(self._json_frame(request_id=12))
+        corrupt[-1] = 0x00
+        good = self._json_frame(request_id=13)
 
         responses, _, notices = self.adapter.extract_responses(
             bytearray(bytes(corrupt) + good), _calc_crc

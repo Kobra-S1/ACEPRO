@@ -148,7 +148,10 @@ class AceSerialManager:
         # Connection stability tracking
         # Rate-based detection: unstable if too many reconnects in short window
         self.INSTABILITY_WINDOW = 180.0      # Look at reconnects in last 3 minutes
-        self.INSTABILITY_THRESHOLD = 6       # 6+ reconnects in window = unstable
+        # 4+ reconnects in window = unstable. A link that dies every ~45s
+        # (observed field failure) accumulates only 3-5 events per window,
+        # so the previous threshold of 6 never flagged sustained flapping.
+        self.INSTABILITY_THRESHOLD = 4
         self.STABILITY_GRACE_PERIOD = 30.0   # Must stay connected 30s to be "stable"
         self.COUNTER_RESET_PERIOD = 180.0    # Reset counter after 3 min of stability
 
@@ -275,11 +278,19 @@ class AceSerialManager:
                     if owner != self.instance_num
                 }
 
+        # Ports claimed by other instances are excluded from selection but
+        # still occupy a position in the physical chain: without counting
+        # them, instance 1 would look for matches[1] after instance 0's
+        # port was dropped from the list and never bind even though its
+        # device is visible.
+        claimed_count = 0
+
         for portinfo in ports:
             if not transport_description_matches(device_name, portinfo.description):
                 continue
 
             if portinfo.device in claimed_elsewhere:
+                claimed_count += 1
                 logging.info(
                     f"ACE[{self.instance_num}] Skipping {portinfo.device} - "
                     f"already claimed by another instance"
@@ -311,13 +322,15 @@ class AceSerialManager:
         # Sort by physical daisy-chain position (depth-first, then location)
         matches.sort(key=lambda x: x[0])
 
+        effective_instance = max(0, instance - claimed_count)
+
         logging.info(f"ACE[{self.instance_num}] USB enumeration order:")
         for idx, (sort_key, loc, dev) in enumerate(matches):
-            marker = " <- SELECTED" if idx == instance else ""
+            marker = " <- SELECTED" if idx == effective_instance else ""
             logging.info(f"  [{idx}] {dev} at {loc}{marker}")
 
-        if len(matches) > instance:
-            return matches[instance][2]
+        if len(matches) > effective_instance:
+            return matches[effective_instance][2]
         return None
 
     def find_port_by_location(self, device_name, target_location, ports=None):
@@ -506,8 +519,13 @@ class AceSerialManager:
             )
             return
 
-        # Get current reconnect count for logging (don't add timestamp here - callback does it on failure)
+        # Record this connection loss for instability detection. Counting
+        # only failed connect attempts (as the callbacks below do) misses the
+        # dominant storm pattern: the device re-enumerates and every attempt
+        # succeeds on the first try, so the counter would stay at 0 through
+        # 90 reconnects/hour and instability detection would never trigger.
         now = self.reactor.monotonic()
+        self._reconnect_timestamps.append(now)
         cutoff = now - self.INSTABILITY_WINDOW
         self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
 
@@ -888,8 +906,8 @@ class AceSerialManager:
 
         Stable means:
         - Currently connected
-        - Connected for at least STABILITY_GRACE_PERIOD (30s)
-        - Less than INSTABILITY_THRESHOLD (3) reconnects in INSTABILITY_WINDOW (60s)
+        - Connected for at least STABILITY_GRACE_PERIOD
+        - Fewer than INSTABILITY_THRESHOLD reconnects in INSTABILITY_WINDOW
 
         Returns:
             bool: True if connected and stable
