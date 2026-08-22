@@ -177,6 +177,39 @@ class TestAceProtoProtocolAdapter:
             }
         ]
 
+    def test_extract_responses_decodes_get_feed_info(self):
+        # Slot 0: a 723mm retract measured as 733mm delivered (negative = retract),
+        # observed on hardware. Slot 1: a 100mm feed measured as 100mm.
+        slot0 = (
+            _pb_uint(1, 8928)
+            + _pb_uint(2, 723)
+            + _pb_uint(3, (1 << 64) - 733)  # two's-complement -733
+        )
+        slot1 = _pb_uint(1, 1237) + _pb_uint(2, 100) + _pb_uint(3, 100)
+        payload = _pb_bytes(1, slot0) + _pb_bytes(1, slot1)
+        inner = b"\x80\x0B\x00\x4C" + bytes([len(payload)]) + payload
+        frame = b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+
+        responses, remaining, notices = self.adapter.extract_responses(bytearray(frame), _calc_crc)
+
+        assert notices == []
+        assert remaining == bytearray()
+        assert responses == [
+            {
+                "id": 11,
+                "command": "GET_FEED_INFO",
+                "flags": 0x80,
+                "code": 0,
+                "msg": "SUCCESS",
+                "result": {
+                    "slots": [
+                        {"motor_counts": 8928, "magnitude_mm": 723, "moved_mm": -733},
+                        {"motor_counts": 1237, "magnitude_mm": 100, "moved_mm": 100},
+                    ]
+                },
+            }
+        ]
+
     def test_extract_responses_normalizes_status_for_instance_callbacks(self):
         dry_status = _pb_uint(1, 2) + _pb_uint(2, 45) + _pb_uint(4, 90)
         slot_ready = _pb_uint(1, 0) + _pb_uint(2, 2)

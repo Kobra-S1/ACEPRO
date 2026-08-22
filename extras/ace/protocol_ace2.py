@@ -431,6 +431,32 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                     "slots": slots,
                 },
             }
+        if command_name == "GET_FEED_INFO":
+            # One sub-message per slot, in slot order. Values are measured by the ACE,
+            # not echoes of the command (a 723mm retract has been observed reporting
+            # 733mm delivered). This is a last-operation register, not an odometer:
+            # field 1 does not accumulate across operations.
+            slots = []
+            for _, slot_payload in fields.get(1, []):
+                slot_fields = _pb_decode(slot_payload) if slot_payload else {}
+                counts = int(_pb_first(slot_fields, 1, 0))
+                magnitude_mm = int(_pb_first(slot_fields, 2, 0))
+                moved = int(_pb_first(slot_fields, 3, 0))
+                # field 3 is two's-complement int64: negative means a retract.
+                if moved >= (1 << 63):
+                    moved -= 1 << 64
+                slots.append(
+                    {
+                        "motor_counts": counts,
+                        "magnitude_mm": magnitude_mm,
+                        "moved_mm": moved,
+                    }
+                )
+            return {
+                "code": 0,
+                "msg": ACE2_RESPONSE_CODE_NAMES[0],
+                "result": {"slots": slots},
+            }
         if command_name == "GET_FILAMENT_INFO":
             extruder_payload = _pb_first(fields, 6, b"")
             extruder_fields = _pb_decode(extruder_payload) if extruder_payload else {}
