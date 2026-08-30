@@ -885,6 +885,9 @@ class Panel(ScreenPanel):
             main_box.pack_start(bottom_box, False, False, 0)
             scroll = Gtk.ScrolledWindow()
             scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            # A touchscreen never hovers, so an overlay scrollbar is never
+            # shown: the list scrolls by swipe with nothing to say it can.
+            scroll.set_overlay_scrolling(False)
             scroll.add(main_box)
             self.content.add(scroll)
 
@@ -1904,6 +1907,7 @@ class Panel(ScreenPanel):
             # Only the instance-cards area scrolls; buttons stay anchored below.
             inner_scroll = Gtk.ScrolledWindow()
             inner_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            inner_scroll.set_overlay_scrolling(False)
             inner_scroll.set_vexpand(True)
             inner_scroll.set_propagate_natural_width(False)
             inner_scroll.add(instances_box)
@@ -1920,6 +1924,7 @@ class Panel(ScreenPanel):
         else:
             landscape_scroll = Gtk.ScrolledWindow()
             landscape_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            landscape_scroll.set_overlay_scrolling(False)
             landscape_scroll.set_vexpand(True)
             landscape_scroll.set_propagate_natural_width(False)
             landscape_scroll.add(instances_box)
