@@ -852,6 +852,14 @@ class Panel(ScreenPanel):
 
         bottom_box.pack_start(self.dryer_btn, True, True, 0)
 
+        # _gtk.Button() is created with vexpand=True, so a row holding one
+        # reports compute_expand()==True and GtkBox hands the row a share of the
+        # leftover height -- but pack_start(..., False, False) means fill=False,
+        # so the row is centred in that share instead of filling it, and the
+        # share shows up as dead space above and below it. Anchoring the row
+        # gives that height to the scrolling list, where it belongs.
+        bottom_box.set_vexpand(False)
+
         if _portrait:
             # Portrait: only the slot-card area scrolls.  Top controls and bottom
             # buttons sit outside the scroll and are always on screen.
@@ -885,6 +893,9 @@ class Panel(ScreenPanel):
             main_box.pack_start(bottom_box, False, False, 0)
             scroll = Gtk.ScrolledWindow()
             scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            # A touchscreen never hovers, so an overlay scrollbar is never
+            # shown: the list scrolls by swipe with nothing to say it can.
+            scroll.set_overlay_scrolling(False)
             scroll.add(main_box)
             self.content.add(scroll)
 
@@ -1900,10 +1911,14 @@ class Panel(ScreenPanel):
             back_btn.connect("clicked", lambda w: self.return_to_main_screen())
             button_box.pack_start(back_btn, True, True, 0)
 
+        # Anchor the button row: see the note in create_main_screen.
+        button_box.set_vexpand(False)
+
         if _portrait:
             # Only the instance-cards area scrolls; buttons stay anchored below.
             inner_scroll = Gtk.ScrolledWindow()
             inner_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            inner_scroll.set_overlay_scrolling(False)
             inner_scroll.set_vexpand(True)
             inner_scroll.set_propagate_natural_width(False)
             inner_scroll.add(instances_box)
@@ -1920,6 +1935,7 @@ class Panel(ScreenPanel):
         else:
             landscape_scroll = Gtk.ScrolledWindow()
             landscape_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            landscape_scroll.set_overlay_scrolling(False)
             landscape_scroll.set_vexpand(True)
             landscape_scroll.set_propagate_natural_width(False)
             landscape_scroll.add(instances_box)
@@ -2341,6 +2357,7 @@ class Panel(ScreenPanel):
         back_btn = self._gtk.Button("arrow-left", "Back", "color3")
         back_btn.set_size_request(-1, 50)
         back_btn.connect("clicked", lambda w: self.return_to_spool_panel())
+        back_btn.set_vexpand(False)  # see the note in create_main_screen
         main_box.pack_end(back_btn, False, False, 0)
 
         # Clear the previous view only after the new one built successfully,
