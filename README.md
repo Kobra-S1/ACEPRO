@@ -1047,6 +1047,7 @@ Behavior notes:
    - Active tool (currently loaded): toolhead prep + extruder retract + ACE retract.
    - Non-active tool: ACE-only retract (no heating/cut path).
 - `ACE_FULL_UNLOAD TOOL=ALL` skips the currently loaded nozzle tool and processes other non-empty slots.
+- Only unloading the loaded tool itself clears `ace_current_index` (done inside `full_unload_slot`). Unloading any other slot, or `TOOL=ALL` with the nozzle tool skipped, leaves it untouched.
 
 ### Manual Feed/Retract Operations
 
