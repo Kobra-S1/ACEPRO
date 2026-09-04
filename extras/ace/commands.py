@@ -2136,7 +2136,11 @@ def cmd_ACE_CHANGE_TOOL_WRAPPER(gcmd):
 
 
 def cmd_ACE_FULL_UNLOAD(gcmd):
-    """Full unload - retract until slot empty. TOOL=<index> or TOOL=ALL or [no TOOL=current]. Clears tool on success."""
+    """Full unload - retract until slot empty. TOOL=<index> or TOOL=ALL or [no TOOL=current].
+
+    ace_current_index is owned by full_unload_slot, which clears it only when
+    the loaded tool itself was unloaded. This command never writes it.
+    """
     try:
         manager = ace_get_manager(0)
 
@@ -2220,11 +2224,6 @@ def cmd_ACE_FULL_UNLOAD(gcmd):
             else:
                 gcmd.respond_info("Failed: 0")
 
-            # Clear current tool index if all successful
-            if success_count == total_slots and total_slots > 0:
-                manager.state.set("ace_current_index", -1)
-                gcmd.respond_info("\nACE: All slots fully unloaded - current tool cleared")
-
             manager.state.flush()
             return
 
@@ -2237,9 +2236,9 @@ def cmd_ACE_FULL_UNLOAD(gcmd):
             raise gcmd.error("No tool specified and no current tool set. Use TOOL=<index> or TOOL=ALL")
 
         success = manager.full_unload_slot(tool)
+        manager.state.flush()
 
         if success:
-            manager.state.set_and_save("ace_current_index", -1)
             gcmd.respond_info(f"ACE: Tool {tool} fully unloaded")
         else:
             gcmd.respond_info(f"ACE: Tool {tool} full unload failed or incomplete")

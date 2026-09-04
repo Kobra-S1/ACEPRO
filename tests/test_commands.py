@@ -2820,8 +2820,12 @@ class TestFullUnloadCommand:
         # Verify full_unload_slot was called
         INSTANCE_MANAGERS[0].full_unload_slot.assert_called_with(2)
         
-        # Verify state was cleared
-        INSTANCE_MANAGERS[0].state.set_and_save.assert_any_call("ace_current_index", -1)
+        # The command must not touch ace_current_index itself: clearing it is
+        # owned by full_unload_slot, which only does so for the loaded tool.
+        written = (INSTANCE_MANAGERS[0].state.set.call_args_list
+                   + INSTANCE_MANAGERS[0].state.set_and_save.call_args_list)
+        assert not any(c.args[0] == "ace_current_index" for c in written)
+        INSTANCE_MANAGERS[0].state.flush.assert_called_once()
         
         # Verify success message
         assert mock_gcmd.respond_info.called
@@ -2972,35 +2976,73 @@ class TestFullUnloadCommand:
         assert "2" in call_args  # Succeeded
         assert "Failed: 1" in call_args or "T1" in call_args  # Failed list
 
-    def test_cmd_ACE_FULL_UNLOAD_all_clears_state_on_full_success(self, mock_gcmd, setup_mocks):
-        """Test TOOL=ALL clears current tool state when all slots succeed."""
-        from ace.config import FILAMENT_STATE_BOWDEN
-        
-        mock_gcmd.get = Mock(return_value="ALL")
-        
-        ACE_INSTANCES[0].inventory = [
-            {"status": "ready"},
-            {"status": "ready"},
-            {"status": "empty"},
-            {"status": "empty"},
-        ]
-        
-        def state_get_side_effect(varname, default=None):
-            if varname == "ace_current_index":
-                return -1
-            if varname == "ace_filament_pos":
-                return FILAMENT_STATE_BOWDEN
-            return default
-        INSTANCE_MANAGERS[0].state.get = Mock(side_effect=state_get_side_effect)
-        
-        mock_gcode = Mock()
-        INSTANCE_MANAGERS[0].gcode = mock_gcode
-        INSTANCE_MANAGERS[0].full_unload_slot = Mock(return_value=True)
-        
+    def _install_real_state(self, variables, extra_instances=()):
+        """Back INSTANCE_MANAGERS[0] with a real PersistentState over *variables*
+        so assertions read the value the command actually left behind, and
+        register *extra_instances* (num, slot statuses) as further ACE units.
+        """
+        from ace.persistent_state import PersistentState
+
+        save_vars = Mock()
+        save_vars.allVariables = variables
+        printer = Mock()
+        printer.lookup_object = Mock(return_value=save_vars)
+        manager = INSTANCE_MANAGERS[0]
+        manager.state = PersistentState(printer, Mock())
+        manager.full_unload_slot = Mock(return_value=True)
+        for num, statuses in extra_instances:
+            inst = Mock()
+            inst.instance_num = num
+            inst.tool_offset = num * 4
+            inst.SLOT_COUNT = 4
+            inst.inventory = [{"status": s} for s in statuses]
+            ACE_INSTANCES[num] = inst
+            INSTANCE_MANAGERS[num] = manager
+            manager.instances[num] = inst
+        return manager
+
+    def test_cmd_ACE_FULL_UNLOAD_single_non_active_tool_keeps_current_index(
+        self, mock_gcmd, setup_mocks
+    ):
+        """Unloading a slot other than the loaded tool leaves ace_current_index alone.
+
+        Reported with two ACE units: T5 (second unit) at the nozzle, the user
+        fully unloads a spool from the first unit and the loaded tool was
+        forgotten.
+        """
+        from ace.config import FILAMENT_STATE_NOZZLE
+
+        ACE_INSTANCES[0].inventory = [{"status": "ready"} for _ in range(4)]
+        manager = self._install_real_state(
+            {"ace_current_index": 5, "ace_filament_pos": FILAMENT_STATE_NOZZLE},
+            extra_instances=[(1, ["empty", "ready", "empty", "empty"])],
+        )
+        mock_gcmd.get = Mock(return_value=None)
+        mock_gcmd.get_int = Mock(return_value=1)  # T1 = first unit, slot 1
+
         ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
-        
-        # Verify state was cleared
-        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
+
+        manager.full_unload_slot.assert_called_once_with(1)
+        assert manager.state.get("ace_current_index") == 5
+
+    def test_cmd_ACE_FULL_UNLOAD_all_keeps_index_of_skipped_nozzle_tool(
+        self, mock_gcmd, setup_mocks
+    ):
+        """TOOL=ALL skips the nozzle tool, so it must not clear its index either."""
+        from ace.config import FILAMENT_STATE_NOZZLE
+
+        ACE_INSTANCES[0].inventory = [{"status": "ready"} for _ in range(4)]
+        manager = self._install_real_state(
+            {"ace_current_index": 5, "ace_filament_pos": FILAMENT_STATE_NOZZLE},
+            extra_instances=[(1, ["empty", "ready", "empty", "empty"])],
+        )
+        mock_gcmd.get = Mock(return_value="ALL")
+
+        ace.commands.cmd_ACE_FULL_UNLOAD(mock_gcmd)
+
+        unloaded = [c.args[0] for c in manager.full_unload_slot.call_args_list]
+        assert unloaded == [0, 1, 2, 3]  # T5 skipped at nozzle
+        assert manager.state.get("ace_current_index") == 5
 
     def test_cmd_ACE_FULL_UNLOAD_all_handles_exceptions(self, mock_gcmd, setup_mocks):
         """Test TOOL=ALL handles exceptions from individual unloads."""
