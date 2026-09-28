@@ -19,6 +19,18 @@ FILAMENT_STATE_SPLITTER = "splitter"    # Possibly in splitter (between RDM and 
 FILAMENT_STATE_TOOLHEAD = "toolhead"    # At toolhead sensor
 FILAMENT_STATE_NOZZLE = "nozzle"        # In hotend/nozzle
 
+# Per-slot park state: where this slot's filament was last left by the driver.
+# Runtime only (not persisted). Exposed as slots[i]["park_state"] in the
+# instance status so front ends can draw idle slots (e.g. parked at the hub).
+SLOT_PARK_STATE_UNKNOWN = "unknown"     # Startup, spool change, or a feed/retract not yet confirmed
+SLOT_PARK_STATE_PARKED = "parked"       # Retracted to its park position by a sensor-verified unload or smart load
+SLOT_PARK_STATE_LOADED = "loaded"       # Fed through the path to the nozzle by a completed tool load
+SLOT_PARK_STATES = (
+    SLOT_PARK_STATE_UNKNOWN,
+    SLOT_PARK_STATE_PARKED,
+    SLOT_PARK_STATE_LOADED,
+)
+
 # Sensor name constants
 SENSOR_TOOLHEAD = 'toolhead_sensor'
 SENSOR_RDM = 'return_module'
