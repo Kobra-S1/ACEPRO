@@ -8,6 +8,7 @@ from .config import (
     FILAMENT_STATE_BOWDEN,
     FILAMENT_STATE_NOZZLE,
     FILAMENT_STATE_TOOLHEAD,
+    SLOT_PARK_STATE_PARKED,
     OVERRIDABLE_PARAMS,
     CHOICE_OVERRIDABLE_PARAMS,
     get_instance_from_tool,
@@ -1979,6 +1980,7 @@ class AceManager:
                         continue
 
                     self.gcode.respond_info(f"ACE[{instance.instance_num}]: " f"Slot {slot} loaded successfully")
+                    instance.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
                     success_count += 1
 
                 except Exception as e:
