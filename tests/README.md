@@ -75,6 +75,7 @@ The test suite provides unit and integration testing for the ACE Pro multi-mater
 | **test_endless_spool.py** | 33 | Endless spool match modes (exact/material/next), runout handling, cross-instance matching, priority logic |
 | **test_endless_spool_swap.py** | 7 | Endless spool swap execution, retry logic, candidate search validation, inventory state updates |
 | **test_runout_monitor.py** | 76 | Runout detection, sensor polling, debounce filtering, toolchange interaction, error handling, auto-recovery, pause/resume, baseline establishment |
+| **test_ace2_ota.py** | 72 | ACE2 firmware update: file-name and vector-table checks, CRC-16/MCRF4XX, 64-byte chunk plan with padding, IAP wire encoding, updater state machine (retries, watchdog, stale/duplicate replies, polling suspension, verification), preconditions, end-to-end run against a synthetic ACE2 box |
 | **test_retry_logic.py** | 8 | Feed/retract retry behavior using MAX_RETRIES constant, FORBIDDEN handling, backoff delays between attempts |
 | **test_set_and_save.py** | 15 | Persistent variable storage to saved_variables.cfg, type conversion (bool/str/dict/list/number) |
 | **test_toolchange_integration.py** | 7 | End-to-end tool change scenarios across multiple ACE units, cross-instance changes, sensor validation |

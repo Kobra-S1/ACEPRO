@@ -341,6 +341,43 @@ class TestAceInstance(unittest.TestCase):
         self.mock_reactor.register_timer.assert_called_once()
         self.assertEqual(instance._shared_bus_heartbeat_timer, 'heartbeat-timer')
 
+    def _bound_ace2_instance(self):
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 7)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        instance.serial_mgr.is_connected.return_value = True
+        return instance
+
+    @patch('ace.instance.AceSerialManager')
+    def test_shared_bus_heartbeat_pauses_during_firmware_update(self, mock_serial_mgr_class):
+        """No status poll may interleave with an IAP transfer; polling resumes after."""
+        instance = self._bound_ace2_instance()
+
+        instance.set_firmware_update_active(True)
+        instance._send_shared_bus_heartbeat_request()
+        instance.serial_mgr.send_high_prio_request.assert_not_called()
+
+        instance.set_firmware_update_active(False)
+        instance._send_shared_bus_heartbeat_request()
+        instance.serial_mgr.send_high_prio_request.assert_called_once()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_iap_requests_are_addressed_to_the_bound_device(self, mock_serial_mgr_class):
+        """IAP frames carry the box's assigned id, never the discovery address 0."""
+        instance = self._bound_ace2_instance()
+        callback = Mock()
+
+        instance.send_high_prio_request(
+            instance.protocol.build_iap_firmware_request(0x08024000, bytes(64)), callback)
+
+        request, sent_callback = instance.serial_mgr.send_high_prio_request.call_args[0]
+        self.assertEqual(request['command'], 'IAP_FIRMWARE')
+        self.assertEqual(request['target_device_id'], 7)
+        self.assertIs(sent_callback, callback)
+
     @patch('ace.instance.AceSerialManager')
     def test_request_shared_bus_info_refresh_uses_targeted_get_info(self, mock_serial_mgr_class):
         """Shared-bus info refresh should use targeted get_info after assignment."""

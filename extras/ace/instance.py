@@ -185,6 +185,14 @@ class AceInstance:
         self.serial_mgr.set_on_connect_callback(self._on_ace_connect)
         self._dryer_start_logged = False  # prevent duplicate dryer start messages
         self._shared_bus_heartbeat_timer = None
+        # Set by ace2_ota.Ace2FirmwareUpdater for the length of an IAP run:
+        # a status poll interleaved with the image transfer is a request the
+        # bootloader cannot answer, and its timeouts feed the disconnect logic.
+        self.firmware_update_active = False
+
+    def set_firmware_update_active(self, active):
+        """Suspend (True) or resume (False) this box's shared-bus status polls."""
+        self.firmware_update_active = bool(active)
 
     def rebind_transport(
         self,
@@ -309,6 +317,8 @@ class AceInstance:
     def _send_shared_bus_heartbeat_request(self):
         """Send one targeted ACE2 status poll over shared transport."""
         if not self.transport_spec.shared_bus or not self.serial_mgr.is_connected():
+            return
+        if self.firmware_update_active:
             return
 
         request = self.protocol.build_get_status_request()

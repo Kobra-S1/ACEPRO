@@ -3713,3 +3713,120 @@ class TestQuerySlotsCommand:
         assert "ColorMix" in output
         # Verify rgba field is NOT in output (removed)
         assert "rgba=" not in output
+
+
+class TestFirmwareUpdateCommand:
+    """ACE_FIRMWARE_UPDATE: argument checks, dry run, and hand-off to the updater."""
+
+    FILENAME = "ACE2_V1.1.34_20260430.bin"
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path):
+        import struct
+        from types import SimpleNamespace
+        from ace import ace2_ota
+        from ace.protocol_ace2 import AceProtoProtocolAdapter
+
+        ace2_ota.Ace2FirmwareUpdater._active = None
+        self.config_dir = tmp_path
+        (tmp_path / self.FILENAME).write_bytes(
+            struct.pack("<II", 0x20009B48, 0x08008245) + bytes(248))
+        self.instance = SimpleNamespace(
+            instance_num=1,
+            protocol=AceProtoProtocolAdapter(),
+            serial_mgr=SimpleNamespace(is_connected=lambda: True,
+                                       device_info={"version": "V1.1.31"}),
+            _is_printing_or_paused=lambda: False,
+            _feed_assist_index=-1,
+            _info={"status": "ready"},
+            send_high_prio_request=Mock(),
+            set_firmware_update_active=Mock(),
+            reactor=Mock(monotonic=Mock(return_value=100.0)),
+            gcode=Mock(),
+        )
+        printer = Mock()
+        printer.get_start_args.return_value = {"config_file": str(tmp_path / "printer.cfg")}
+        ACE_INSTANCES[1] = self.instance
+        with patch.object(ace.commands, "get_printer", return_value=printer):
+            yield
+        ACE_INSTANCES.pop(1, None)
+        ace2_ota.Ace2FirmwareUpdater._active = None
+
+    def _gcmd(self, **params):
+        class GcodeError(Exception):
+            pass
+        gcmd = Mock()
+        gcmd.get_command_parameters = Mock(return_value=params)
+        gcmd.get = Mock(side_effect=lambda name, default=None: params.get(name, default))
+        gcmd.get_int = Mock(side_effect=lambda name, default=None: int(params.get(name, default)))
+        gcmd.error = GcodeError
+        gcmd.respond_info = Mock()
+        return gcmd
+
+    def _said(self, gcmd):
+        return " ".join(str(call.args[0]) for call in gcmd.respond_info.call_args_list)
+
+    def test_without_confirm_it_is_a_dry_run(self):
+        gcmd = self._gcmd(INSTANCE="1", FILE=self.FILENAME)
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        said = self._said(gcmd)
+        assert "V1.1.31 -> V1.1.34" in said
+        assert "Dry run" in said
+        self.instance.send_high_prio_request.assert_not_called()
+        self.instance.set_firmware_update_active.assert_not_called()
+
+    def test_confirm_starts_the_update_on_the_named_box(self):
+        from ace import ace2_ota
+        gcmd = self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1")
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        request, _ = self.instance.send_high_prio_request.call_args[0]
+        assert request["command"] == "IAP_UPGRADE"
+        assert request["params"]["version"] == "V1.1.34"
+        self.instance.set_firmware_update_active.assert_called_once_with(True)
+        assert ace2_ota.Ace2FirmwareUpdater.active() is not None
+
+    def test_absolute_path_is_used_as_given(self):
+        gcmd = self._gcmd(INSTANCE="1", FILE=str(self.config_dir / self.FILENAME))
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        assert "Dry run" in self._said(gcmd)
+
+    def test_relative_path_resolves_next_to_printer_cfg(self):
+        assert ace.commands.resolve_firmware_path("fw/x.bin", "/home/pi/printer_data/config/printer.cfg") \
+            == "/home/pi/printer_data/config/fw/x.bin"
+
+    def test_instance_is_required(self):
+        gcmd = self._gcmd(FILE=self.FILENAME, CONFIRM="1")
+        with pytest.raises(Exception, match="INSTANCE"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_missing_file_is_refused(self):
+        gcmd = self._gcmd(INSTANCE="1", FILE="ACE2_V9.9.9_20990101.bin", CONFIRM="1")
+        with pytest.raises(Exception, match="No such file"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_badly_named_file_is_refused(self):
+        (self.config_dir / "ace2.bin").write_bytes(b"\x00" * 64)
+        gcmd = self._gcmd(INSTANCE="1", FILE="ace2.bin", CONFIRM="1")
+        with pytest.raises(Exception, match="does not match"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_box_that_must_not_be_flashed_is_refused(self):
+        self.instance._is_printing_or_paused = lambda: True
+        gcmd = self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1")
+        with pytest.raises(Exception, match="print"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_second_update_while_one_runs_is_refused(self):
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(
+            self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1"))
+        with pytest.raises(Exception, match="already flashing"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(
+                self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1"))
+        assert self.instance.send_high_prio_request.call_count == 1
+
+    def test_command_is_registered(self):
+        assert "ACE_FIRMWARE_UPDATE" in [name for name, _, _ in ace.commands.ACE_COMMANDS]

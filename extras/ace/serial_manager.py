@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from serial import SerialException
 import serial.tools.list_ports
 
-from .protocol import transport_description_matches, parse_usb_location
+from .protocol import crc16_mcrf4xx, transport_description_matches, parse_usb_location
 from .protocol_ace1 import AceJsonProtocolAdapter
 
 # Process-global registry of physical serial ports currently claimed by a
@@ -1069,13 +1069,7 @@ class AceSerialManager:
 
     def _calc_crc(self, buffer):
         """Calculate CRC-16 for payload."""
-        _crc = 0xffff
-        for byte in buffer:
-            data = byte
-            data ^= _crc & 0xff
-            data ^= (data & 0x0f) << 4
-            _crc = ((data << 8) | (_crc >> 8)) ^ (data >> 4) ^ (data << 3)
-        return _crc
+        return crc16_mcrf4xx(buffer)
 
     # ========== Request/Response Queuing ==========
 

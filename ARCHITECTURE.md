@@ -20,6 +20,8 @@ extras/ace/
 │                           #   ACE2_COMMAND_CATALOG with field schemas, response decoders
 ├── ace2_bus.py             # ACE2 shared-bus session — UID discovery, device-id binding,
 │                           #   deterministic assignment planning
+├── ace2_ota.py             # ACE2 firmware update — image checks, chunk plan,
+│                           #   transport-free IAP state machine (Ace2FirmwareUpdater)
 ├── serial_manager.py       # Serial transport — connect/reconnect, frame I/O, sliding-
 │                           #   window request queue, heartbeat, CRC, timeout tracking
 ├── endless_spool.py        # Automatic filament switching on runout
@@ -924,6 +926,40 @@ protocol-specific `if/else` branches in filament logic.
 | Method | ACE1 | ACE2 | Meaning |
 |---|---|---|---|
 | `feed_assist_causes_busy()` | `False` | `True` | Whether activating feed assist transitions the device to a non-ready status |
+| `supports_firmware_update()` | `False` | `True` | Whether `build_iap_*_request()` exist (ACE2 IAP commands 2-4) |
+
+**ACE2 firmware update (`ace2_ota.py`):**
+
+`ACE_FIRMWARE_UPDATE` builds an `Ace2FirmwareUpdater` and injects the instance's
+`send_high_prio_request`, a reactor `register_callback` wrapper, `respond_info`
+and `set_firmware_update_active`; the updater itself touches no reactor or
+serial port. The sequence follows the stock Kobra X host (avata_main 2.0.2.2,
+`OTA_FILAMENT_HUB_START`):
+
+- `IAP_UPGRADE {1 size, 2 crc, 3 version}`: size and CRC-16/MCRF4XX of the
+  unpadded image (`protocol.crc16_mcrf4xx`, the frame CRC too), version
+  `"V" + x.y.z` from the file name `ACE2_V<x.y.z>…_<YYYYMMDD>.bin`.
+- `IAP_FIRMWARE {1 address, 2 bytes}` per 64-byte chunk at
+  `0x08024000 + offset` (the bootloader's staging area; the application runs
+  from 0x08008000), last chunk zero-padded.
+- `IAP_UPGRADE_FINISH`, empty. A FINISH that is never answered is a warning,
+  not an abort (the box may reboot first), as in stock.
+- Three attempts per command; a request whose callback never comes is ended
+  by a 15 s watchdog. Every reply carries a request token, so late replies,
+  duplicate deliveries and stale watchdogs are ignored.
+- The instance's shared-bus status poll is suspended for the run
+  (`firmware_update_active`) and always resumed, including on internal errors.
+- IAP frames carry the box's assigned device id like every other runtime
+  command; the tier `"firmware"` keeps them out of `ACE_DEBUG`.
+
+Divergences from stock, deliberate: a non-zero reply code counts as a failed
+attempt (stock ignores IAP reply payloads); the vector table is checked
+before anything is sent; after FINISH the updater waits 5 s and asks
+`GET_INFO` up to five times to report `verified` / `unverified` (stock
+leaves that to its background poller). Not verified on hardware: whether a
+box keeps its bus device id across the reboot into new firmware.
+Proof: `tests/test_ace2_ota.py`, including an end-to-end run against a
+synthetic box that parses the real frames and rebuilds the staged image.
 
 **ACE2 feed assist and `wait_ready()`:**
 
@@ -1163,6 +1199,9 @@ ACE_GET_STATUS [INSTANCE=<n>|TOOL=<n>] [VERBOSE=1]
                                            
 ACE_RECONNECT [INSTANCE=<n>]               # Reconnect serial connection(s)
                                            # Without INSTANCE: reconnect all instances
+
+ACE_FIRMWARE_UPDATE INSTANCE=<n> FILE=<ACE2_Vx.y.z_YYYYMMDD.bin> [CONFIRM=1]
+                                           # Flash an ACE2 box; dry run without CONFIRM=1
 
 ACE_FEED [T=<tool>|INSTANCE=<n> INDEX=<n>] LENGTH=<mm> [SPEED=<mm/s>]
                                            # Feed filament from slot

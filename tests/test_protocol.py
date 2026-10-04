@@ -406,6 +406,12 @@ class TestAceProtoProtocolAdapter:
                 request = self.adapter.build_discover_device_request()
             elif spec.name == "ASSIGN_DEVICE_ID":
                 request = self.adapter.build_assign_device_id_request(1, 2, 3, 4)
+            elif spec.name == "IAP_UPGRADE":
+                request = self.adapter.build_iap_upgrade_request(64, 0x1234, "V1.0.0")
+            elif spec.name == "IAP_FIRMWARE":
+                request = self.adapter.build_iap_firmware_request(0x08024000, bytes(64))
+            elif spec.name == "IAP_UPGRADE_FINISH":
+                request = self.adapter.build_iap_finish_request()
             else:
                 request = self.adapter.build_debug_request(
                     spec.name,

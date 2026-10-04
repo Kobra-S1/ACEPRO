@@ -106,6 +106,8 @@ ace/
 ├── protocol_ace2.py      # ACE2 protobuf adapter, command catalog, wire helpers
 ├── ace2_bus.py           # ACE2 shared-bus session: UID discovery, device-id
 │                         #   binding, assignment planning
+├── ace2_ota.py           # ACE2 box firmware update (IAP): image checks,
+│                         #   chunk plan, update state machine
 ├── serial_manager.py     # Serial transport: connect, frame I/O, request queue
 ├── endless_spool.py      # Automatic filament switching logic
 ├── runout_monitor.py     # Filament runout & tangle detection during printing
@@ -1133,7 +1135,7 @@ The integration handles three ways of identifying spools:
 | `ACE_SET_PURGE_AMOUNT` | Override purge for next tool change | `PURGELENGTH=<mm> PURGESPEED=<mm/min> [INSTANCE=<0-3>]` |
 | `ACE_RESET_ACTIVE_TOOLHEAD` | Reset active tool to -1 | `INSTANCE=<0-3>` |
 
-### System & Diagnostics (8 commands)
+### System & Diagnostics (9 commands)
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
@@ -1145,6 +1147,26 @@ The integration handles three ways of identifying spools:
 | `ACE_DEBUG` | Send raw debug request to hardware | `INSTANCE=<0-3> METHOD=<name> [PARAMS=<json>]` |
 | `ACE_DEBUG_CHECK_SPOOL_READY` | Test spool ready check with timeout | `TOOL=<0-15> [TIMEOUT=<sec>]` |
 | `ACE_SHOW_INSTANCE_CONFIG` | Display resolved configuration | `[INSTANCE=<0-3>]` |
+| `ACE_FIRMWARE_UPDATE` | Flash an ACE 2 box's firmware (dry run without `CONFIRM=1`) | `INSTANCE=<n> FILE=ACE2_V<x.y.z>_<YYYYMMDD>.bin [CONFIRM=1]` - see below |
+
+#### ACE 2 firmware update
+
+1. Upload the firmware image (for example `ACE2_V1.1.34_20260430.bin`) into
+   the config directory with Mainsail's file manager. The name must keep
+   Anycubic's pattern: the version sent to the box is read from it. Update
+   packages (`.swu`) are not accepted; use the `.bin` inside.
+2. Stop the box first: no print running or paused, feed assist off
+   (`ACE_DISABLE_FEED_ASSIST`), box status `ready`.
+3. `ACE_FIRMWARE_UPDATE INSTANCE=0 FILE=ACE2_V1.1.34_20260430.bin` checks the
+   file and prints current and new version: nothing is sent.
+4. Repeat with `CONFIRM=1`. Progress is printed in 10 % steps; about 1100
+   chunks take a few minutes. Do not power off the box until the result line.
+
+Results: `verified` (the box reports the new version), `unverified` (the image
+was committed but the box did not report the new version; run `ACE_RECONNECT
+INSTANCE=<n>` and check `ACE_GET_STATUS`), `failed` (aborted before the
+commit; the box keeps its current firmware). Only ACE 2 boxes can be updated,
+one at a time.
 
 ### Testing & Advanced
 

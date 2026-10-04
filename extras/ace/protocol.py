@@ -12,6 +12,26 @@ from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 
 # ---------------------------------------------------------------------------
+# Shared checksum
+# ---------------------------------------------------------------------------
+
+def crc16_mcrf4xx(data: bytes) -> int:
+    """CRC-16/MCRF4XX (poly 0x8408 reflected, init 0xFFFF, no final XOR).
+
+    The one checksum of the ACE wire protocol: it covers every frame of both
+    generations and, on ACE2, the whole firmware image announced in
+    IAP_UPGRADE (stock uses one function for both). Check value for
+    b"123456789" is 0x6F91.
+    """
+    crc = 0xFFFF
+    for byte in data:
+        mixed = (byte ^ crc) & 0xFF
+        mixed ^= (mixed & 0x0F) << 4
+        crc = ((mixed << 8) | (crc >> 8)) ^ (mixed >> 4) ^ (mixed << 3)
+    return crc & 0xFFFF
+
+
+# ---------------------------------------------------------------------------
 # Shared data types
 # ---------------------------------------------------------------------------
 
@@ -310,6 +330,10 @@ class AceProtocolAdapter:
     ) -> Dict[str, Any]:
         """Build a protocol-specific debug request."""
         raise NotImplementedError()
+
+    def supports_firmware_update(self) -> bool:
+        """Whether ``build_iap_*_request`` exist for this protocol."""
+        return False
 
     def get_command_catalog(self) -> Tuple[AceCommandSpec, ...]:
         """Return the command catalog exposed by this protocol."""

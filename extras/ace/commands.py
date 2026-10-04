@@ -6,9 +6,11 @@ instances based on INSTANCE parameter or tool mapping.
 """
 
 import json
+import os
 import traceback
 import logging
 
+from . import ace2_ota
 from .version import get_driver_version
 from .config import (
     ACE_INSTANCES,
@@ -2435,6 +2437,70 @@ def cmd_ACE_FLUSH(gcmd):
         gcmd.respond_info("ACE: No pending state to flush")
 
 
+def resolve_firmware_path(file_param, config_file):
+    """FILE= as given, with ~ expanded; relative paths are next to printer.cfg.
+
+    Mainsail uploads into the config directory, so a bare file name works.
+    """
+    path = os.path.expanduser(file_param)
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(config_file), path)
+    return path
+
+
+def cmd_ACE_FIRMWARE_UPDATE(gcmd):
+    """Flash an ACE2 box. INSTANCE= FILE=ACE2_V<x.y.z>_<date>.bin, CONFIRM=1 to flash."""
+    if "INSTANCE" not in gcmd.get_command_parameters():
+        raise gcmd.error("ACE_FIRMWARE_UPDATE needs INSTANCE=<n>: it never picks a box itself")
+    ace = ace_get_instance(gcmd)
+    config_file = get_printer().get_start_args().get("config_file", "")
+    path = resolve_firmware_path(gcmd.get("FILE"), config_file)
+    try:
+        image = ace2_ota.load_firmware_image(path)
+    except (OSError, ace2_ota.FirmwareImageError) as exc:
+        raise gcmd.error(f"ACE_FIRMWARE_UPDATE: {exc}")
+
+    refusal = ace2_ota.update_refusal(ace)
+    if refusal:
+        raise gcmd.error(f"ACE_FIRMWARE_UPDATE: ACE[{ace.instance_num}]: {refusal}")
+    running = ace2_ota.Ace2FirmwareUpdater.active()
+    if running is not None:
+        raise gcmd.error(f"ACE_FIRMWARE_UPDATE: already flashing ({running.image.version})")
+
+    device_info = getattr(ace.serial_mgr, "device_info", None) or {}
+    current = device_info.get("version") or "unknown"
+    gcmd.respond_info(
+        f"ACE[{ace.instance_num}]: firmware {current} -> {image.version} "
+        f"(built {image.build_date}, {image.size} bytes, crc16 0x{image.crc:04X}, "
+        f"{path})"
+    )
+    if not gcmd.get_int("CONFIRM", 0):
+        gcmd.respond_info(
+            "Dry run: nothing sent. Repeat with CONFIRM=1 to flash; "
+            "do not power off the box until the update reports its result."
+        )
+        return
+
+    reactor = ace.reactor
+
+    def call_later(delay_s, fn):
+        reactor.register_callback(lambda eventtime: fn(), reactor.monotonic() + delay_s)
+
+    updater = ace2_ota.Ace2FirmwareUpdater(
+        image,
+        protocol=ace.protocol,
+        send=ace.send_high_prio_request,
+        call_later=call_later,
+        report=ace.gcode.respond_info,
+        set_polling_suspended=ace.set_firmware_update_active,
+        on_finished=lambda result: logging.info(
+            "ACE[%s]: firmware update %s: %s", ace.instance_num,
+            result.outcome.value, result.message),
+        label=f"ACE[{ace.instance_num}]",
+    )
+    updater.start()
+
+
 ACE_COMMANDS = [
     ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. INSTANCE= or TOOL=, VERBOSE=1 for detailed output"),
     ("ACE_GET_CONNECTION_STATUS", cmd_ACE_GET_CONNECTION_STATUS,
@@ -2497,6 +2563,9 @@ ACE_COMMANDS = [
      "Show resolved config for ACE instance(s). [INSTANCE=<num>]"),
     ("ACE_FLUSH", cmd_ACE_FLUSH,
      "Persist any pending variable changes to disk immediately"),
+    ("ACE_FIRMWARE_UPDATE", cmd_ACE_FIRMWARE_UPDATE,
+     "Flash an ACE2 box. INSTANCE= FILE=ACE2_V<x.y.z>_<date>.bin (relative to the config dir); "
+     "CONFIRM=1 to flash, else dry run"),
     ("ACE_TANGLE_DETECTION", cmd_ACE_TANGLE_DETECTION,
      "Toggle tangle detection live.  ENABLE=0/1 (no arg → query state)"),
     ("_ACE_TANGLE_DISABLE_AND_RESUME", cmd__ACE_TANGLE_DISABLE_AND_RESUME,
