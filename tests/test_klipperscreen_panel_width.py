@@ -112,6 +112,25 @@ def test_the_main_screen_fits_a_480_wide_display():
         )
 
 
+def test_the_main_screen_needs_no_scrolling_on_a_320_high_display():
+    # A scrollbar there costs 36 px of width for nothing. Fonts differ between
+    # machines: 296 of 298 px fitted on the development host and still
+    # scrolled on the printer's Pi, so the layout has to leave some room.
+    headroom = 10
+    panel, screen, _gtk = _make_panel(480, 320)
+    for slot in panel.instance_data[0]["inventory"]:
+        slot.update(status="ready", material="PLA", temp=200, color=[255, 255, 0])
+    panel.return_to_main_screen()
+    scrolled = panel.content.get_children()[0]
+
+    needed = scrolled.get_child().get_preferred_height().minimum_height
+
+    assert needed <= screen.gtk.content_height - headroom, (
+        f"the main screen is {needed} px high, the content area "
+        f"{screen.gtk.content_height:.0f} px"
+    )
+
+
 def test_the_other_views_fit_a_480_wide_display():
     panel, screen, _gtk = _make_panel(480, 320)
     views = {

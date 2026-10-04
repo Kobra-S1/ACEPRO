@@ -700,11 +700,16 @@ class Panel(ScreenPanel):
     def create_main_screen(self):
         """Create the main ACE panel screen layout"""
         self.current_view = "main"
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        _portrait = self._is_portrait()
+        _compact = not _portrait and self._gtk.content_width < WIDE_LAYOUT_MIN_WIDTH
+        # A 320 px high screen holds the four rows only with tighter gaps;
+        # a few pixels over and the scrollbar takes 36 px of the width.
+        gap = 2 if _compact else 5
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=gap)
         main_box.set_margin_left(5)
         main_box.set_margin_right(5)
-        main_box.set_margin_top(5)
-        main_box.set_margin_bottom(5)
+        main_box.set_margin_top(gap)
+        main_box.set_margin_bottom(gap)
 
         top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
 
@@ -742,8 +747,6 @@ class Panel(ScreenPanel):
         # In portrait: 2 compact rows (row1: ACE Pro + Endless Spool side-by-side,
         #                              row2: Match Mode full-width)
         # In landscape: single horizontal row (original).
-        _portrait = self._is_portrait()
-        _compact = not _portrait and self._gtk.content_width < WIDE_LAYOUT_MIN_WIDTH
         if _portrait:
             endless_spool_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         else:
