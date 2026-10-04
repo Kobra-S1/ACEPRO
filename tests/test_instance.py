@@ -3838,7 +3838,23 @@ class TestExtruderMove(unittest.TestCase):
             return self.mock_save_vars
         if name == 'toolhead':
             return self.mock_toolhead
+        if name == 'gcode_move':
+            return self.mock_gcode_move
         return default
+
+    mock_gcode_move = Mock()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_the_gcode_position_follows_the_move(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        self.mock_toolhead.get_position.return_value = [1, 2, 3, 4]
+        order = Mock()
+        self.mock_toolhead.move = order.move
+        self.mock_gcode_move.reset_last_position = order.reset
+
+        instance._extruder_move(45, 4)
+
+        self.assertEqual([call[0] for call in order.mock_calls], ["move", "reset"])
 
     @patch('ace.instance.AceSerialManager')
     def test_skips_zero_length_move(self, mock_serial_mgr_class):

@@ -6308,12 +6308,15 @@ class TestExtruderMove(unittest.TestCase):
                 return self.mock_save_vars
             if name == "toolhead":
                 return self.mock_toolhead
+            if name == "gcode_move":
+                return self.mock_gcode_move
             if name == "output_pin ACE_Pro":
                 pin = Mock()
                 pin.get_status = Mock(return_value={'value': 1})
                 return pin
             return default
 
+        self.mock_gcode_move = Mock()
         self.mock_printer.lookup_object.side_effect = lookup
 
         def getint(key, default=None):
@@ -6376,6 +6379,22 @@ class TestExtruderMove(unittest.TestCase):
 
         self.mock_toolhead.move.assert_called_once_with([10, 20, 30, 43], 15)
         self.mock_toolhead.wait_moves.assert_called_once()
+
+    def test_the_gcode_position_follows_the_move(self):
+        # The move bypasses G-code. Left behind, the next G1 "returns" the
+        # extruder to the old E: after an unload retract, a fast forward
+        # spin of the whole retract length with no filament in the gear.
+        manager = self._build_manager()
+        self.mock_toolhead.get_position.return_value = [1, 2, 3, 4]
+        order = Mock()
+        self.mock_toolhead.move = order.move
+        self.mock_gcode_move.reset_last_position = order.reset
+
+        manager._extruder_move(-80, 15)
+
+        self.assertEqual(
+            [call[0] for call in order.mock_calls], ["move", "reset"]
+        )
 
 class _ManagerCycleFixture(unittest.TestCase):
     """Shared manager + mock-instance fixture for cycling/smart-unload tests."""
