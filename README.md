@@ -121,10 +121,12 @@ config/
 ├── ace_K3M.cfg           # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg           # Kobra S1 ACE configuration
 ├── ace_KS1M.cfg          # Kobra S1 Max ACE configuration (ALPHA - UNTESTED)
+├── ace_KX.cfg            # Kobra X ACE configuration (ALPHA)
 ├── printer_K3.cfg        # Kobra 3 printer macros
 ├── printer_K3M.cfg       # Kobra K3M printer macros (BETA)
 ├── printer_KS1.cfg       # Kobra S1 printer macros
 ├── printer_KS1M.cfg      # Kobra S1 Max printer macros (ALPHA - UNTESTED)
+├── printer_KX.cfg        # Kobra X printer macros (ALPHA, needs the Kobra Klipper fork)
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
 ├── ace_macros_generic.cfg # Shared ACE helper macros
 └── spoolman_logic.cfg    # Logic for Spoolman ID mapping and tool hooks
@@ -515,12 +517,14 @@ config/
 ├── ace_K3M.cfg                 # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg                 # Kobra S1 ACE configuration
 ├── ace_KS1M.cfg                # Kobra S1 Max ACE configuration (ALPHA - UNTESTED)
+├── ace_KX.cfg                  # Kobra X ACE configuration (ALPHA)
 ├── ace_macros_generic.cfg      # Shared ACE macros for all printers
 ├── printer_generic_macros.cfg  # Shared printer macros (pause/resume/velocity/purge)
 ├── printer_K3.cfg              # Kobra 3 printer macros & settings
 ├── printer_K3M.cfg             # Kobra K3M printer macros & settings (BETA)
 ├── printer_KS1.cfg             # Kobra S1 printer macros & settings
 ├── printer_KS1M.cfg            # Kobra S1 Max printer macros & settings (ALPHA - UNTESTED)
+├── printer_KX.cfg              # Kobra X printer macros & settings (ALPHA)
 └── spoolman_logic.cfg          # Optional Spoolman ID mapping and tool hooks
 ```
 
@@ -533,7 +537,7 @@ config/
 
 ### Include Hierarchy
 
-The configuration uses a modular include structure. The `printer_KS1.cfg`, `printer_KS1M.cfg`, `printer_K3.cfg` or `printer_K3M.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
+The configuration uses a modular include structure. The `printer_KS1.cfg`, `printer_KS1M.cfg`, `printer_K3.cfg`, `printer_K3M.cfg` or `printer_KX.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
 
 **For Anycubic Kobra S1:**
 ```
@@ -567,6 +571,7 @@ printer.cfg (copy from printer_K3.cfg)
 | `printer_K3M.cfg` | Kobra K3M printer macros & settings (BETA) | - | Anycubic Kobra K3M |
 | `printer_KS1.cfg` | Kobra S1 printer macros & settings | - | Anycubic Kobra S1 |
 | `printer_KS1M.cfg` | Kobra S1 Max printer macros & settings (**ALPHA - UNTESTED**) | - | Anycubic Kobra S1 Max |
+| `printer_KX.cfg` | Kobra X printer macros & settings (**ALPHA**, needs the Kobra Klipper fork) | - | Anycubic Kobra X |
 | `printer_generic_macros.cfg` | Shared printer macros (pause/resume, velocity stack, purge helpers) | - | All printers |
 
 ### Kobra S1 Max (KS1M) - alpha status
@@ -601,6 +606,65 @@ in `printer_KS1M.cfg` instead - it is strictly more robust.
 
 Fixes, measurements and corrections from anyone with the actual machine are very
 welcome - please open an issue or PR with the values you found.
+
+### Kobra X (KX) - alpha status
+
+> [!CAUTION]
+> `printer_KX.cfg` has run on one Kobra X; ACE support on the KX is untested.
+
+The Kobra X is not a plain ACE printer: its toolhead has a four-inlet turret,
+and the turret, the inlet sensors and the tool changer are printer hardware
+driven by the Kobra Klipper fork, not by this driver.
+
+- **Klipper fork required.** `printer_KX.cfg` uses sections that only the
+  fork's Kobra X modules provide (`[motor_link]`, `[probe_ks1]`, `[cs1237]`,
+  the `kx_*` sections), and the MCUs must run the fork's KX firmware. These
+  modules are not on a public branch of the fork yet. The installer refuses
+  the KX `printer.cfg` when `klippy/extras/kx_toolchanger.py` is missing.
+- **`kx_multimaterial.cfg` comes from the fork** (`config/` of the fork's
+  checkout), because it changes with the fork's modules. The installer copies
+  it only when it is not there yet; an existing one holds this machine's
+  measured `sensor_to_nozzle` and is never overwritten. Compare it against the
+  fork's copy after updating the fork.
+- **`[kx_toolchanger]` owns `T0..Tn`.** It maps each tool to a turret inlet
+  and calls `ACE_CHANGE_TOOL` with the ACE's own tool number for the inlets
+  `kx_multimaterial.cfg` marks `ace` (with one ACE on inlet 4, printer `T3` is
+  ACE `T0`). `ace_KX.cfg` therefore sets `register_tool_macros: False`;
+  without it Klipper stops at startup with `gcode command T0 already
+  registered`. `PRINT_END` and `CANCEL_PRINT` unload through
+  `KX_CHANGE_TOOL TOOL=-1` for the same reason.
+- **One ACE, a tube per inlet.** Set `inlet1`..`inlet4` to `ace` in
+  `kx_multimaterial.cfg`; printer `T0`-`T3` are ACE slots 0-3, and a second
+  ACE unit is refused. No RDM sensor. Every tool change retracts the old
+  filament all the way back to the ACE, as on a single-inlet toolhead.
+  `KX_UNLOAD_ALL` recovers an ACE filament left in an inlet after a restart.
+- **The turret follows this driver.** `kx_multimaterial.cfg` defines
+  `_ACE_ROUTE_TOOL`, which the driver calls before it moves a tool's
+  filament on its own (panel, `ACE_SMART_UNLOAD`, endless spool); the turret
+  turns to that tool's inlet, or the operation stops. Raw `ACE_FEED` and
+  `ACE_RETRACT` do not turn it.
+- **The ACE panel uses printer tool numbers.** With direct-fed inlets before
+  the ACE, slot 0 of the first unit is shown and loaded as `T3`, not `T0`.
+- **Combo setup with the RDM.** With the ACE slots merged onto one inlet
+  (`inlet4: ace` in `kx_multimaterial.cfg`), the mainboard's RDM connector
+  gives filament presence and movement at the merge point: uncomment
+  `[filament_tracker filament_runout_rdm]` in `printer_KX.cfg` and
+  `filament_runout_sensor_name_rdm` in `ace_KX.cfg`, and measure
+  `parkposition_to_rdm_length`. ADC mode of `[filament_tracker]` needs the
+  fork's ADC API fix. Its polarity and `length_per_pulse` are Kobra S1
+  values, not checked on a Kobra X.
+- **ACE lengths are Kobra 3 values.** `parkposition_to_toolhead_length`,
+  `toolchange_load_length` and the extruder feed lengths in `ace_KX.cfg` are
+  not measured on a Kobra X.
+- **Orca lanes come from the fork's `[kx_filament]`**, numbered as printer
+  tools, ACE-fed ones included. `ace_KX.cfg` therefore sets
+  `moonraker_lane_sync_enabled: False`; with it on there would be two writers
+  deleting each other's lanes, so `[kx_filament]` then refuses to start.
+- **Endless spool on the KX is untested.** With the ACE slots on one shared
+  inlet the swap stays in that tube, as on other printers. With a tube per
+  inlet the empty spool's tail is left in its own inlet when the turret
+  turns to the next one; leave endless spool off there until that is tried
+  on a printer.
 
 ### Configuration Setup by Printer Model
 
@@ -658,6 +722,27 @@ If you build your own `printer.cfg`, include the shared files in this order:
 [include printer_generic_macros.cfg]
 [include ace_KS1M.cfg]
 # ace_KS1M.cfg includes ace_macros_generic.cfg for you
+```
+
+#### For Anycubic Kobra X (ALPHA)
+
+> [!CAUTION]
+> Read [Kobra X (KX) - alpha status](#kobra-x-kx---alpha-status) first. Needs
+> the Kobra Klipper fork with its Kobra X modules in `~/klipper`.
+
+```bash
+./installer.sh --printer KX --components driver,generic,printer-config,ace-config
+```
+
+Then set `sensor_to_nozzle` and the `inlet1`..`inlet4` feeders in
+`~/printer_data/config/kx_multimaterial.cfg`. If you build your own
+`printer.cfg`, include the files in this order:
+```ini
+[include printer_generic_macros.cfg]
+[include kx_multimaterial.cfg]
+[save_variables]
+filename: ~/printer_data/config/saved_variables.cfg
+[include ace_KX.cfg]
 ```
 
 ### Multi-Unit Configuration

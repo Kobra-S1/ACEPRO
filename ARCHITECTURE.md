@@ -1154,6 +1154,7 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
+| `register_tool_macros` | True | Register `T<n>` for every ACE slot. False when a printer-side tool changer owns `T<n>` and calls `ACE_CHANGE_TOOL` with ACE numbering (Kobra X `[kx_toolchanger]`) |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
 | `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (ACE1 + ACE2; requires active feed assist). Shipped printer configs set it to True and enable the `[output_pin TANGLE_DETECTION]` dashboard slider (authoritative when present) |
 | `tangle_pump_time` | 5.0 | Seconds of continuous ACE pumping before suspecting a tangle (clamped to 3.0 minimum — ACE2's starved-runout assist retry cycles up to ~3.9 s) |
@@ -1835,6 +1836,55 @@ initial `lane_data` snapshot.
 - Unknown/placeholder materials can be filtered or remapped via
   `moonraker_lane_sync_unknown_material_mode` (`passthrough`/`empty`/`map`)
   and its marker/map settings.
+
+### Printer-side lane writer (Kobra X)
+
+A printer whose tool numbers are not ACE tool numbers publishes the lanes
+itself: the Kobra X's `[kx_filament]` (Kobra Klipper fork) maps printer
+`T<n>` onto turret inlets, so its `T3` can be ACE `T0`. ACEPRO then keeps
+`moonraker_lane_sync_enabled: False` (two writers delete each other's lanes)
+and offers its entries instead, with no import either way:
+
+- `ace_state` status `lanes`: `MoonrakerLaneSyncAdapter.lane_entries()`, the
+  entries above as a list indexed by ACE tool, built also with the sync off.
+- Event `ace:lanes_changed`: sent from `manager._sync_moonraker_lane_data()`
+  on every call, before the sync itself, so a disabled sync still announces
+  the change.
+- `ace_state` status `lane_sync_enabled`: whether this driver writes
+  `lane_data` itself, so the printer-side writer can refuse to start as a
+  second one.
+
+Proof: `test_lane_entries_are_indexed_by_ace_tool_even_with_sync_disabled`,
+`test_lane_change_is_announced_with_moonraker_sync_disabled`,
+`test_status_carries_the_lane_entries`,
+`test_status_tells_whether_this_driver_writes_the_lanes`.
+
+### Printer-side path selection (`_ACE_ROUTE_TOOL`)
+
+A toolhead with several filament paths behind one extruder (the Kobra X
+turret) must have a tool's path in front of the extruder and the toolhead
+sensor before this driver moves that tool's filament. The driver does not
+know the paths; it announces the tool and the printer config acts.
+
+- `AceManager.route_to_tool(tool)` runs `_ACE_ROUTE_TOOL TOOL=<global tool>`
+  when `[gcode_macro _ACE_ROUTE_TOOL]` exists; without the macro, or for
+  tool -1, it does nothing. An error from the macro propagates and stops
+  the operation before any feed.
+- Call sites: `perform_tool_change` (the loaded tool before the sensor
+  plausibility check, or the target when nothing is loaded; the target again
+  before the load), `smart_unload` with a known tool, `smart_load` when it
+  verifies at the toolhead sensor, `full_unload_slot` for the loaded tool.
+  Raw `ACE_FEED`/`ACE_RETRACT` and the cycling unload of an unknown tool do
+  not route.
+- The printer side reads the loaded tool back from `ace_state` status
+  `current_index`.
+- The KlipperScreen panel shows and sends printer tool numbers: ACE tool +
+  `ace_tool_offset` from the status of the printer's tool changer
+  (`TOOL_CHANGER` in `KlipperScreen/acepro.py`), 0 when that object does not
+  exist. ACE commands (`ACE_SET_SLOT`, `ACE_FEED`, ...) keep ACE numbers.
+
+Proof: `tests/test_tool_route_hook.py`,
+`tests/test_klipperscreen_printer_tool_numbers.py`.
 
 ### Config (`[ace]`)
 

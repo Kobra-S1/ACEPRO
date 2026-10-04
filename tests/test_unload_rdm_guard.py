@@ -40,6 +40,9 @@ class TestSmartUnloadRdmEarlyStopGuard:
     def _manager(self, instance, rdm_has_filament):
         mgr = object.__new__(AceManager)
         mgr.gcode = Mock()
+        # No [gcode_macro _ACE_ROUTE_TOOL]: a single-path toolhead.
+        mgr.printer = Mock()
+        mgr.printer.lookup_object.return_value = None
         mgr.state = Mock()
         mgr.state.get = Mock(
             side_effect=lambda key, default=None: {

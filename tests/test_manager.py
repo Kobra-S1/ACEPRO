@@ -10,6 +10,7 @@ Tests AceManager class which orchestrates multiple ACE Pro units:
 - Config resolution and per-instance overrides
 """
 
+import re
 import unittest
 from unittest.mock import Mock, patch, PropertyMock, call
 import os
@@ -129,8 +130,69 @@ class TestAceManagerInitialization(unittest.TestCase):
             # Disable Moonraker lane sync during tests to avoid live Moonraker writes
             'moonraker_lane_sync_enabled': False,
         }
+        config_values.update(getattr(self, 'boolean_overrides', {}))
         val = config_values.get(key, default)
         return bool(val) if val is not None else (default if default is not None else False)
+
+    def _registered_tool_commands(self):
+        return [c.args[0] for c in self.mock_gcode.register_command.call_args_list
+                if re.fullmatch(r"T\d+", c.args[0])]
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_manager_registers_tool_commands_by_default(self, mock_endless_spool, mock_ace_instance):
+        AceManager(self.mock_config)
+
+        self.assertEqual(self._registered_tool_commands(),
+                         [f"T{n}" for n in range(2 * SLOTS_PER_ACE)])
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_manager_leaves_tool_commands_to_printer_when_disabled(self, mock_endless_spool, mock_ace_instance):
+        """A printer-side tool changer (Kobra X turret) owns T<n> and calls
+        ACE_CHANGE_TOOL with ACE numbering; the driver must not claim T<n>."""
+        self.boolean_overrides = {'register_tool_macros': False}
+
+        manager = AceManager(self.mock_config)
+
+        self.assertEqual(self._registered_tool_commands(), [])
+        self.assertEqual(len(manager.instances), 2)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_lane_change_is_announced_with_moonraker_sync_disabled(self, mock_endless_spool, mock_ace_instance):
+        """A printer-side lane writer (Kobra X [kx_filament]) republishes on
+        this event while ACEPRO's own Moonraker sync is off."""
+        manager = AceManager(self.mock_config)
+        self.mock_printer.send_event.reset_mock()
+
+        manager._sync_moonraker_lane_data(reason="test")
+
+        self.mock_printer.send_event.assert_called_once_with("ace:lanes_changed")
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_status_carries_the_lane_entries(self, mock_endless_spool, mock_ace_instance):
+        manager = AceManager(self.mock_config)
+        entries = [{"lane": "0", "material": "PLA"}]
+        manager._moonraker_lane_sync = Mock(lane_entries=Mock(return_value=entries))
+
+        self.assertEqual(manager.get_status()["lanes"], entries)
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_status_tells_whether_this_driver_writes_the_lanes(self, mock_endless_spool, mock_ace_instance):
+        self.assertIs(AceManager(self.mock_config).get_status()["lane_sync_enabled"], False)
+
+        ACE_INSTANCES.clear()
+        INSTANCE_MANAGERS.clear()
+        self.boolean_overrides = {'moonraker_lane_sync_enabled': True}
+        with patch('ace.manager.MoonrakerLaneSyncAdapter') as adapter:
+            adapter.return_value.enabled = True
+            adapter.return_value.lane_entries.return_value = []
+            status = AceManager(self.mock_config).get_status()
+
+        self.assertIs(status["lane_sync_enabled"], True)
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
@@ -7260,6 +7322,7 @@ class TestSetupSensors(unittest.TestCase):
             "purge_max_chunk_length": 50.0,
             "pre_cut_retract_length": 5.0,
             "ace_connection_supervision": True,
+            "register_tool_macros": True,
         }
 
     def _lookup_object_side_effect(self, obj_name, *args):
@@ -7600,6 +7663,7 @@ class TestMonitoring(unittest.TestCase):
             "purge_max_chunk_length": 50.0,
             "pre_cut_retract_length": 5.0,
             "ace_connection_supervision": True,
+            "register_tool_macros": True,
         }
 
         def lookup_object(name, default=None):

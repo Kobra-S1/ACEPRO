@@ -220,7 +220,19 @@ class MoonrakerLaneSyncAdapter:
         return True
 
     def _build_lane_payload(self):
-        lanes = {}
+        return {f"lane{lane_index + 1}": entry
+                for lane_index, entry in self._lane_entries_by_tool()}
+
+    def lane_entries(self):
+        """Lane entries indexed by ACE tool number, independent of whether
+        this adapter writes to Moonraker. A printer-side tool changer that
+        owns the printer's tool numbers (Kobra X [kx_filament]) reads these
+        through the ace_state status and publishes them under its own keys.
+        """
+        return [entry for _lane_index, entry in self._lane_entries_by_tool()]
+
+    def _lane_entries_by_tool(self):
+        entries = []
         for instance in self.manager.instances:
             tool_offset = getattr(instance, "tool_offset", None)
             if not isinstance(tool_offset, int):
@@ -228,45 +240,44 @@ class MoonrakerLaneSyncAdapter:
                 continue
 
             for local_slot in range(SLOTS_PER_ACE):
-                lane_index = tool_offset + local_slot
-                lane_key = f"lane{lane_index + 1}"
-
                 inv = {}
                 if local_slot < len(instance.inventory):
                     inv = instance.inventory[local_slot] or {}
+                lane_index = tool_offset + local_slot
+                entries.append((lane_index, self._lane_entry(lane_index, inv)))
+        return entries
 
-                status = str(inv.get("status", "empty"))
-                material = self._normalize_material(inv.get("material", ""))
-                has_filament = status == "ready" and bool(material)
+    def _lane_entry(self, lane_index, inv):
+        status = str(inv.get("status", "empty"))
+        material = self._normalize_material(inv.get("material", ""))
+        has_filament = status == "ready" and bool(material)
 
-                entry = {
-                    "lane": str(lane_index),
-                    "material": material if has_filament else "",
-                    "color": self._rgb_to_hex(inv.get("color")) if has_filament else "",
-                    "scan_time": "",
-                    "td": "",
-                }
+        entry = {
+            "lane": str(lane_index),
+            "material": material if has_filament else "",
+            "color": self._rgb_to_hex(inv.get("color")) if has_filament else "",
+            "scan_time": "",
+            "td": "",
+        }
 
-                nozzle_temp = self._safe_temp(inv.get("temp"))
-                if nozzle_temp is not None:
-                    entry["nozzle_temp"] = nozzle_temp
+        nozzle_temp = self._safe_temp(inv.get("temp"))
+        if nozzle_temp is not None:
+            entry["nozzle_temp"] = nozzle_temp
 
-                bed_temp = self._extract_bed_temp(inv.get("hotbed_temp"))
-                if bed_temp is not None:
-                    entry["bed_temp"] = bed_temp
+        bed_temp = self._extract_bed_temp(inv.get("hotbed_temp"))
+        if bed_temp is not None:
+            entry["bed_temp"] = bed_temp
 
-                spool_id = self._extract_spool_id(inv)
-                if has_filament and inv.get("brand"):
-                    entry["vendor"] = str(inv.get("brand"))
-                if has_filament and inv.get("sku"):
-                    entry["sku"] = str(inv.get("sku"))
+        spool_id = self._extract_spool_id(inv)
+        if has_filament and inv.get("brand"):
+            entry["vendor"] = str(inv.get("brand"))
+        if has_filament and inv.get("sku"):
+            entry["sku"] = str(inv.get("sku"))
 
-                if has_filament and spool_id is not None:
-                    entry["spool_id"] = spool_id
+        if has_filament and spool_id is not None:
+            entry["spool_id"] = spool_id
 
-                lanes[lane_key] = entry
-
-        return lanes
+        return entry
 
     @staticmethod
     def _parse_markers(raw):

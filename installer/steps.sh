@@ -261,10 +261,48 @@ step_generic_config() {
 step_printer_config() {
     print_header "Printer Configuration (printer.cfg)"
 
+    if [ "$PRINTER_MODEL" = "KX" ]; then
+        require_kx_klipper_fork || return 1
+    fi
+
     install_config_file "$SCRIPT_DIR/config/printer_${PRINTER_MODEL}.cfg" \
                         "$CONFIG_DIR/printer.cfg" || return 1
 
+    if [ "$PRINTER_MODEL" = "KX" ]; then
+        install_kx_multimaterial_config || return 1
+    fi
+
     TOUCHED_KLIPPER=1
+    return 0
+}
+
+require_kx_klipper_fork() {
+    local module="$KLIPPER_DIR/klippy/extras/kx_toolchanger.py"
+    if [ ! -f "$module" ]; then
+        print_error "Kobra X needs the Kobra Klipper fork with its KX modules: $module not found"
+        print_info "Check out the fork's Kobra X branch in $KLIPPER_DIR (or pass --klipper-dir), then rerun."
+        return 1
+    fi
+    return 0
+}
+
+install_kx_multimaterial_config() {
+    local source="$KLIPPER_DIR/config/kx_multimaterial.cfg"
+    local target="$CONFIG_DIR/kx_multimaterial.cfg"
+
+    if [ -f "$target" ]; then
+        print_info "Kept existing $target (holds this machine's measured values)"
+        print_info "Compare it against $source after updating the fork."
+        return 0
+    fi
+    if [ ! -f "$source" ]; then
+        print_error "Source file not found: $source (is $KLIPPER_DIR the Kobra fork?)"
+        return 1
+    fi
+    cp "$source" "$target"
+    print_success "Installed: $source → $target"
+    print_warning "Measure sensor_to_nozzle in $target before starting Klipper (it refuses to start without it)."
+    print_info "Mark the inlets the ACE feeds as 'ace' there (inlet1..inlet4)."
     return 0
 }
 

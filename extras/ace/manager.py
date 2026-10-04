@@ -43,6 +43,9 @@ import re
 import serial
 import time
 
+# Optional printer macro, see AceManager.route_to_tool.
+ROUTE_TOOL_MACRO = "_ACE_ROUTE_TOOL"
+
 # ACE-owned save_variables namespaces whose key names encode instance
 # numbers or a bus grouping. Only exact numeric forms are considered
 # ACE's - anything else in saved_variables.cfg (foreign macros,
@@ -244,8 +247,8 @@ class AceManager:
             ACE_INSTANCES[instance_num] = instance
             INSTANCE_MANAGERS[instance_num] = self
 
-            # Register tool macros for this instance
-            self.register_tool_macros(instance_num)
+            if self.ace_config["register_tool_macros"]:
+                self.register_tool_macros(instance_num)
 
             self.gcode.respond_info(
                 f"ACE[{instance_num}]: Loaded instance (T{instance.tool_offset}-T{instance.tool_offset + 3})"
@@ -1178,6 +1181,22 @@ class AceManager:
             toolhead.wait_moves()
 
     @toolchange_in_progress_guard
+    def route_to_tool(self, tool_index):
+        """Announce which tool's filament is about to move in the toolhead.
+
+        A toolhead with more than one filament path (a selector in front of
+        the extruder) defines ``[gcode_macro _ACE_ROUTE_TOOL]`` and brings
+        the path of ``TOOL=<global tool>`` in front of the extruder and the
+        toolhead sensor. Without that macro, or for an unknown tool (-1),
+        nothing is sent. An error raised by the macro propagates: the
+        caller must not move filament the toolhead is not set up for.
+        """
+        if tool_index < 0:
+            return
+        if self.printer.lookup_object(f"gcode_macro {ROUTE_TOOL_MACRO}", None) is None:
+            return
+        self.gcode.run_script_from_command(f"{ROUTE_TOOL_MACRO} TOOL={tool_index}")
+
     def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
                      cycle_on_blocked=False):
         """
@@ -1198,6 +1217,8 @@ class AceManager:
         current_tool_index = self.state.get("ace_current_index", -1)
 
         self.gcode.respond_info(f"ACE: Smart unload tool {tool_index} (current: {current_tool_index})")
+
+        self.route_to_tool(tool_index)
 
         tool_for_temp = tool_index if tool_index >= 0 else current_tool_index
         if prepare_toolhead:
@@ -1919,6 +1940,8 @@ class AceManager:
                 self.gcode.respond_info(f"ACE[{instance.instance_num}]: " f"Loading slot {slot} (T{tool_num})")
 
                 try:
+                    if not use_rdm:
+                        self.route_to_tool(tool_num)
                     # Step 1: Feed to verification sensor
                     self.gcode.respond_info(f"ACE: Feeding slot {slot} to {sensor_name} sensor")
                     instance._feed_filament_to_verification_sensor(
@@ -2051,7 +2074,13 @@ class AceManager:
                 self._sync_inventory_to_persistent(inst.instance_num, flush=flush)
 
     def _sync_moonraker_lane_data(self, force=False, reason="manual"):
-        """Push ACE slot metadata to Moonraker DB lane_data for Orca sync."""
+        """Push ACE slot metadata to Moonraker DB lane_data for Orca sync.
+
+        Also sends "ace:lanes_changed", even with this sync disabled: a
+        printer-side lane writer (Kobra X [kx_filament]) then rereads the
+        "lanes" of the ace_state status.
+        """
+        self.printer.send_event("ace:lanes_changed")
         adapter = getattr(self, "_moonraker_lane_sync", None)
         if not adapter:
             return False
@@ -2705,6 +2734,10 @@ class AceManager:
         # failure handling: pause+prompt mid-print, abort at startup.
         self.ensure_tool_slot_loaded(target_tool)
 
+        # The sensor readings below are those of the routed path: the loaded
+        # tool's, or with nothing loaded the one about to be fed.
+        self.route_to_tool(current_tool if current_tool >= 0 else target_tool)
+
         toolhead_sensor = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_sensor = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
         filament_pos = self.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -2993,6 +3026,8 @@ class AceManager:
 
             self.gcode.respond_info(f"ACE[{target_ace.instance_num}]: Loading tool {target_tool}...")
 
+            self.route_to_tool(target_tool)
+
             # Capture the amount purged during loading
             purged_amount = target_ace._feed_filament_into_toolhead(target_tool, check_pre_condition=False)
 
@@ -3121,6 +3156,8 @@ class AceManager:
                 "ace_pro_enabled": bool(self._ace_pro_enabled),
                 "toolhead_sensor": toolhead_sensor,
                 "rdm_sensor": rdm_sensor,
+                "lanes": self._moonraker_lane_sync.lane_entries(),
+                "lane_sync_enabled": bool(self._moonraker_lane_sync.enabled),
             }
         except Exception:
             return {
@@ -3132,6 +3169,8 @@ class AceManager:
                 "ace_pro_enabled": False,
                 "toolhead_sensor": None,
                 "rdm_sensor": None,
+                "lanes": [],
+                "lane_sync_enabled": False,
             }
 
     def _resolve_instance_config(self, instance_num):
@@ -4497,6 +4536,7 @@ class AceManager:
             )
 
             try:
+                self.route_to_tool(tool_index)
                 self.prepare_toolhead_for_filament_retraction(tool_index=tool_index)
 
                 # Extruder retract to clear the toolhead

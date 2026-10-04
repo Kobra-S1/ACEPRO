@@ -79,8 +79,9 @@ Usage: $0 [options]
 Without options an interactive menu is shown.
 
 Options:
-  --printer MODEL          Printer model (e.g. K3, KS1, K3M, KS1M)
-                           K3M is BETA, KS1M is ALPHA and untested on hardware
+  --printer MODEL          Printer model (e.g. K3, KS1, K3M, KS1M, KX)
+                           K3M is BETA, KS1M is ALPHA and untested on hardware,
+                           KX is ALPHA and needs the Kobra Klipper fork
   --all                    Select all components (non-interactive install)
   --components LIST        Comma separated component list (non-interactive):
                              driver, generic, printer-config, ace-config,

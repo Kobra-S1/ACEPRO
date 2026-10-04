@@ -428,6 +428,27 @@ def test_build_lane_payload_includes_vendor_and_sku_without_spool_id_for_non_num
     assert lane1["sku"] == "PLA-ORANGE"
 
 
+def test_lane_entries_are_indexed_by_ace_tool_even_with_sync_disabled():
+    """A printer-side tool changer publishes the lanes itself (Kobra X): it
+    reads these entries while ACEPRO's own Moonraker sync is off."""
+    empty = {"status": "empty", "material": "", "color": [0, 0, 0], "temp": 0}
+    abs_spool = {"status": "ready", "material": "ABS", "color": [16, 32, 48],
+                 "temp": 245, "hotbed_temp": {"max": 100}, "sku": "12345",
+                 "brand": "Anycubic"}
+    instances = [DummyInstance(0, [empty] * 4),
+                 DummyInstance(4, [empty, abs_spool, empty, empty])]
+    adapter, _ = make_adapter(instances, enabled=False)
+
+    entries = adapter.lane_entries()
+
+    assert len(entries) == 8
+    assert entries[5] == {"lane": "5", "material": "ABS", "color": "#102030",
+                          "scan_time": "", "td": "", "nozzle_temp": 245,
+                          "bed_temp": 100, "vendor": "Anycubic",
+                          "sku": "12345", "spool_id": 12345}
+    assert entries[0]["material"] == "" and entries[0]["lane"] == "0"
+
+
 def test_build_lane_payload_skips_instances_with_invalid_tool_offset():
     # Guard against MagicMock tool_offset leaking into lane keys
     bad_instance = MagicMock()
