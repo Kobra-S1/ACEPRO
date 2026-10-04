@@ -1870,10 +1870,16 @@ know the paths; it announces the tool and the printer config acts.
   when `[gcode_macro _ACE_ROUTE_TOOL]` exists; without the macro, or for
   tool -1, it does nothing. An error from the macro propagates and stops
   the operation before any feed.
+- `route_to_tool(tool, FEEDER_ACE)` adds `FEEDER=ACE`: the ACE alone moves
+  the filament up to the toolhead sensor while the extruder stands still,
+  so the path must be open (the Kobra X turret's engaged gear holds a
+  filament in front of the sensor). Without `FEEDER` the extruder moves it.
 - Call sites: `perform_tool_change` (the loaded tool before the sensor
-  plausibility check, or the target when nothing is loaded; the target again
-  before the load), `smart_unload` with a known tool, `smart_load` when it
-  verifies at the toolhead sensor, `full_unload_slot` for the loaded tool.
+  plausibility check, or the target when nothing is loaded; the target with
+  `FEEDER=ACE` before the load), `_feed_to_toolhead_with_extruder_assist`
+  (once the sensor has the filament, before the extruder pulls),
+  `smart_unload` with a known tool, `smart_load` when it verifies at the
+  toolhead sensor (`FEEDER=ACE`), `full_unload_slot` for the loaded tool.
   Raw `ACE_FEED`/`ACE_RETRACT` and the cycling unload of an unknown tool do
   not route.
 - The printer side reads the loaded tool back from `ace_state` status

@@ -17,6 +17,7 @@ from ace.instance import AceInstance
 def _bare_instance(slot_status="ready", status_detail=None):
     inst = object.__new__(AceInstance)
     inst.instance_num = 1
+    inst.tool_offset = 0
     inst.gcode = Mock()
     INSTANCE_MANAGERS[1] = Mock()
     INSTANCE_MANAGERS[1].get_switch_state.return_value = False

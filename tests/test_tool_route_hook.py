@@ -6,13 +6,20 @@ path in front of the extruder and the toolhead sensor before the driver moves
 that tool's filament. The driver announces the tool; the printer config
 decides what that means. Without the macro nothing is announced, which is
 every single-path printer.
+
+A load announces twice: FEEDER=ACE before the ACE alone pushes the filament
+to the toolhead sensor (the turret's gear must be off that path, a standing
+extruder blocks it), then plain once the sensor has it and the extruder
+takes over.
 """
 
 import unittest
 from unittest.mock import Mock, patch
 
+from ace.instance import AceInstance
 from ace.manager import AceManager
 from ace.config import (
+    INSTANCE_MANAGERS,
     FILAMENT_STATE_BOWDEN,
     FILAMENT_STATE_NOZZLE,
     FILAMENT_STATE_SPLITTER,
@@ -84,15 +91,17 @@ class TestToolChangeRoutes(_HookFixture, unittest.TestCase):
     def test_a_load_routes_to_its_tool_before_feeding(self):
         self._change(-1, 2, FILAMENT_STATE_SPLITTER, toolhead=False)
 
-        self.assertEqual(self.routes()[-1], f"{ROUTE} TOOL=2")
-        self.assertLess(self.order.index(f"{ROUTE} TOOL=2"), self.order.index("feed"))
+        self.assertEqual(self.routes()[-1], f"{ROUTE} TOOL=2 FEEDER=ACE")
+        self.assertLess(
+            self.order.index(f"{ROUTE} TOOL=2 FEEDER=ACE"), self.order.index("feed")
+        )
 
     def test_a_change_routes_to_the_loaded_tool_then_to_the_new_one(self):
         self._change(1, 2, FILAMENT_STATE_NOZZLE, toolhead=True)
 
         steps = [e for e in self.order if e in ("unload", "feed") or e.startswith(ROUTE)]
         self.assertEqual(
-            steps, [f"{ROUTE} TOOL=1", "unload", f"{ROUTE} TOOL=2", "feed"]
+            steps, [f"{ROUTE} TOOL=1", "unload", f"{ROUTE} TOOL=2 FEEDER=ACE", "feed"]
         )
 
     def test_no_hook_macro_means_no_route_command(self):
@@ -159,9 +168,9 @@ class TestUnloadAndPreloadRoutes(_HookFixture, unittest.TestCase):
         manager.smart_load()
 
         self.assertEqual(
-            self.routes(), [f"{ROUTE} TOOL={tool}" for tool in (0, 1, 3)]
+            self.routes(), [f"{ROUTE} TOOL={tool} FEEDER=ACE" for tool in (0, 1, 3)]
         )
-        self.assertEqual(self.order[:2], [f"{ROUTE} TOOL=0", "feed"])
+        self.assertEqual(self.order[:2], [f"{ROUTE} TOOL=0 FEEDER=ACE", "feed"])
 
     def test_preloading_to_the_rdm_sensor_leaves_the_toolhead_alone(self):
         manager = self._manager()
@@ -194,6 +203,63 @@ class TestUnloadAndPreloadRoutes(_HookFixture, unittest.TestCase):
         manager.full_unload_slot(1)
 
         self.assertEqual(self.routes(), [])
+
+
+class TestFeedHandsOverToTheExtruder(unittest.TestCase):
+    """AceInstance._feed_to_toolhead_with_extruder_assist with its ACE and
+    extruder moves recorded; the manager is the hook's owner."""
+
+    def _instance(self, sensor_states):
+        self.order = []
+
+        def step(name):
+            return Mock(side_effect=lambda *a, **k: self.order.append(name))
+
+        manager = Mock()
+        manager.get_switch_state.side_effect = sensor_states
+        manager.route_to_tool = Mock(
+            side_effect=lambda tool: self.order.append(f"route {tool}")
+        )
+        instance = object.__new__(AceInstance)
+        instance.instance_num = 1
+        instance.tool_offset = 4
+        instance.gcode = Mock()
+        instance._info = {"slots": [{"index": i, "status": "ready"} for i in range(4)]}
+        instance.dwell = Mock()
+        instance.wait_ready = Mock()
+        instance.timeout_multiplier = 2
+        instance.extruder_feeding_length = 45
+        instance.execute_feed_with_retries = step("ace feed")
+        instance._extruder_move = step("extruder")
+        instance._change_feed_speed = Mock(return_value=True)
+        instance._stop_feed = Mock()
+        instance._disable_feed_assist = Mock()
+        instance._enable_feed_assist = Mock()
+        return instance, manager
+
+    def _feed(self, instance, manager):
+        with patch.dict(INSTANCE_MANAGERS, {1: manager}):
+            instance._feed_to_toolhead_with_extruder_assist(
+                2, feed_length=100.0, feed_speed=50.0,
+                extruder_feeding_length=45, extruder_feeding_speed=4,
+            )
+
+    def test_the_tool_is_routed_once_the_sensor_has_it_before_the_extruder(self):
+        instance, manager = self._instance(sensor_states=lambda sensor: True)
+
+        self._feed(instance, manager)
+
+        self.assertEqual(self.order, ["ace feed", "route 6", "extruder"])
+
+    def test_a_feed_that_never_reaches_the_sensor_routes_nothing(self):
+        instance, manager = self._instance(sensor_states=lambda sensor: False)
+        instance.FEED_ERROR_GRACE_S = -1.0
+        instance._info["slots"][2]["status"] = "gear_err"
+
+        with self.assertRaises(ValueError):
+            self._feed(instance, manager)
+
+        self.assertEqual(self.order, ["ace feed"])
 
 
 if __name__ == "__main__":

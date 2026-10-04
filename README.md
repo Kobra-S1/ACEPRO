@@ -640,8 +640,10 @@ driven by the Kobra Klipper fork, not by this driver.
   `KX_UNLOAD_ALL` recovers an ACE filament left in an inlet after a restart.
 - **The turret follows this driver.** `kx_multimaterial.cfg` defines
   `_ACE_ROUTE_TOOL`, which the driver calls before it moves a tool's
-  filament on its own (panel, `ACE_SMART_UNLOAD`, endless spool); the turret
-  turns to that tool's inlet, or the operation stops. Raw `ACE_FEED` and
+  filament (tool change, panel, `ACE_SMART_UNLOAD`, endless spool); the
+  turret turns to that tool's inlet, or the operation stops. While the ACE
+  alone pushes a filament to the inlet switch the turret stays home
+  (`FEEDER=ACE`), and engages once the switch has it. Raw `ACE_FEED` and
   `ACE_RETRACT` do not turn it.
 - **The ACE panel uses printer tool numbers.** With direct-fed inlets before
   the ACE, slot 0 of the first unit is shown and loaded as `T3`, not `T0`.

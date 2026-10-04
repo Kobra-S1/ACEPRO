@@ -45,6 +45,10 @@ import time
 
 # Optional printer macro, see AceManager.route_to_tool.
 ROUTE_TOOL_MACRO = "_ACE_ROUTE_TOOL"
+# Who moves the routed tool's filament next: the extruder (with or without
+# the ACE), or the ACE alone while the extruder stands still.
+FEEDER_EXTRUDER = "EXTRUDER"
+FEEDER_ACE = "ACE"
 
 # ACE-owned save_variables namespaces whose key names encode instance
 # numbers or a bus grouping. Only exact numeric forms are considered
@@ -1181,21 +1185,27 @@ class AceManager:
             toolhead.wait_moves()
 
     @toolchange_in_progress_guard
-    def route_to_tool(self, tool_index):
+    def route_to_tool(self, tool_index, feeder=FEEDER_EXTRUDER):
         """Announce which tool's filament is about to move in the toolhead.
 
         A toolhead with more than one filament path (a selector in front of
         the extruder) defines ``[gcode_macro _ACE_ROUTE_TOOL]`` and brings
         the path of ``TOOL=<global tool>`` in front of the extruder and the
-        toolhead sensor. Without that macro, or for an unknown tool (-1),
-        nothing is sent. An error raised by the macro propagates: the
-        caller must not move filament the toolhead is not set up for.
+        toolhead sensor. With ``FEEDER_ACE`` the macro also gets
+        ``FEEDER=ACE``: the ACE alone pushes or pulls up to the toolhead
+        sensor, so the path must be open while the extruder stands still.
+        Without that macro, or for an unknown tool (-1), nothing is sent.
+        An error raised by the macro propagates: the caller must not move
+        filament the toolhead is not set up for.
         """
         if tool_index < 0:
             return
         if self.printer.lookup_object(f"gcode_macro {ROUTE_TOOL_MACRO}", None) is None:
             return
-        self.gcode.run_script_from_command(f"{ROUTE_TOOL_MACRO} TOOL={tool_index}")
+        script = f"{ROUTE_TOOL_MACRO} TOOL={tool_index}"
+        if feeder == FEEDER_ACE:
+            script += f" FEEDER={FEEDER_ACE}"
+        self.gcode.run_script_from_command(script)
 
     def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
                      cycle_on_blocked=False):
@@ -1941,7 +1951,7 @@ class AceManager:
 
                 try:
                     if not use_rdm:
-                        self.route_to_tool(tool_num)
+                        self.route_to_tool(tool_num, FEEDER_ACE)
                     # Step 1: Feed to verification sensor
                     self.gcode.respond_info(f"ACE: Feeding slot {slot} to {sensor_name} sensor")
                     instance._feed_filament_to_verification_sensor(
@@ -3026,7 +3036,7 @@ class AceManager:
 
             self.gcode.respond_info(f"ACE[{target_ace.instance_num}]: Loading tool {target_tool}...")
 
-            self.route_to_tool(target_tool)
+            self.route_to_tool(target_tool, FEEDER_ACE)
 
             # Capture the amount purged during loading
             purged_amount = target_ace._feed_filament_into_toolhead(target_tool, check_pre_condition=False)

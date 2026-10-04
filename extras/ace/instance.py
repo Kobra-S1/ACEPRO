@@ -1043,6 +1043,10 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Toolhead sensor finally triggered after "
                     f"running feed-assist for 60s. Continuing..."
                 )
+        # The ACE pushed alone up to here; from the sensor on the extruder
+        # pulls, so its path has to be on this tool now.
+        self.manager.route_to_tool(self.tool_offset + local_slot)
+
         self.gcode.respond_info(
             f"ACE[{self.instance_num}]: Slowing feedspeed down {extruder_feeding_speed:.2f} for toolhead load"
         )
