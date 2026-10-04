@@ -16,6 +16,15 @@ from ks_includes.widgets.keypad import Keypad  # noqa: E402
 TOOL_CHANGER = "kx_toolchanger"
 
 
+# Content width the landscape control row needs with its full labels (ACE Pro,
+# Endless Spool, Match Mode), margins and KlipperScreen's scrollbar included:
+# 521 px measured at KlipperScreen's small font. Narrower landscape screens
+# (480x320) get the same controls with shorter labels.
+WIDE_LAYOUT_MIN_WIDTH = 525
+# The Utilities view's three columns of 160 px buttons need 544 px likewise.
+WIDE_UTILITIES_MIN_WIDTH = 544
+
+
 class Panel(ScreenPanel):
     FILAMENT_TEMP_DEFAULTS = {
         "PLA": 200,
@@ -734,6 +743,7 @@ class Panel(ScreenPanel):
         #                              row2: Match Mode full-width)
         # In landscape: single horizontal row (original).
         _portrait = self._is_portrait()
+        _compact = not _portrait and self._gtk.content_width < WIDE_LAYOUT_MIN_WIDTH
         if _portrait:
             endless_spool_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         else:
@@ -763,7 +773,8 @@ class Panel(ScreenPanel):
         # Middle: Endless Spool Enable/Disable
         endless_spool_control = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
-        endless_spool_label = Gtk.Label(label="Endless Spool:")
+        endless_spool_label = Gtk.Label(
+            label="Endless:" if _compact else "Endless Spool:")
         endless_spool_label.get_style_context().add_class("description")
         endless_spool_label.set_halign(Gtk.Align.START)
         endless_spool_control.pack_start(endless_spool_label, False, False, 0)
@@ -788,17 +799,20 @@ class Panel(ScreenPanel):
         # Right side: Match Mode selector
         match_mode_control = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
-        match_mode_label = Gtk.Label()
-        match_mode_label.set_markup('<span foreground="white">Match Mode:</span>')
-        match_mode_label.get_style_context().add_class("description")
-        match_mode_label.set_halign(Gtk.Align.START)
-        match_mode_control.pack_start(match_mode_label, False, False, 0)
+        # The button names the active mode itself; where width is short it
+        # stands without its caption.
+        if not _compact:
+            match_mode_label = Gtk.Label()
+            match_mode_label.set_markup('<span foreground="white">Match Mode:</span>')
+            match_mode_label.get_style_context().add_class("description")
+            match_mode_label.set_halign(Gtk.Align.START)
+            match_mode_control.pack_start(match_mode_label, False, False, 0)
 
         # Match mode selector (Exact / Material Only / Next Ready)
         self.match_mode_button = Gtk.MenuButton()
         self.match_mode_button.set_relief(Gtk.ReliefStyle.NORMAL)
         self.match_mode_button.get_style_context().add_class("color3")
-        self.match_mode_button.set_size_request(120, 32)
+        self._match_mode_width = 100 if _compact else 120
         self._build_match_mode_popover()
         match_mode_control.pack_start(self.match_mode_button, False, False, 0)
 
@@ -994,7 +1008,7 @@ class Panel(ScreenPanel):
 
         if update_widget and hasattr(self, 'match_mode_button'):
             self.match_mode_button.set_label(label_map.get(mode, "Exact"))
-            self.match_mode_button.set_size_request(120, 32)
+            self.match_mode_button.set_size_request(self._match_mode_width, 32)
             # Only rebuild popover if it doesn't exist yet
             if not hasattr(self, 'match_mode_popover') or self.match_mode_popover is None:
                 self._build_match_mode_popover()
@@ -2127,6 +2141,7 @@ class Panel(ScreenPanel):
         actions_grid.set_margin_right(2)
 
         portrait = self._is_portrait()
+        compact = not portrait and self._gtk.content_width < WIDE_UTILITIES_MIN_WIDTH
 
         def add_action(button, col, row, color_class="color1"):
             if portrait:
@@ -2134,7 +2149,7 @@ class Panel(ScreenPanel):
                 button.set_hexpand(False)
                 button.set_halign(Gtk.Align.FILL)
             else:
-                button.set_size_request(160, 58)
+                button.set_size_request(118 if compact else 160, 58)
                 button.set_hexpand(True)
             button.get_style_context().add_class(color_class)
             actions_grid.attach(button, col, row, 1, 1)
