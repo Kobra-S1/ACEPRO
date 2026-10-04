@@ -231,7 +231,9 @@ class TestFeedHandsOverToTheExtruder(unittest.TestCase):
         instance.extruder_feeding_length = 45
         instance.execute_feed_with_retries = step("ace feed")
         instance._extruder_move = step("extruder")
-        instance._change_feed_speed = Mock(return_value=True)
+        instance._change_feed_speed = Mock(
+            side_effect=lambda *a: self.order.append("ace slowed") or True
+        )
         instance._stop_feed = Mock()
         instance._disable_feed_assist = Mock()
         instance._enable_feed_assist = Mock()
@@ -249,7 +251,11 @@ class TestFeedHandsOverToTheExtruder(unittest.TestCase):
 
         self._feed(instance, manager)
 
-        self.assertEqual(self.order, ["ace feed", "route 6", "extruder"])
+        # Slowed first: the routing takes the turret a moment, and the ACE
+        # at full speed would ram the filament into the nozzle meanwhile.
+        self.assertEqual(
+            self.order, ["ace feed", "ace slowed", "route 6", "extruder"]
+        )
 
     def test_a_feed_that_never_reaches_the_sensor_routes_nothing(self):
         instance, manager = self._instance(sensor_states=lambda sensor: False)
