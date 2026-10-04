@@ -1882,6 +1882,8 @@ know the paths; it announces the tool and the printer config acts.
   toolhead sensor (`FEEDER=ACE`), `full_unload_slot` for the loaded tool.
   Raw `ACE_FEED`/`ACE_RETRACT` and the cycling unload of an unknown tool do
   not route.
+- `_ACE_PREPARE_FOR_RETRACTION` runs the optional `_ACE_AFTER_CUT` macro
+  between `CUT_TIP` and the unload retract (Kobra X: to the purge position).
 - The printer side reads the loaded tool back from `ace_state` status
   `current_index`.
 - The KlipperScreen panel shows and sends printer tool numbers: ACE tool +
