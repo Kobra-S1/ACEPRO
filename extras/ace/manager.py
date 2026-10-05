@@ -1270,7 +1270,6 @@ class AceManager:
         if wait_for_move_end:
             toolhead.wait_moves()
 
-    @toolchange_in_progress_guard
     def route_to_tool(self, tool_index, feeder=FEEDER_EXTRUDER):
         """Announce which tool's filament is about to move in the toolhead.
 
@@ -1308,6 +1307,7 @@ class AceManager:
         if tools != self.parked_tools():
             self.state.set("ace_parked_tools", tools)
 
+    @toolchange_in_progress_guard
     def park_tool(self, tool_index):
         """Take the loaded tool out of the hotend and leave it parked at
         the intake: cut, then the extruder retracts until the toolhead
@@ -1363,6 +1363,7 @@ class AceManager:
             if not self.smart_unload(tool, keep_heater=True):
                 raise Exception(f"Failed to unload parked T{tool}")
 
+    @toolchange_in_progress_guard
     def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
                      cycle_on_blocked=False):
         """_smart_unload, and the unloaded filament is no longer parked."""

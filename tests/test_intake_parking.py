@@ -174,3 +174,40 @@ class TestParkedRecord:
 
         assert manager.is_parked(2) is True
         assert manager.is_parked(1) is False
+
+
+class TestRunoutMonitorStaysQuiet:
+    """The runout monitor reads the toolhead sensor during a print and
+    takes present -> absent for a runout unless a tool change is flagged as
+    running. An unload and a park clear that sensor on purpose."""
+
+    def test_a_park_is_flagged_as_a_tool_change_while_it_runs(self):
+        manager, instance = manager_with(PATHS_PER_TOOL)
+        seen = []
+        manager.transfers[0].park.side_effect = (
+            lambda *args, **kwargs: seen.append(manager.toolchange_in_progress))
+
+        run(instance, lambda: manager.park_tool(1))
+
+        assert seen == [True]
+        assert manager.toolchange_in_progress is False
+
+    def test_an_unload_is_flagged_as_a_tool_change_while_it_runs(self):
+        manager, instance = manager_with(PATHS_PER_TOOL)
+        seen = []
+        manager._smart_unload = Mock(
+            side_effect=lambda *args: seen.append(manager.toolchange_in_progress) or True)
+
+        run(instance, lambda: manager.smart_unload(1))
+
+        assert seen == [True]
+        assert manager.toolchange_in_progress is False
+
+    def test_the_flag_is_dropped_when_the_park_fails(self):
+        manager, instance = manager_with(PATHS_PER_TOOL)
+        manager.transfers[0].park.side_effect = ValueError("still sees filament")
+
+        with pytest.raises(ValueError):
+            run(instance, lambda: manager.park_tool(1))
+
+        assert manager.toolchange_in_progress is False
