@@ -1036,8 +1036,13 @@ class AceManager:
             tool_index: Tool to prepare for retraction (-1 = unknown tool)
 
         Returns:
-            bool: True if filament was present and handling succeeded,
-                  False if no filament present or operation completed
+            bool: True if filament was present and was prepared,
+                  False if no filament is present.
+
+        Raises:
+            Exception: the macro failed (cutter not reachable, heater
+                fault). The filament is then still whole and in the nozzle,
+                so the caller must not retract it.
         """
         if not self.get_switch_state(SENSOR_TOOLHEAD):
             self.gcode.respond_info("ACE: No filament at toolhead, skipping prep")
@@ -1067,8 +1072,10 @@ class AceManager:
             return True
 
         except Exception as e:
-            self.gcode.respond_info(f"ACE: Error preparing toolhead for retraction: {e}")
-            return False
+            raise Exception(
+                f"ACE: Preparing the toolhead for retraction failed, "
+                f"filament left in place: {e}"
+            ) from e
 
     def _ensure_hot_for_recovery_unload(self, current_tool, target_temp):
         """Heat the extruder before a plausibility-mismatch recovery unload.

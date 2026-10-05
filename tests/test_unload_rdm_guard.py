@@ -21,6 +21,8 @@ coordinated-retraction call site to the same contract.
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from ace.manager import AceManager
 from ace.config import SENSOR_TOOLHEAD
 
@@ -98,4 +100,24 @@ class TestSmartUnloadRdmEarlyStopGuard:
         assert self._unload(mgr) is True
 
         inst.rmd_triggered_unload_slot.assert_called_once()
+        inst._smart_unload_slot.assert_not_called()
+
+    def test_failed_prepare_stops_the_unload_before_any_retract(self):
+        """The prepare step heats and cuts. When it fails (cutter not
+        reachable, heater fault) the filament is still whole and in the
+        nozzle, so neither the extruder nor the ACE may pull on it."""
+        inst = self._instance()
+        mgr = self._manager(inst, rdm_has_filament=True)
+        mgr.pre_cut_retract_length = 2.0
+        mgr.gcode.run_script_from_command.side_effect = Exception("cut failed")
+
+        with pytest.raises(Exception, match="cut failed"), \
+             patch("ace.manager.get_instance_from_tool", return_value=0), \
+             patch("ace.manager.get_local_slot", return_value=1), \
+             patch("ace.manager.get_ace_instance_and_slot_for_tool",
+                   return_value=(inst, 1)):
+            mgr.smart_unload(tool_index=1)
+
+        mgr._extruder_move.assert_not_called()
+        inst.rmd_triggered_unload_slot.assert_not_called()
         inst._smart_unload_slot.assert_not_called()

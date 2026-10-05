@@ -1852,14 +1852,15 @@ class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
             "_ACE_PREPARE_FOR_RETRACTION TARGET_TEMP=210 PRE_CUT_RETRACT=2.0"
         )
 
-    def test_handles_macro_failure(self):
+    def test_macro_failure_is_raised_with_its_cause(self):
+        """A failed cut must not read as "nothing to prepare": the caller
+        would pull the uncut filament out of the hot nozzle."""
         manager = self._build_manager()
         manager.get_switch_state = Mock(return_value=True)
         self.mock_gcode.run_script_from_command.side_effect = Exception("boom")
 
-        result = manager.prepare_toolhead_for_filament_retraction(tool_index=0)
-
-        self.assertFalse(result)
+        with self.assertRaisesRegex(Exception, "boom"):
+            manager.prepare_toolhead_for_filament_retraction(tool_index=0)
 
 
 class TestSensorMonitoring(unittest.TestCase):
