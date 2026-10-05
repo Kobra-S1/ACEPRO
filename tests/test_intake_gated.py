@@ -358,8 +358,36 @@ def test_a_parked_filament_is_loaded_by_a_short_extruder_pull():
     # The ACE only follows at the extruder's speed; no fast feed to the
     # intake, which a filament standing in the gear could not follow.
     assert instance.without_extruder() == [
-        "assist off", "ace feed 2 15@5", "wait moves", "ace stop", "assist on"]
+        "assist off", "ace feed 2 80@5", "wait moves", "ace stop", "assist on"]
     assert 1.0 <= instance.extruder_travel() <= 1.0 + 0.5 + 1e-9
+
+
+def test_a_parked_filament_further_back_is_pulled_on_while_it_moves():
+    """A park overshoots the sensor by what was still queued when it
+    cleared. A filament the gear moves is there: it is pulled on to the
+    sensor. Putting it back and feeding from the ACE instead pushes against
+    the gear that holds it."""
+    instance = FakeInstance(FakeFilament(tip=-25.0))
+    instance.filament.gear_above_sensor = 45.0
+
+    transfer_for(instance).load(SLOT, parked=True)
+
+    assert instance.filament.at_sensor
+    assert "ace feed 2 300@30" not in instance.steps
+    assert not any(s.startswith("extruder -") for s in instance.steps)
+    assert 25.0 <= instance.extruder_travel() <= 25.0 + 0.5 + 1e-9
+
+
+def test_a_parked_filament_that_moves_but_never_arrives_raises():
+    filament = FakeFilament(tip=-500.0)
+    instance = FakeInstance(filament)
+
+    with pytest.raises(ValueError, match="parked"):
+        transfer_for(instance).load(SLOT, parked=True)
+
+    assert "ace feed 2 300@30" not in instance.steps
+    assert instance.steps.index("ace stop") < instance.steps.index("extruder -80@5")
+    assert "assist on" not in instance.steps
 
 
 def test_a_parked_filament_out_of_the_gears_reach_is_fed_the_normal_way():
@@ -371,7 +399,7 @@ def test_a_parked_filament_out_of_the_gears_reach_is_fed_the_normal_way():
 
     assert instance.filament.at_sensor
     steps = instance.without_extruder()
-    assert steps.index("ace feed 2 15@5") < steps.index("ace feed 2 300@30")
+    assert steps.index("ace feed 2 80@5") < steps.index("ace feed 2 300@30")
     assert steps[-1] == "assist on"
     # The pull into nothing is turned back before the feed.
     assert instance.steps.index("extruder -15@5") < instance.steps.index(

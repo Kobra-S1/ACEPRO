@@ -2878,8 +2878,11 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
 
         instance._feed_filament_into_toolhead(2, check_pre_condition=False)
 
+        # The gear may hold the filament: the ACE pulls it back only once
+        # the route has freed it.
         self.assertEqual(
-            self.steps, ["transfer", "retract", "route 2 EXTRUDER", "transfer"])
+            self.steps, ["transfer", "route 2 ACE", "retract",
+                         "route 2 EXTRUDER", "transfer"])
 
     @patch('ace.instance.AceSerialManager')
     def test_a_failed_feed_is_retried_with_the_path_reopened(self, mock_serial_mgr_class):

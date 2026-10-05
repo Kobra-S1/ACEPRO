@@ -1170,6 +1170,9 @@ class AceInstance:
                     f"retracting filament 150mm back in case it got squished and stuck "
                     f"in the filament-hub"
                 )
+                if self.transfer is not None:
+                    # The gear may hold the filament: free it for the ACE.
+                    self.manager.route_to_tool(tool, FEEDER_ACE)
                 self._retract(local_slot, 150, self.retract_speed)
                 if attempt == attempts:
                     raise
