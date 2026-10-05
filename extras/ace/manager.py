@@ -905,6 +905,7 @@ class AceManager:
         whose tools_share_path() says - the printer's tool changer, which
         owns how the tubes are arranged."""
         value = str(self.ace_config.get("toolhead_paths", PATHS_SHARED))
+        self._toolhead_owner = None
         if value.lower() in PATHS:
             return value.lower()
         owner = self.printer.lookup_object(value, None)
@@ -918,7 +919,18 @@ class AceManager:
                 f"tools_share_path()")
         paths = PATHS_SHARED if owner.tools_share_path() else PATHS_PER_TOOL
         self.gcode.respond_info(f"ACE: toolhead_paths is {paths} (says '{value}')")
+        self._toolhead_owner = owner
         return paths
+
+    def tool_at_toolhead(self):
+        """The tool whose filament the toolhead holds right now, as the
+        printer object named in toolhead_paths knows it (optional
+        ace_tool_at_toolhead()); -1 when there is nobody to ask or it
+        cannot say. For when the record of the loaded tool is lost."""
+        ask = getattr(getattr(self, "_toolhead_owner", None),
+                      "ace_tool_at_toolhead", None)
+        tool = ask() if callable(ask) else None
+        return -1 if tool is None else tool
 
     def _disable_all_sensor_detection(self):
         """Disable automatic pause for all sensors."""
@@ -1384,6 +1396,8 @@ class AceManager:
     def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
                      cycle_on_blocked=False):
         """_smart_unload, and the unloaded filament is no longer parked."""
+        if tool_index < 0 and self.state.get("ace_current_index", -1) < 0:
+            tool_index = self._identify_unrecorded_tool()
         self._heater_target_before = self._extruder_target()
         unloaded = self._smart_unload(tool_index, prepare_toolhead, keep_heater,
                                       cycle_on_blocked)
@@ -1394,6 +1408,25 @@ class AceManager:
                 # Whichever filament was in the shared tube is out of it.
                 self.state.set("ace_parked_tools", [])
         return unloaded
+
+    def _identify_unrecorded_tool(self):
+        """The tool to unload when none is on record: the printer's answer,
+        else -1 for _smart_unload to find by test retracts. Behind an
+        intake-gated toolhead that test is refused: the extruder clears the
+        toolhead sensor whichever slot is tried, so it would name the first
+        slot and drag that slot's own filament back."""
+        tool = self.tool_at_toolhead()
+        if tool >= 0:
+            self.gcode.respond_info(
+                f"ACE: No tool on record - the toolhead holds T{tool}")
+            return tool
+        if self.transfers and self.get_switch_state(SENSOR_TOOLHEAD):
+            raise Exception(
+                "ACE: Filament at the toolhead, but no tool on record and "
+                "the printer cannot tell which it is. Unload it by hand "
+                "(ACE_SMART_UNLOAD TOOL=<n> for the slot it belongs to)."
+            )
+        return -1
 
     def _smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
                       cycle_on_blocked=False):
@@ -2087,7 +2120,9 @@ class AceManager:
         # Complete unload if using extruder mode (CASE 2)
         if use_extruder:
             instance_num, slot, tool_num = identified_tool
-            remaining_length = full_unload_length - retract_length
+            # The test retract may already have pulled further than a full
+            # unload is long.
+            remaining_length = max(0.0, full_unload_length - retract_length)
             instance = self.instances[instance_num]
 
             try:

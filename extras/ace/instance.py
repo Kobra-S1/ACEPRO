@@ -814,6 +814,15 @@ class AceInstance:
         Raises:
             ValueError: If retraction fails after all retries
         """
+        if length <= 0:
+            # The ACE takes a negative length as "keep pulling".
+            self._last_retract_early_stopped = True
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Retract skipped - nothing to pull "
+                f"on slot {slot} (length {length}mm)"
+            )
+            return {"code": 0, "msg": "Retract skipped: no length"}
+
         max_retries = MAX_RETRIES
         retry_delay_s = 2.0
 

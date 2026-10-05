@@ -797,6 +797,24 @@ class TestRetract(unittest.TestCase):
         instance.serial_mgr.send_request.assert_not_called()
 
     @patch('ace.instance.AceSerialManager')
+    def test_a_retract_of_no_or_negative_length_is_not_sent(self, mock_serial_mgr_class):
+        """The ACE takes a negative length as 'keep pulling': it wound a
+        parked filament all the way out of the tube."""
+        for length in (0, -80.0):
+            instance = AceInstance(0, self.ace_config, self.mock_printer)
+            INSTANCE_MANAGERS[0] = Mock()
+            instance._info['slots'] = [{'index': 1, 'status': 'ready'}]
+            instance.wait_ready = Mock()
+            instance.send_request = Mock()
+            instance.serial_mgr.send_request = Mock()
+
+            response = instance._retract(1, length, 50)
+
+            instance.send_request.assert_not_called()
+            instance.serial_mgr.send_request.assert_not_called()
+            self.assertEqual(response["code"], 0)
+
+    @patch('ace.instance.AceSerialManager')
     def test_retract_success_with_callbacks(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         instance._info['slots'] = [{'index': 0, 'status': 'ready'}]

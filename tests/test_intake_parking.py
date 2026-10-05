@@ -200,6 +200,35 @@ class TestParkedFilamentBeforeAnotherLoad:
             run(instance, lambda: manager._clear_parked_for(3))
 
 
+class TestUnknownFilamentAtTheToolhead:
+    """With the gear between ACE and toolhead sensor, the extruder clears
+    the sensor whichever slot is tried: a test retract identifies nothing
+    and drags the tried slot's own filament back."""
+
+    def unload_unknown(self, manager, instance):
+        manager.state.get = Mock(side_effect=lambda key, default=None: {
+            "ace_current_index": -1}.get(key, default))
+        manager.prepare_toolhead_for_filament_retraction = Mock()
+        manager._cycling_unload_fallback = Mock(return_value=True)
+        return run(instance, lambda: manager.smart_unload(-1))
+
+    def test_it_is_not_guessed_by_test_retracts(self):
+        manager, instance = manager_with(PATHS_PER_TOOL)
+
+        with pytest.raises(Exception, match="cannot tell"):
+            self.unload_unknown(manager, instance)
+
+        manager._cycling_unload_fallback.assert_not_called()
+        instance._retract.assert_not_called()
+
+    def test_a_toolhead_the_ace_pushes_into_is_still_cycled(self):
+        manager, instance = manager_with(PATHS_PER_TOOL, transfer=False)
+
+        assert self.unload_unknown(manager, instance) is True
+
+        manager._cycling_unload_fallback.assert_called_once()
+
+
 class TestParkedRecord:
     def test_a_full_unload_ends_the_park(self):
         manager, instance = manager_with(

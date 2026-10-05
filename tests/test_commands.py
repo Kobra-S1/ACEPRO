@@ -147,6 +147,7 @@ def setup_mocks(mock_ace_instance, mock_ace_manager):
     ACE_INSTANCES[0] = mock_ace_instance
     INSTANCE_MANAGERS[0] = mock_ace_manager
     mock_ace_manager.instances = {0: mock_ace_instance}
+    mock_ace_manager.tool_at_toolhead = Mock(return_value=-1)
     
     yield
     
@@ -2210,6 +2211,57 @@ class TestToolChangeIntegration:
         INSTANCE_MANAGERS[0].park_tool.assert_called_once_with(2)
         INSTANCE_MANAGERS[0].smart_unload.assert_not_called()
         INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
+
+    def test_an_unload_of_an_unrecorded_tool_asks_what_is_at_the_toolhead(
+            self, mock_gcmd, setup_mocks):
+        """The record can be lost (a failed change); the printer may still
+        know which filament its toolhead holds. Guessing by test retracts
+        pulled another slot's filament out of its tube."""
+        mock_gcmd.get_int = Mock(
+            side_effect=lambda name, default=None: 1 if name == "PARK" else -1)
+        manager = INSTANCE_MANAGERS[0]
+        manager.state.get = Mock(return_value=-1)
+        manager.tool_at_toolhead = Mock(return_value=3)
+
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, -1)
+
+        manager.park_tool.assert_called_once_with(3)
+        manager.smart_unload.assert_not_called()
+
+    def test_a_change_that_fails_after_its_load_keeps_the_loaded_tool(
+            self, mock_gcmd, setup_mocks):
+        """The purge failed with the new filament already in the nozzle:
+        the tool on record must be that one, not the none from before."""
+        mock_gcmd.get_int = Mock(return_value=3)
+        manager = INSTANCE_MANAGERS[0]
+        variables = {"ace_current_index": -1, "ace_filament_pos": "bowden"}
+        manager.state.get = Mock(
+            side_effect=lambda key, default=None: variables.get(key, default))
+        manager.state.set = Mock(
+            side_effect=lambda key, value: variables.__setitem__(key, value))
+        manager.tool_at_toolhead = Mock(return_value=-1)
+
+        def load_then_fail(current_tool, target_tool):
+            variables["ace_current_index"] = target_tool
+            variables["ace_filament_pos"] = "nozzle"
+            raise Exception("purge failed")
+
+        manager.perform_tool_change = Mock(side_effect=load_then_fail)
+        mock_printer = Mock()
+        print_stats = Mock()
+        print_stats.get_status = Mock(return_value={'state': 'printing'})
+        ace_state = Mock()
+        ace_state.variables = {'startup_toolchange': 0}
+        mock_printer.get_reactor.return_value.monotonic.return_value = 1.0
+        mock_printer.lookup_object = Mock(
+            side_effect=lambda name, default=None: {
+                'print_stats': print_stats,
+                'gcode_macro _ACE_STATE': ace_state}.get(name, Mock()))
+
+        with patch('ace.commands.get_printer', return_value=mock_printer):
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 3)
+
+        assert variables["ace_current_index"] == 3
 
     def test_cmd_ACE_CHANGE_TOOL_unload_tool_success(self, mock_gcmd, setup_mocks):
         """Test tool unload (TOOL=-1) - happy path."""

@@ -1603,6 +1603,8 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
     if tool_index == -1:
         current_tool = manager.state.get("ace_current_index", -1)
+        if current_tool < 0:
+            current_tool = manager.tool_at_toolhead()
 
         # PARK=1: out of the hotend only, parked at the toolhead's intake.
         park = gcmd.get_int("PARK", 0) and current_tool >= 0
@@ -1698,7 +1700,11 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             # the "already loaded" reselection path, which trusts the poisoned
             # index, skips the real toolchange, and enables a second feed
             # assist in parallel with the still-loaded previous tool's.
-            if filament_pos in (FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER):
+            # The exception: perform_tool_change itself recorded the
+            # requested tool as loaded, and a later step (the purge) failed.
+            load_confirmed = manager.state.get("ace_current_index", -1) == tool_index
+            if (filament_pos in (FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER)
+                    and not load_confirmed):
                 active_tool = fallback_tool
             else:
                 active_tool = tool_index

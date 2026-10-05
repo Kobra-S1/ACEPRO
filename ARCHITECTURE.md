@@ -1901,7 +1901,12 @@ sensor. Decided once per printer in the ACE config.
   can hold a filament out of the way (Kobra X: the turret leaves the
   inlet). `toolhead_paths` says whether a parked filament blocks other
   tools - literally, or as the name of a printer object asked through its
-  `tools_share_path()` (Kobra X: `kx_toolchanger`, from its inlet table): `shared` (default, the tools meet in one tube) - it is fully
+  `tools_share_path()` (Kobra X: `kx_toolchanger`, from its inlet table): The same object may offer `ace_tool_at_toolhead()`:
+  when no tool is on record, an unload asks it which filament the toolhead
+  holds (`AceManager.tool_at_toolhead`). Without an answer an intake-gated
+  toolhead refuses to identify the tool by test retracts
+  (`_identify_unrecorded_tool`): its extruder clears the toolhead sensor
+  whichever slot is tried. The layouts: `shared` (default, the tools meet in one tube) - it is fully
   unloaded before another tool loads (`_clear_parked_for`); `per_tool` -
   it stays. A full `smart_unload` of a tool ends its park. The same key
   picks how far the ACE pulls on a full unload (`config.park_pull_length`):

@@ -192,6 +192,26 @@ class TestSetup:
             assert manager.toolhead_paths == expected
             instance.apply_toolhead_paths.assert_called_once_with(expected)
 
+    def test_the_same_object_is_asked_which_tool_the_toolhead_holds(self):
+        manager, _ = self._manager(toolhead_paths="changer")
+        changer = Mock()
+        changer.tools_share_path.return_value = False
+        changer.ace_tool_at_toolhead.return_value = 3
+        manager.printer.lookup_object.side_effect = (
+            lambda name, default=None: changer if name == "changer" else default)
+        manager._setup_toolhead_strategy()
+
+        assert manager.tool_at_toolhead() == 3
+
+        changer.ace_tool_at_toolhead.return_value = None
+        assert manager.tool_at_toolhead() == -1
+
+    def test_nobody_to_ask_means_the_tool_is_unknown(self):
+        manager, _ = self._manager(toolhead_paths="per_tool")
+        manager._setup_toolhead_strategy()
+
+        assert manager.tool_at_toolhead() == -1
+
     def test_an_object_that_cannot_say_is_a_config_error(self):
         manager, _ = self._manager(toolhead_paths="changer")
         manager.printer.lookup_object.side_effect = (
