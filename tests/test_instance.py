@@ -95,6 +95,16 @@ class TestAceInstance(unittest.TestCase):
         self.assertEqual(instance.parkposition_to_toolhead_length, 25.0)
 
     @patch('ace.instance.AceSerialManager')
+    def test_a_layout_asked_of_the_printer_applies_once_it_is_known(self, mock_serial_mgr_class):
+        ace_config = dict(self.ace_config, toolhead_paths="kx_toolchanger",
+                          toolhead_clear_length=25.0)
+        instance = AceInstance(0, ace_config, self.mock_printer, ace_enabled=True)
+
+        instance.apply_toolhead_paths("per_tool")
+
+        self.assertEqual(instance.parkposition_to_toolhead_length, 25.0)
+
+    @patch('ace.instance.AceSerialManager')
     def test_tools_sharing_a_tube_park_behind_the_hub(self, mock_serial_mgr_class):
         ace_config = dict(self.ace_config, toolhead_paths="shared",
                           toolhead_clear_length=25.0)

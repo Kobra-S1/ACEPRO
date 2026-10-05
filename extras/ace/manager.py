@@ -874,11 +874,9 @@ class AceManager:
     def _setup_toolhead_strategy(self):
         """With toolhead_strategy: intake_gated, give every instance its
         transfer, bound to the printer's intake sensor."""
-        self.toolhead_paths = self.ace_config.get("toolhead_paths", PATHS_SHARED)
-        if self.toolhead_paths not in PATHS:
-            raise self.config.error(
-                f"toolhead_paths '{self.toolhead_paths}' is not one of "
-                f"{', '.join(PATHS)}")
+        self.toolhead_paths = self._resolve_toolhead_paths()
+        for instance in self.instances:
+            instance.apply_toolhead_paths(self.toolhead_paths)
         strategy = self.ace_config.get("toolhead_strategy", STRATEGY_SENSOR_PUSH)
         if strategy not in STRATEGIES:
             raise self.config.error(
@@ -900,6 +898,26 @@ class AceManager:
             self.transfers[instance.instance_num] = instance.transfer
         self.gcode.respond_info(
             f"ACE: Intake-gated toolhead transfer, intake sensor '{name}'")
+
+    def _resolve_toolhead_paths(self):
+        """toolhead_paths: one of PATHS, or the name of a printer object
+        whose tools_share_path() says - the printer's tool changer, which
+        owns how the tubes are arranged."""
+        value = str(self.ace_config.get("toolhead_paths", PATHS_SHARED))
+        if value.lower() in PATHS:
+            return value.lower()
+        owner = self.printer.lookup_object(value, None)
+        if owner is None:
+            raise self.config.error(
+                f"toolhead_paths '{value}' is not one of {', '.join(PATHS)} "
+                f"and not a printer object")
+        if not callable(getattr(owner, "tools_share_path", None)):
+            raise self.config.error(
+                f"toolhead_paths: printer object '{value}' has no "
+                f"tools_share_path()")
+        paths = PATHS_SHARED if owner.tools_share_path() else PATHS_PER_TOOL
+        self.gcode.respond_info(f"ACE: toolhead_paths is {paths} (says '{value}')")
+        return paths
 
     def _disable_all_sensor_detection(self):
         """Disable automatic pause for all sensors."""

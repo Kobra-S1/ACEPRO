@@ -106,11 +106,12 @@ GLOBAL_PURGE_SPEED = None
 
 
 # ========== Configuration Helpers ==========
-def park_pull_length(ace_config):
+def park_pull_length(ace_config, toolhead_paths):
     """How far the ACE pulls a fully unloaded filament back from the
     toolhead to where it rests (mm): behind the hub when the tools share a
-    tube, just clear of the toolhead when each has its own."""
-    if ace_config.get("toolhead_paths") == "per_tool":
+    tube ("shared"), just clear of the toolhead when each has its own
+    ("per_tool")."""
+    if toolhead_paths == "per_tool":
         return float(ace_config["toolhead_clear_length"])
     return float(ace_config["parkposition_to_toolhead_length"])
 
@@ -177,8 +178,9 @@ def read_ace_config(config):
     ace_config["filament_intake_sensor_name"] = config.get("filament_intake_sensor_name", None)
     # Whether a filament parked at the intake (ACE_CHANGE_TOOL TOOL=-1
     # PARK=1) is in another tool's way: "shared" - the tools meet in one
-    # tube - or "per_tool" - a tube per tool, each to its own intake.
-    ace_config["toolhead_paths"] = config.get("toolhead_paths", "shared").lower()
+    # tube - or "per_tool" - a tube per tool, each to its own intake. Or the
+    # name of a printer object that knows (its tools_share_path()).
+    ace_config["toolhead_paths"] = config.get("toolhead_paths", "shared")
     # ACE speed up to the intake sensor; 0 = feed_speed.
     ace_config["intake_feed_speed"] = config.getfloat("intake_feed_speed", 0.)
     # intake_gated unload: extruder travel without an intake count that

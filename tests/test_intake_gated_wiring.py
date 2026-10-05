@@ -176,6 +176,30 @@ class TestSetup:
         manager._setup_toolhead_strategy()
         assert manager.toolhead_paths == "per_tool"
 
+    def test_the_layout_can_be_asked_of_a_printer_object(self):
+        """toolhead_paths: <object name> - the printer's tool changer owns
+        which inlets the ACE feeds, so rearranging the tubes is its config
+        change alone."""
+        for shares, expected in ((True, "shared"), (False, "per_tool")):
+            manager, instance = self._manager(toolhead_paths="changer")
+            changer = Mock()
+            changer.tools_share_path.return_value = shares
+            manager.printer.lookup_object.side_effect = (
+                lambda name, default=None: changer if name == "changer" else default)
+
+            manager._setup_toolhead_strategy()
+
+            assert manager.toolhead_paths == expected
+            instance.apply_toolhead_paths.assert_called_once_with(expected)
+
+    def test_an_object_that_cannot_say_is_a_config_error(self):
+        manager, _ = self._manager(toolhead_paths="changer")
+        manager.printer.lookup_object.side_effect = (
+            lambda name, default=None: object() if name == "changer" else default)
+
+        with pytest.raises(ValueError, match="tools_share_path"):
+            manager._setup_toolhead_strategy()
+
     def test_an_unknown_path_layout_is_a_config_error(self):
         manager, _ = self._manager(toolhead_paths="star")
 

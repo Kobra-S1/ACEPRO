@@ -610,14 +610,9 @@ class TestParkPullLength:
     def test_tools_sharing_a_tube_rest_behind_the_hub(self):
         from ace.config import park_pull_length
 
-        assert park_pull_length(dict(self.CONFIG, toolhead_paths="shared")) == 650.0
+        assert park_pull_length(self.CONFIG, "shared") == 650.0
 
     def test_a_tool_with_its_own_tube_rests_just_clear_of_the_toolhead(self):
         from ace.config import park_pull_length
 
-        assert park_pull_length(dict(self.CONFIG, toolhead_paths="per_tool")) == 20.0
-
-    def test_without_a_layout_the_tools_share(self):
-        from ace.config import park_pull_length
-
-        assert park_pull_length(dict(self.CONFIG)) == 650.0
+        assert park_pull_length(self.CONFIG, "per_tool") == 20.0

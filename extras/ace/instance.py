@@ -113,10 +113,14 @@ class AceInstance:
         self.feed_speed = float(ace_config["feed_speed"])
         self.retract_speed = float(ace_config["retract_speed"])
         self.total_max_feeding_length = float(ace_config["total_max_feeding_length"])
-        # The pull from the toolhead back to where an unloaded filament
-        # rests. Named after the hub layout's config key; with a tube per
-        # tool it is toolhead_clear_length (park_pull_length picks).
-        self.parkposition_to_toolhead_length = park_pull_length(ace_config)
+        self._park_lengths = {
+            "parkposition_to_toolhead_length":
+                ace_config["parkposition_to_toolhead_length"],
+            "toolhead_clear_length": ace_config.get("toolhead_clear_length", 20.),
+        }
+        # Until the manager knows better (a layout asked of the printer).
+        self.apply_toolhead_paths(
+            str(ace_config.get("toolhead_paths", "shared")).lower())
         self.toolchange_load_length = float(ace_config["toolchange_load_length"])
         self.parkposition_to_rdm_length = float(ace_config["parkposition_to_rdm_length"])
         self.rdm_overshoot_length = float(ace_config["rdm_overshoot_length"])
@@ -1113,6 +1117,13 @@ class AceInstance:
                 raise ValueError(
                     f"ACE[{self.instance_num}]: Feed failed: {response.get('msg')}"
                 )
+
+    def apply_toolhead_paths(self, toolhead_paths):
+        """Set the pull from the toolhead back to where an unloaded
+        filament rests. The attribute is named after the shared layout's
+        config key; with a tube per tool it is toolhead_clear_length."""
+        self.parkposition_to_toolhead_length = park_pull_length(
+            self._park_lengths, toolhead_paths)
 
     def load_feeder(self):
         """Who brings a filament to the toolhead sensor on a load, for
