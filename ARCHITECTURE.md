@@ -1859,6 +1859,34 @@ Proof: `test_lane_entries_are_indexed_by_ace_tool_even_with_sync_disabled`,
 `test_status_carries_the_lane_entries`,
 `test_status_tells_whether_this_driver_writes_the_lanes`.
 
+### Toolhead transfer strategies (`toolhead_strategy`)
+
+How a filament is moved between the ACE's park position and the toolhead
+sensor. Decided once per printer in the ACE config.
+
+- `sensor_push` (default): the ACE pushes to the toolhead sensor, the
+  extruder then feeds fixed lengths; an unload runs fixed lengths on both.
+  Code: `AceInstance._feed_to_toolhead_with_extruder_assist`, the
+  coordinated retract in `AceManager.smart_unload`.
+- `intake_gated` (`extras/ace/intake_gated.py`): for an extruder gear
+  between two sensors. Load: ACE feeds until the intake sensor counts, the
+  extruder pulls until the toolhead sensor triggers. Unload: the extruder
+  retracts until the toolhead sensor clears, then the ACE pulls back. The
+  configured lengths are limits. Rejected alternative: printer-side
+  load/unload macros - the same sequence fits other toolheads with an
+  encoder in front of the gear, so it lives here.
+- Seams: `AceInstance._feed_filament_into_toolhead` (load) and the
+  sensor-triggered branch of `AceManager.smart_unload`; everything around
+  them (temperatures, purge, state, runout) is shared. `AceManager.transfers`
+  maps instance numbers to their `IntakeGatedTransfer`.
+- Intake sensor: the printer object named by `filament_intake_sensor_name`,
+  offering `intake_edges()` - a growing count of filament movement in the
+  path in front of the extruder (Kobra X: `kx_clog_check`, the encoder of
+  the turret's inlet).
+- Not yet: the ACE Pro 2's rollback-assist mode during the extruder retract;
+  the unload relies on an idle ACE letting the filament be pushed back.
+- Proof: `tests/test_intake_gated.py`, `tests/test_intake_gated_wiring.py`.
+
 ### Printer-side path selection (`_ACE_ROUTE_TOOL`)
 
 A toolhead with several filament paths behind one extruder (the Kobra X
@@ -1882,6 +1910,11 @@ know the paths; it announces the tool and the printer config acts.
   toolhead sensor (`FEEDER=ACE`), `full_unload_slot` for the loaded tool.
   Raw `ACE_FEED`/`ACE_RETRACT` and the cycling unload of an unknown tool do
   not route.
+- With `toolhead_strategy: intake_gated` the route before a load is plain
+  (`FEEDER=ACE` is not used): the extruder pulls the filament to the sensor.
+- A load that does not reach the toolhead sensor is repeated
+  `toolhead_load_retries` times (default 0): 150 mm back, `FEEDER=ACE`
+  routed again, feed again.
 - `_ACE_PREPARE_FOR_RETRACTION` runs the optional `_ACE_AFTER_CUT` macro
   between `CUT_TIP` and the unload retract (Kobra X: to the purge position).
 - The printer side reads the loaded tool back from `ace_state` status

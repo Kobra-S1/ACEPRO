@@ -4,6 +4,8 @@ from .config import (
     SLOTS_PER_ACE,
     SENSOR_TOOLHEAD,
     SENSOR_RDM,
+    FEEDER_ACE,
+    FEEDER_EXTRUDER,
     FILAMENT_STATE_SPLITTER,
     FILAMENT_STATE_BOWDEN,
     FILAMENT_STATE_NOZZLE,
@@ -20,6 +22,13 @@ from .config import (
     create_inventory,
 )
 from .persistent_state import PersistentState
+from .intake_gated import (
+    STRATEGIES,
+    STRATEGY_INTAKE_GATED,
+    STRATEGY_SENSOR_PUSH,
+    IntakeGatedTransfer,
+    resolve_intake_sensor,
+)
 
 from .instance import AceInstance
 from .ace2_bus import Ace2BusSession
@@ -45,10 +54,6 @@ import time
 
 # Optional printer macro, see AceManager.route_to_tool.
 ROUTE_TOOL_MACRO = "_ACE_ROUTE_TOOL"
-# Who moves the routed tool's filament next: the extruder (with or without
-# the ACE), or the ACE alone while the extruder stands still.
-FEEDER_EXTRUDER = "EXTRUDER"
-FEEDER_ACE = "ACE"
 
 # ACE-owned save_variables namespaces whose key names encode instance
 # numbers or a bus grouping. Only exact numeric forms are considered
@@ -277,6 +282,9 @@ class AceManager:
         self.ace_pin = self.printer.lookup_object("output_pin ACE_Pro")
 
         self.sensors = {}
+        # instance_num -> IntakeGatedTransfer (toolhead_strategy:
+        # intake_gated); each instance holds the same object for its loads.
+        self.transfers = {}
         self._prev_sensors_enabled_state = {}
 
         # Create endless spool handler (passing self for sensor access)
@@ -853,8 +861,35 @@ class AceManager:
                     f"{rms_sensor_name}]). "
                     f"No RDM consistency check will be performed.")
 
+        self._setup_toolhead_strategy()
+
         # Disable standard runout detection
         self._disable_all_sensor_detection()
+
+    def _setup_toolhead_strategy(self):
+        """With toolhead_strategy: intake_gated, give every instance its
+        transfer, bound to the printer's intake sensor."""
+        strategy = self.ace_config.get("toolhead_strategy", STRATEGY_SENSOR_PUSH)
+        if strategy not in STRATEGIES:
+            raise self.config.error(
+                f"toolhead_strategy '{strategy}' is not one of "
+                f"{', '.join(STRATEGIES)}")
+        if strategy != STRATEGY_INTAKE_GATED:
+            return
+        name = self.ace_config.get("filament_intake_sensor_name")
+        if not name:
+            raise self.config.error(
+                f"toolhead_strategy: {STRATEGY_INTAKE_GATED} needs "
+                f"filament_intake_sensor_name")
+        try:
+            intake = resolve_intake_sensor(self.printer, name)
+        except ValueError as e:
+            raise self.config.error(str(e))
+        for instance in self.instances:
+            instance.transfer = IntakeGatedTransfer(instance, intake)
+            self.transfers[instance.instance_num] = instance.transfer
+        self.gcode.respond_info(
+            f"ACE: Intake-gated toolhead transfer, intake sensor '{name}'")
 
     def _disable_all_sensor_detection(self):
         """Disable automatic pause for all sensors."""
@@ -1353,30 +1388,45 @@ class AceManager:
                     f"({retract_length:.3f}mm at {retract_speed:.3f}mm/s)"
                 )
 
-                # Start extruder retraction (10% faster for slack)
-                self._extruder_move(-abs(retract_length), retract_speed * 1.10, wait_for_move_end=False)
-
-                # Start ACE retraction — use the RDM early stop only when the
-                # RDM actually sees filament right now.  Its callback stops the
-                # retract on the first CLEAR sample, so an RDM that is already
-                # clear here would truncate the pull to nothing but the
-                # overshoot and report success with the bowden still loaded.
-                # Same precondition the toolhead-clear call site and Case 3 of
-                # _identify_and_unload_by_cycling apply.
-                if self.has_rdm_sensor() and self.get_instant_switch_state(SENSOR_RDM):
-                    unload_ok = instance.rmd_triggered_unload_slot(
-                        self, local_slot,
-                        length=parkposition_to_toolhead_length + retract_length,
-                        overshoot_length=instance.rdm_overshoot_length
+                transfer = self.transfers.get(instance.instance_num)
+                if transfer is not None:
+                    park = None
+                    if self.has_rdm_sensor() and self.get_instant_switch_state(SENSOR_RDM):
+                        def park():
+                            return instance.rmd_triggered_unload_slot(
+                                self, local_slot,
+                                length=parkposition_to_toolhead_length,
+                                overshoot_length=instance.rdm_overshoot_length
+                            )
+                    unload_ok = transfer.unload(
+                        local_slot, extruder_limit=retract_length,
+                        extruder_speed=retract_speed, park=park
                     )
                 else:
-                    unload_ok = instance._smart_unload_slot(
-                        local_slot,
-                        length=parkposition_to_toolhead_length + retract_length,
-                    )
+                    # Start extruder retraction (10% faster for slack)
+                    self._extruder_move(-abs(retract_length), retract_speed * 1.10, wait_for_move_end=False)
 
-                # Wait for extruder to finish
-                self._wait_toolhead_move_finished()
+                    # Start ACE retraction — use the RDM early stop only when the
+                    # RDM actually sees filament right now.  Its callback stops the
+                    # retract on the first CLEAR sample, so an RDM that is already
+                    # clear here would truncate the pull to nothing but the
+                    # overshoot and report success with the bowden still loaded.
+                    # Same precondition the toolhead-clear call site and Case 3 of
+                    # _identify_and_unload_by_cycling apply.
+                    if self.has_rdm_sensor() and self.get_instant_switch_state(SENSOR_RDM):
+                        unload_ok = instance.rmd_triggered_unload_slot(
+                            self, local_slot,
+                            length=parkposition_to_toolhead_length + retract_length,
+                            overshoot_length=instance.rdm_overshoot_length
+                        )
+                    else:
+                        unload_ok = instance._smart_unload_slot(
+                            local_slot,
+                            length=parkposition_to_toolhead_length + retract_length,
+                        )
+
+                    # Wait for extruder to finish
+                    self._wait_toolhead_move_finished()
 
                 if unload_ok and self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -3039,7 +3089,10 @@ class AceManager:
 
             self.gcode.respond_info(f"ACE[{target_ace.instance_num}]: Loading tool {target_tool}...")
 
-            self.route_to_tool(target_tool, FEEDER_ACE)
+            self.route_to_tool(
+                target_tool,
+                FEEDER_EXTRUDER if target_ace.instance_num in self.transfers else FEEDER_ACE,
+            )
 
             # Capture the amount purged during loading
             purged_amount = target_ace._feed_filament_into_toolhead(target_tool, check_pre_condition=False)

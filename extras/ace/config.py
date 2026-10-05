@@ -23,6 +23,12 @@ FILAMENT_STATE_NOZZLE = "nozzle"        # In hotend/nozzle
 SENSOR_TOOLHEAD = 'toolhead_sensor'
 SENSOR_RDM = 'return_module'
 
+# AceManager.route_to_tool: who moves the routed tool's filament next - the
+# extruder (with or without the ACE), or the ACE alone while the extruder
+# stands still.
+FEEDER_EXTRUDER = "EXTRUDER"
+FEEDER_ACE = "ACE"
+
 # Slots per ACE unit (fixed)
 SLOTS_PER_ACE = 4
 
@@ -151,6 +157,15 @@ def read_ace_config(config):
     ace_config["toolhead_retraction_speed"] = config.getint("toolhead_retraction_speed", 10)
     ace_config["toolhead_retraction_length"] = config.getint("toolhead_retraction_length", 40)
     ace_config["toolhead_full_purge_length"] = config.getint("toolhead_full_purge_length", 22)
+    # How the filament is moved into and out of the toolhead: "sensor_push"
+    # (fixed lengths around one toolhead sensor) or "intake_gated" (see
+    # intake_gated.py; needs filament_intake_sensor_name).
+    ace_config["toolhead_strategy"] = config.get("toolhead_strategy", "sensor_push").lower()
+    ace_config["filament_intake_sensor_name"] = config.get("filament_intake_sensor_name", None)
+    # ACE speed up to the intake sensor; 0 = feed_speed.
+    ace_config["intake_feed_speed"] = config.getfloat("intake_feed_speed", 0.)
+    # Extra attempts when a load does not reach the toolhead sensor.
+    ace_config["toolhead_load_retries"] = max(0, config.getint("toolhead_load_retries", 0))
     ace_config["toolhead_slow_loading_speed"] = config.getint("toolhead_slow_loading_speed", 5)
     ace_config["extruder_feeding_length"] = config.getint("extruder_feeding_length", 1)
     ace_config["extruder_feeding_speed"] = config.getint("extruder_feeding_speed", 5)

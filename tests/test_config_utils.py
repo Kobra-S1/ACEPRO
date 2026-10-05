@@ -569,3 +569,28 @@ class TestRoundTripConversions:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestToolheadLoadRetriesConfig:
+    """toolhead_load_retries: extra load attempts, none unless configured."""
+
+    @staticmethod
+    def _read(values):
+        from unittest.mock import MagicMock
+        from ace.config import read_ace_config
+
+        config = MagicMock()
+        config.getint = MagicMock(side_effect=lambda key, default=1: values.get(key, default))
+        config.getfloat = MagicMock(return_value=1.0)
+        config.getboolean = MagicMock(return_value=True)
+        config.get = MagicMock(side_effect=lambda key, default="": default)
+        return read_ace_config(config)
+
+    def test_default_is_no_retry(self):
+        assert self._read({})["toolhead_load_retries"] == 0
+
+    def test_configured_value_is_read(self):
+        assert self._read({"toolhead_load_retries": 2})["toolhead_load_retries"] == 2
+
+    def test_a_negative_value_means_no_retry(self):
+        assert self._read({"toolhead_load_retries": -1})["toolhead_load_retries"] == 0

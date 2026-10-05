@@ -12,6 +12,8 @@ from .config import (
     AceSlotStateMachineState,
     SENSOR_RDM,
     SENSOR_TOOLHEAD,
+    FEEDER_ACE,
+    FEEDER_EXTRUDER,
     FILAMENT_STATE_SPLITTER,
     FILAMENT_STATE_TOOLHEAD,
     FILAMENT_STATE_NOZZLE,
@@ -26,6 +28,7 @@ from .config import (
 )
 from .protocol import create_protocol_adapter, normalize_protocol_name, resolve_protocol_name
 from .serial_manager import AceSerialManager
+from .intake_gated import STRATEGY_SENSOR_PUSH
 
 
 class AceInstance:
@@ -133,6 +136,15 @@ class AceInstance:
 
         # Not overridable per instance
         self.toolhead_full_purge_length = float(ace_config["toolhead_full_purge_length"])
+        self.toolhead_load_retries = int(ace_config.get("toolhead_load_retries", 0))
+        self.toolhead_strategy = ace_config.get("toolhead_strategy", STRATEGY_SENSOR_PUSH)
+        self.filament_intake_sensor_name = ace_config.get("filament_intake_sensor_name")
+        self.intake_feed_speed = (
+            float(ace_config.get("intake_feed_speed") or 0.) or self.feed_speed
+        )
+        # Set by the manager once the printer's sensors exist, when
+        # toolhead_strategy is intake_gated.
+        self.transfer = None
 
         self.toolhead = None
         self._info = create_status_dict(self.SLOT_COUNT)
@@ -1097,6 +1109,12 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Feed failed: {response.get('msg')}"
                 )
 
+    def load_feeder(self):
+        """Who brings a filament to the toolhead sensor on a load, for
+        AceManager.route_to_tool: the extruder pulls it there with the
+        intake-gated strategy, the ACE pushes it there otherwise."""
+        return FEEDER_EXTRUDER if self.transfer is not None else FEEDER_ACE
+
     def _feed_filament_into_toolhead(self, tool, check_pre_condition=True):
         """Feed filament from slot to toolhead sensor, then extruder to nozzle."""
         self.wait_ready()
@@ -1114,24 +1132,36 @@ class AceInstance:
             if self.manager.get_switch_state(SENSOR_TOOLHEAD):
                 raise ValueError("Cannot feed, filament in nozzle")
 
-        try:
-            self._feed_to_toolhead_with_extruder_assist(
-                local_slot,
-                self.toolchange_load_length,
-                self.feed_speed,
-                self.extruder_feeding_length,
-                self.extruder_feeding_speed
-            )
-        except Exception as e:
-            # Perform your custom action here, e.g., log, cleanup, etc.
-            self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: Exception during feed to toolhead: {e}, "
-                f"retracting filament 150mm back in case it got squished and stuck "
-                f"in the filament-hub"
-            )
-            self._retract(local_slot, 150, self.retract_speed)
-
-            raise  # Re-raise the original exception
+        attempts = 1 + self.toolhead_load_retries
+        for attempt in range(1, attempts + 1):
+            try:
+                if self.transfer is not None:
+                    self.transfer.load(local_slot)
+                else:
+                    self._feed_to_toolhead_with_extruder_assist(
+                        local_slot,
+                        self.toolchange_load_length,
+                        self.feed_speed,
+                        self.extruder_feeding_length,
+                        self.extruder_feeding_speed
+                    )
+                break
+            except Exception as e:
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: Exception during feed to toolhead: {e}, "
+                    f"retracting filament 150mm back in case it got squished and stuck "
+                    f"in the filament-hub"
+                )
+                self._retract(local_slot, 150, self.retract_speed)
+                if attempt == attempts:
+                    raise
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: Retrying the load of T{tool} "
+                    f"(attempt {attempt + 1} of {attempts})"
+                )
+                # The failed attempt may have left the printer's path set up
+                # differently.
+                self.manager.route_to_tool(tool, self.load_feeder())
 
         self.state.set(
             "ace_filament_pos",

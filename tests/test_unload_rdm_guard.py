@@ -42,6 +42,7 @@ class TestSmartUnloadRdmEarlyStopGuard:
         mgr.gcode = Mock()
         # No [gcode_macro _ACE_ROUTE_TOOL]: a single-path toolhead.
         mgr.printer = Mock()
+        mgr.transfers = {}
         mgr.printer.lookup_object.return_value = None
         mgr.state = Mock()
         mgr.state.get = Mock(

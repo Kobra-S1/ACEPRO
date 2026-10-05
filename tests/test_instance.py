@@ -2767,6 +2767,90 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         
         self.assertIn("filament stuck in RMS", str(context.exception))
 
+    def _instance_with_failing_feeds(self, failures, retries):
+        """An instance whose feed to the toolhead fails `failures` times,
+        then succeeds; every step is recorded in self.steps."""
+        instance = AceInstance(0, dict(self.ace_config, toolhead_load_retries=retries),
+                               self.mock_printer)
+        self.steps = []
+        objects = {'gcode': self.mock_gcode, 'save_variables': self.mock_save_vars,
+                   'toolhead': Mock()}
+        self.mock_printer.lookup_object.side_effect = (
+            lambda name, default=None: objects.get(name, default))
+        manager = Mock()
+        manager.route_to_tool = Mock(
+            side_effect=lambda tool, feeder: self.steps.append(f"route {tool} {feeder}"))
+        INSTANCE_MANAGERS[0] = manager
+        outcomes = [ValueError("sensor not triggering")] * failures + [None]
+
+        def feed(*args):
+            self.steps.append("feed")
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        instance.wait_ready = Mock()
+        instance._feed_to_toolhead_with_extruder_assist = Mock(side_effect=feed)
+        instance._retract = Mock(side_effect=lambda *a: self.steps.append("retract"))
+        instance._extruder_move = Mock()
+        return instance
+
+    @patch('ace.instance.AceSerialManager')
+    def test_an_intake_gated_load_replaces_the_default_feed(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=0, retries=0)
+        instance.transfer = Mock()
+        instance.transfer.load.side_effect = lambda slot: self.steps.append(f"transfer {slot}")
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps, ["transfer 2"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_an_intake_gated_retry_routes_for_the_extruder(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=0, retries=1)
+        outcomes = [ValueError("no intake"), None]
+
+        def load(slot):
+            self.steps.append("transfer")
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        instance.transfer = Mock()
+        instance.transfer.load.side_effect = load
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(
+            self.steps, ["transfer", "retract", "route 2 EXTRUDER", "transfer"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_failed_feed_is_retried_with_the_path_reopened(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=1, retries=2)
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps, ["feed", "retract", "route 2 ACE", "feed"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_the_last_failed_feed_raises(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=3, retries=2)
+
+        with self.assertRaises(ValueError):
+            instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps.count("feed"), 3)
+        self.assertEqual(self.steps[-1], "retract")
+
+    @patch('ace.instance.AceSerialManager')
+    def test_without_configured_retries_one_failure_raises(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=1, retries=0)
+
+        with self.assertRaises(ValueError):
+            instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps, ["feed", "retract"])
+
 
 class TestSmartUnloadSlot(unittest.TestCase):
     """Test smart unload slot functionality."""

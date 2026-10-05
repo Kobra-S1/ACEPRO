@@ -79,6 +79,8 @@ class TestToolChangeRoutes(_HookFixture, unittest.TestCase):
         instance = Mock()
         instance.instance_num = 0
         instance.inventory = {target_tool: {"status": "loaded", "temp": 0}}
+        if getattr(self, "intake_gated", False):
+            manager.transfers[0] = Mock()
         instance._feed_filament_into_toolhead = self.step("feed", 5.0)
         manager.instances[0] = instance
         with patch("ace.manager.get_ace_instance_and_slot_for_tool") as get_ace:
@@ -103,6 +105,15 @@ class TestToolChangeRoutes(_HookFixture, unittest.TestCase):
         self.assertEqual(
             steps, [f"{ROUTE} TOOL=1", "unload", f"{ROUTE} TOOL=2 FEEDER=ACE", "feed"]
         )
+
+    def test_an_intake_gated_load_routes_for_the_extruder(self):
+        # The extruder pulls the filament to the sensor: its path is on the
+        # tool from the start, not opened for the ACE.
+        self.intake_gated = True
+
+        self._change(-1, 2, FILAMENT_STATE_SPLITTER, toolhead=False)
+
+        self.assertEqual(self.routes()[-1], f"{ROUTE} TOOL=2")
 
     def test_no_hook_macro_means_no_route_command(self):
         self.hook_defined = False
