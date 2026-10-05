@@ -63,13 +63,58 @@ class TestParkTool:
 
         manager.gcode.run_script_from_command.assert_any_call(
             "_ACE_PREPARE_FOR_RETRACTION TARGET_TEMP=0 PRE_CUT_RETRACT=2.0")
-        instance._disable_feed_assist.assert_called_once_with(1)
         manager.transfers[0].park.assert_called_once_with(
             1, extruder_limit=40.0, extruder_speed=10.0)
         instance._smart_unload_slot.assert_not_called()
         instance._retract.assert_not_called()
         assert manager.parked_tools() == [1]
         assert manager.variables["ace_filament_pos"] == FILAMENT_STATE_BOWDEN
+
+    def test_feed_assist_stops_while_the_cut_runs(self):
+        """The ACE needs a second or more to stop assisting; the cut takes
+        longer than that anyway."""
+        manager, instance = manager_with(PATHS_PER_TOOL)
+        instance._feed_assist_index = 1
+        order = []
+        instance._send_feed_assist_stop.side_effect = (
+            lambda slot: order.append("stop sent"))
+        manager.gcode.run_script_from_command.side_effect = (
+            lambda script: order.append(script.split()[0]))
+        instance._await_feed_assist_stopped.side_effect = (
+            lambda: order.append("stopped"))
+        manager.transfers[0].park.side_effect = (
+            lambda *args, **kwargs: order.append("retract"))
+
+        run(instance, lambda: manager.park_tool(1))
+
+        assert order[:4] == ["stop sent", "_ACE_PREPARE_FOR_RETRACTION",
+                             "stopped", "retract"]
+        instance._send_feed_assist_stop.assert_called_once_with(1)
+
+    def test_a_failed_cut_leaves_feed_assist_on(self):
+        """A print pauses on a failed cut and goes on with this filament
+        once the user has resumed it."""
+        manager, instance = manager_with(PATHS_PER_TOOL)
+        instance._feed_assist_index = 1
+        manager.gcode.run_script_from_command.side_effect = Exception("no cut")
+
+        with pytest.raises(Exception, match="no cut"):
+            run(instance, lambda: manager.park_tool(1))
+
+        instance._enable_feed_assist.assert_called_once_with(1)
+        manager.transfers[0].park.assert_not_called()
+        assert manager.parked_tools() == []
+
+    def test_feed_assist_on_another_slot_is_left_alone(self):
+        manager, instance = manager_with(PATHS_PER_TOOL)
+        instance._feed_assist_index = 3
+        manager.gcode.run_script_from_command.side_effect = Exception("no cut")
+
+        with pytest.raises(Exception, match="no cut"):
+            run(instance, lambda: manager.park_tool(1))
+
+        instance._send_feed_assist_stop.assert_not_called()
+        instance._enable_feed_assist.assert_not_called()
 
     def test_a_park_leaves_the_heater_target_as_it_found_it(self):
         manager, instance = manager_with(PATHS_PER_TOOL)

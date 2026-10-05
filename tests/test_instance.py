@@ -1553,6 +1553,52 @@ class TestFeedAssist(unittest.TestCase):
         self.assertEqual(instance._feed_assist_index, -1)
         instance.dwell.assert_called_once_with(1.0)
 
+    def _instance_stopping_assist(self):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._feed_assist_index = 1
+        instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 0}))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+        self.mock_reactor.monotonic.return_value = 50.0
+        self.assertTrue(instance._send_feed_assist_stop(1))
+        instance.wait_ready.reset_mock()
+        return instance
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_stop_sent_long_ago_needs_no_further_settling(self, mock_serial_mgr_class):
+        """Split stop: the caller did other work (a cut) since the send."""
+        instance = self._instance_stopping_assist()
+        self.mock_reactor.monotonic.return_value = 56.0
+
+        instance._await_feed_assist_stopped()
+
+        instance.dwell.assert_not_called()
+        instance.wait_ready.assert_called_once_with()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_stop_sent_just_now_settles_for_the_rest_of_the_time(self, mock_serial_mgr_class):
+        instance = self._instance_stopping_assist()
+        self.mock_reactor.monotonic.return_value = 50.4
+
+        instance._await_feed_assist_stopped()
+
+        (settled_for,), _ = instance.dwell.call_args
+        self.assertAlmostEqual(settled_for, 0.6)
+        instance.wait_ready.assert_called_once_with()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_stop_for_an_inactive_slot_sends_nothing(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._feed_assist_index = 2
+        instance.send_request = Mock()
+
+        self.assertFalse(instance._send_feed_assist_stop(1))
+
+        instance.send_request.assert_not_called()
+        self.assertEqual(instance._feed_assist_index, 2)
+
     @patch('ace.instance.AceSerialManager')
     def test_disable_feed_assist_ace1_still_waits(self, mock_serial_mgr_class):
         """ACE1 behaviour unchanged: wait_ready() is called both before and

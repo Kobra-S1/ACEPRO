@@ -1249,6 +1249,12 @@ class AceManager:
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.wait_moves()
 
+    def _start_queued_toolhead_moves(self):
+        """Hand every queued move to the steppers now. Klipper otherwise
+        holds the newest ones back for its look-ahead, up to a second's
+        worth after an idle toolhead."""
+        self.printer.lookup_object('toolhead').get_last_move_time()
+
     def _extruder_move(self, length, speed, wait_for_move_end=False):
         """Move extruder (relative) via motion planner, synchronously."""
         if length == 0:
@@ -1326,9 +1332,20 @@ class AceManager:
         self._heater_target_before = self._extruder_target()
         self.route_to_tool(tool_index)
         if self.get_switch_state(SENSOR_TOOLHEAD):
-            self.prepare_toolhead_for_filament_retraction(tool_index=tool_index)
-            if instance._feed_assist_index == local_slot:
-                instance._disable_feed_assist(local_slot)
+            # The ACE takes a second or more to stop assisting; the cut
+            # takes longer, so the two run together.
+            assist_stopping = instance._feed_assist_index == local_slot
+            if assist_stopping:
+                instance._send_feed_assist_stop(local_slot)
+            try:
+                self.prepare_toolhead_for_filament_retraction(tool_index=tool_index)
+            except Exception:
+                # Uncut, the filament stays the loaded one.
+                if assist_stopping:
+                    instance._enable_feed_assist(local_slot)
+                raise
+            if assist_stopping:
+                instance._await_feed_assist_stopped()
             try:
                 transfer.park(local_slot,
                               extruder_limit=self.toolhead_retraction_length,

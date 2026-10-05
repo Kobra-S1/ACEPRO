@@ -32,8 +32,9 @@ PATHS = (PATHS_SHARED, PATHS_PER_TOOL)
 
 # The ACE feed is polled for the intake count at this rate.
 INTAKE_POLL_S = 0.05
-# Extruder motion is queued this far ahead of each sensor read, so the move
-# stays continuous; it is also how far the extruder runs past the sensor.
+# Extruder motion is queued in stretches this long, one per sensor read, so
+# the move stays continuous. The extruder runs past the sensor by one
+# stretch plus the planner's own lead.
 EXTRUDER_STEP_S = 0.1
 SPEED_CHANGE_TRIES = 3
 # A parked filament stands in the gear. Pulled this far, the intake has
@@ -79,16 +80,23 @@ class IntakeGatedTransfer:
     def _extruder_until(self, done, direction, speed, limit):
         """Turn the extruder until ``done()``, at most ``limit`` mm; returns
         the distance turned. Queued in short moves so it can stop."""
-        instance = self.instance
         step = speed * EXTRUDER_STEP_S
         travelled = 0.0
         while travelled < limit and not done():
             length = min(step, limit - travelled)
-            instance._extruder_move(direction * length, speed)
+            self._extruder_stretch(direction * length, speed)
             travelled += length
-            instance.dwell(length / speed)
-        instance.manager._wait_toolhead_move_finished()
+        self.instance.manager._wait_toolhead_move_finished()
         return travelled
+
+    def _extruder_stretch(self, length, speed):
+        """Queue one stretch of a sensor-stopped move and wait its time.
+        Started at once: left in the planner's look-ahead it would run
+        that much later, on past the sensor."""
+        instance = self.instance
+        instance._extruder_move(length, speed)
+        instance.manager._start_queued_toolhead_moves()
+        instance.dwell(abs(length) / speed)
 
     # --- load ------------------------------------------------------------
     def load(self, local_slot, parked=False):
@@ -99,37 +107,44 @@ class IntakeGatedTransfer:
         back, when it does not arrive."""
         instance = self.instance
         instance._disable_feed_assist(local_slot)
-        if not self._at_toolhead_sensor():
-            if not (parked and self._resume(local_slot)):
-                self._feed_to_intake(local_slot)
-                self._pull_to_toolhead_sensor(local_slot)
-            instance._stop_feed(local_slot)
-            instance.wait_ready()
+        if self._at_toolhead_sensor():
+            instance._enable_feed_assist(local_slot)
+            return
+        if parked and self._resume(local_slot):
+            return
+        self._feed_to_intake(local_slot)
+        self._pull_to_toolhead_sensor(local_slot)
+        instance._stop_feed(local_slot)
+        instance.wait_ready()
         instance._enable_feed_assist(local_slot)
 
     def _resume(self, local_slot):
         """Pull a parked filament the short way back to the toolhead sensor,
-        the ACE following at the extruder's speed; returns whether it came.
-        A fast ACE feed is no use here: the gear holds the filament."""
+        feed assist following as it follows a print; returns whether it
+        came, feed assist then left on. An ACE feed is no use here: the
+        gear holds the filament."""
         instance = self.instance
         speed = instance.extruder_feeding_speed
         limit = instance.extruder_feeding_length
         mark = self.intake.intake_edges()
-        instance.execute_feed_with_retries(local_slot, limit, speed)
+        instance._enable_feed_assist(local_slot)
         pulled = self._extruder_until(self._at_toolhead_sensor, 1, speed,
                                       min(RESUME_PROBE_MM, limit))
-        if self._at_toolhead_sensor():
-            return True
         moving = self.intake.intake_edges() != mark
-        if moving:
+        if moving and not self._at_toolhead_sensor():
             # Parked further back than the probe: a park overshoots the
             # sensor by the motion still queued when it cleared.
             pulled += self._extruder_until(self._at_toolhead_sensor, 1, speed,
                                            limit - pulled)
-            if self._at_toolhead_sensor():
-                return True
-        instance._stop_feed(local_slot)
+        if self._at_toolhead_sensor():
+            instance.gcode.respond_info(
+                f"ACE[{instance.instance_num}]: Parked filament of slot "
+                f"{local_slot} back at the toolhead sensor after "
+                f"{pulled:.1f}mm of extruder pull"
+            )
+            return True
         instance._extruder_move(-pulled, speed, wait_for_move_end=True)
+        instance._disable_feed_assist(local_slot)
         if moving:
             # In the gear, so an ACE feed could only push against it.
             raise ValueError(
@@ -199,14 +214,19 @@ class IntakeGatedTransfer:
         ``extruder_limit`` mm) and the ACE does not pull. The tip stays in
         the gear, for load(parked=True). Raises ValueError when the sensor
         does not clear."""
-        self._extruder_until(self._clear_of_toolhead_sensor, -1,
-                             extruder_speed, extruder_limit)
+        instance = self.instance
+        retracted = self._extruder_until(self._clear_of_toolhead_sensor, -1,
+                                         extruder_speed, extruder_limit)
         if not self._clear_of_toolhead_sensor():
             raise ValueError(
-                f"ACE[{self.instance.instance_num}]: Toolhead sensor still "
+                f"ACE[{instance.instance_num}]: Toolhead sensor still "
                 f"sees filament after {extruder_limit:.0f}mm of extruder "
                 f"retract."
             )
+        instance.gcode.respond_info(
+            f"ACE[{instance.instance_num}]: Slot {local_slot} clear of the "
+            f"toolhead sensor after {retracted:.1f}mm of extruder retract"
+        )
 
     def unload(self, local_slot, extruder_limit, extruder_speed, park=None):
         """Take the slot's cut filament out of the toolhead: the extruder
@@ -245,9 +265,8 @@ class IntakeGatedTransfer:
         travelled = quiet = 0.0
         while quiet < clear_length and travelled < limit:
             length = min(step, limit - travelled)
-            instance._extruder_move(-length, speed)
+            self._extruder_stretch(-length, speed)
             travelled += length
-            instance.dwell(length / speed)
             edges = self.intake.intake_edges()
             if edges != mark:
                 mark = edges

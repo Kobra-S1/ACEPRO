@@ -85,6 +85,8 @@ class FakeInstance:
         self.intake = FakeIntake()
         filament.intake = self.intake
         self.steps = []
+        self.messages = []
+        self.started_moves = 0
         self.feeding = False
         self.slot_error = None
         self.speed_change_ok = True
@@ -93,7 +95,7 @@ class FakeInstance:
 
     # --- gcode / manager roles ---
     def respond_info(self, message):
-        pass
+        self.messages.append(message)
 
     def get_switch_state(self, sensor):
         return self.filament.at_sensor
@@ -102,6 +104,9 @@ class FakeInstance:
 
     def _wait_toolhead_move_finished(self):
         self.steps.append("wait moves")
+
+    def _start_queued_toolhead_moves(self):
+        self.started_moves += 1
 
     # --- instance ---
     def dwell(self, delay=1.0):
@@ -342,6 +347,27 @@ def test_a_park_stops_when_the_sensor_clears_and_the_ace_does_not_pull():
     assert -30.0 - 1.5 - 1e-9 <= instance.extruder_travel() <= -30.0
 
 
+def test_every_queued_stretch_of_a_sensor_stop_is_started_at_once():
+    """White box: the property is that no stretch waits in the planner's
+    look-ahead, where it would run on - seconds' worth - after the sensor
+    has already answered."""
+    instance = FakeInstance(FakeFilament(tip=30.0))
+
+    park(instance)
+
+    stretches = [s for s in instance.steps if s.startswith("extruder")]
+    assert len(stretches) > 1
+    assert instance.started_moves == len(stretches)
+
+
+def test_a_park_reports_how_far_the_extruder_retracted():
+    instance = FakeInstance(FakeFilament(tip=30.0))
+
+    park(instance)
+
+    assert any("30.0mm" in message for message in instance.messages)
+
+
 def test_a_park_that_does_not_clear_the_sensor_raises():
     instance = FakeInstance(FakeFilament(tip=30.0))
 
@@ -355,11 +381,12 @@ def test_a_parked_filament_is_loaded_by_a_short_extruder_pull():
     transfer_for(instance).load(SLOT, parked=True)
 
     assert instance.filament.at_sensor
-    # The ACE only follows at the extruder's speed; no fast feed to the
-    # intake, which a filament standing in the gear could not follow.
+    # Feed assist follows the pull as it follows a print: no ACE feed
+    # command to start, stop and wait out.
     assert instance.without_extruder() == [
-        "assist off", "ace feed 2 80@5", "wait moves", "ace stop", "assist on"]
+        "assist off", "assist on", "wait moves"]
     assert 1.0 <= instance.extruder_travel() <= 1.0 + 0.5 + 1e-9
+    assert any("1.5mm" in message for message in instance.messages)
 
 
 def test_a_parked_filament_further_back_is_pulled_on_while_it_moves():
@@ -386,8 +413,8 @@ def test_a_parked_filament_that_moves_but_never_arrives_raises():
         transfer_for(instance).load(SLOT, parked=True)
 
     assert "ace feed 2 300@30" not in instance.steps
-    assert instance.steps.index("ace stop") < instance.steps.index("extruder -80@5")
-    assert "assist on" not in instance.steps
+    assert instance.steps.index("extruder -80@5") > instance.steps.index("assist on")
+    assert instance.without_extruder()[-1] == "assist off"
 
 
 def test_a_parked_filament_out_of_the_gears_reach_is_fed_the_normal_way():
@@ -399,7 +426,8 @@ def test_a_parked_filament_out_of_the_gears_reach_is_fed_the_normal_way():
 
     assert instance.filament.at_sensor
     steps = instance.without_extruder()
-    assert steps.index("ace feed 2 80@5") < steps.index("ace feed 2 300@30")
+    assert steps[:4] == ["assist off", "assist on", "wait moves", "assist off"]
+    assert steps[4] == "ace feed 2 300@30"
     assert steps[-1] == "assist on"
     # The pull into nothing is turned back before the feed.
     assert instance.steps.index("extruder -15@5") < instance.steps.index(

@@ -1889,9 +1889,15 @@ sensor. Decided once per printer in the ACE config.
 - Parking (`AceManager.park_tool`, `ACE_CHANGE_TOOL TOOL=-1 PARK=1`): cut,
   then the extruder retracts only until the toolhead sensor clears; the ACE
   does not pull, the tip stays in the gear, and the tool is recorded in the
-  saved variable `ace_parked_tools`. Its next load is a short extruder pull
-  (`IntakeGatedTransfer.load(parked=True)`), falling back to the normal
-  feed. The printer side asks for a park; only it knows that its toolhead
+  saved variable `ace_parked_tools`. Feed assist is told to stop before the
+  cut and awaited after it (`_send_feed_assist_stop` /
+  `_await_feed_assist_stopped`); a failed cut turns it back on. Its next
+  load is a short extruder pull with feed assist already on - no ACE feed
+  command - (`IntakeGatedTransfer.load(parked=True)`), falling back to the
+  normal feed. Sensor-stopped extruder moves hand each queued stretch to
+  the steppers at once (`_start_queued_toolhead_moves`): Klipper's
+  look-ahead would hold them back and the filament would run on past the
+  sensor. Park and resume log the distance they moved. The printer side asks for a park; only it knows that its toolhead
   can hold a filament out of the way (Kobra X: the turret leaves the
   inlet). `toolhead_paths` says whether a parked filament blocks other
   tools - literally, or as the name of a printer object asked through its

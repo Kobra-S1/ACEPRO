@@ -31,6 +31,10 @@ from .protocol import create_protocol_adapter, normalize_protocol_name, resolve_
 from .serial_manager import AceSerialManager
 from .intake_gated import STRATEGY_SENSOR_PUSH
 
+# After a stop_feed_assist the ACE's reported status is trusted only this
+# much later.
+FEED_ASSIST_STOP_SETTLE_S = 1.0
+
 
 class AceInstance:
     """Manages a single physical ACE Pro unit with 4 slots."""
@@ -163,6 +167,7 @@ class AceInstance:
         self.inventory = create_inventory(self.SLOT_COUNT)
         self._feed_assist_index = -1
         self._feed_assist_topology_position = None  # Track chain position (0, 1, 2...)
+        self._feed_assist_stop_sent_at = 0.0  # reactor time of the last stop request
         self._pending_feed_assist_restore = -1  # Slot to restore after first heartbeat
         self._feed_assist_restore_attempts = 0  # Retry counter for busy-deferred restores
         self._assist_lost_streak = 0  # Consecutive heartbeats contradicting assist state (ACE2)
@@ -628,18 +633,26 @@ class AceInstance:
             self.wait_ready()
 
     def _disable_feed_assist(self, slot_index):
-        """Disable feed assist."""
+        """Disable feed assist and wait until the ACE has stopped."""
+        if self._send_feed_assist_stop(slot_index):
+            self._await_feed_assist_stopped()
+
+    def _send_feed_assist_stop(self, slot_index):
+        """Ask the ACE to stop assisting slot_index; returns whether there
+        was anything to stop. The filament must not be moved before
+        _await_feed_assist_stopped() has returned - a caller with other
+        work to do first sends, does it, then waits."""
         if slot_index < 0:
             # Feed assist is never active on a negative slot index; nothing to disable.
             # This guards against callers that pass _feed_assist_index directly when
             # feed assist was already off (-1), which would otherwise bypass the check
             # below and send a spurious STOP_FEED_OR_ROLLBACK command.
-            return
+            return False
         if self._feed_assist_index != slot_index:
             logging.warning(
                 f"ACE[{self.instance_num}]: Feed assist not active on slot {slot_index}"
             )
-            return
+            return False
 
         self._feed_assist_index = -1
         self._feed_assist_topology_position = None
@@ -667,7 +680,16 @@ class AceInstance:
             self.wait_ready()
         request = self.protocol.build_stop_feed_assist_request(slot_index)
         self.send_request(request, callback)
-        self.dwell(1.0)
+        self._feed_assist_stop_sent_at = self.reactor.monotonic()
+        return True
+
+    def _await_feed_assist_stopped(self):
+        """Wait out a _send_feed_assist_stop(): FEED_ASSIST_STOP_SETTLE_S
+        since the send, then (ACE1) until the ACE reports ready."""
+        settle_left = (self._feed_assist_stop_sent_at + FEED_ASSIST_STOP_SETTLE_S
+                       - self.reactor.monotonic())
+        if settle_left > 0:
+            self.dwell(settle_left)
         # ACE2: the device only leaves 'busy' once it has processed STOP_FEED_ASSIST,
         # and the cached status is refreshed via the 1 Hz heartbeat.  If a heartbeat
         # times out around print-end, wait_ready() can stall for up to 60s before
