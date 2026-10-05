@@ -2917,6 +2917,36 @@ class TestPerformToolChange(unittest.TestCase):
 
     @patch('ace.manager.AceInstance')
     @patch('ace.manager.EndlessSpool')
+    def test_a_parked_target_across_the_rdm_is_not_a_mismatch(self, mock_endless_spool, mock_ace_instance):
+        """A tool parked at the toolhead through a shared tube lies across
+        the RDM with state 'bowden'. Loading that tool resumes it; the
+        mismatch recovery would cycle every slot to pull it out."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        self.variables['ace_parked_tools'] = [1]
+        manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: True}
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager.smart_unload = Mock(return_value=True)
+
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {1: {'status': 'loaded', 'temp': 0}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 1)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+
+            manager.perform_tool_change(current_tool=-1, target_tool=1)
+
+        manager.smart_unload.assert_not_called()
+        mock_instance._feed_filament_into_toolhead.assert_called_once()
+        self.assertEqual(self.variables['ace_parked_tools'], [])
+
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
     def test_plausibility_unload_heats_cold_nozzle_before_smart_unload(self, mock_endless_spool, mock_ace_instance):
         """Bug 1: when the plausibility-mismatch path unloads with the toolhead
         sensor triggered, the cold-nozzle guard must run BEFORE smart_unload, so

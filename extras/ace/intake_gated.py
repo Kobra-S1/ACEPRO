@@ -23,12 +23,23 @@ STRATEGY_SENSOR_PUSH = "sensor_push"
 STRATEGY_INTAKE_GATED = "intake_gated"
 STRATEGIES = (STRATEGY_SENSOR_PUSH, STRATEGY_INTAKE_GATED)
 
+# toolhead_paths: whether a filament parked at the intake is in the way of
+# another tool. "shared": the tools meet in one tube in front of the
+# toolhead. "per_tool": every tool has its own tube to its own intake.
+PATHS_SHARED = "shared"
+PATHS_PER_TOOL = "per_tool"
+PATHS = (PATHS_SHARED, PATHS_PER_TOOL)
+
 # The ACE feed is polled for the intake count at this rate.
 INTAKE_POLL_S = 0.05
 # Extruder motion is queued this far ahead of each sensor read, so the move
 # stays continuous; it is also how far the extruder runs past the sensor.
 EXTRUDER_STEP_S = 0.1
 SPEED_CHANGE_TRIES = 3
+# A parked filament stands in the gear, its tip just in front of the
+# toolhead sensor (park() stops within one extruder step of it). Pulled this
+# far without reaching the sensor, it was not there.
+RESUME_PULL_MM = 15.0
 
 
 def resolve_intake_sensor(printer, name):
@@ -80,18 +91,36 @@ class IntakeGatedTransfer:
         return travelled
 
     # --- load ------------------------------------------------------------
-    def load(self, local_slot):
+    def load(self, local_slot, parked=False):
         """Bring the slot's filament to the toolhead sensor and leave feed
-        assist on. Raises ValueError, with the ACE stopped and the tip out
-        of the gear, when it does not arrive."""
+        assist on. ``parked``: park() left it at the gear, so the extruder
+        pulls first; not found there, it is fed like any other. Raises
+        ValueError, with the ACE stopped and the tip out of the gear, when
+        it does not arrive."""
         instance = self.instance
         instance._disable_feed_assist(local_slot)
         if not self._at_toolhead_sensor():
-            self._feed_to_intake(local_slot)
-            self._pull_to_toolhead_sensor(local_slot)
+            if not (parked and self._resume(local_slot)):
+                self._feed_to_intake(local_slot)
+                self._pull_to_toolhead_sensor(local_slot)
             instance._stop_feed(local_slot)
             instance.wait_ready()
         instance._enable_feed_assist(local_slot)
+
+    def _resume(self, local_slot):
+        """Pull a parked filament the short way back to the toolhead sensor,
+        the ACE following at the extruder's speed; returns whether it came.
+        A fast ACE feed is no use here: the gear holds the filament."""
+        instance = self.instance
+        speed = instance.extruder_feeding_speed
+        instance.execute_feed_with_retries(local_slot, RESUME_PULL_MM, speed)
+        pulled = self._extruder_until(self._at_toolhead_sensor, 1, speed,
+                                      RESUME_PULL_MM)
+        if self._at_toolhead_sensor():
+            return True
+        instance._stop_feed(local_slot)
+        instance._extruder_move(-pulled, speed, wait_for_move_end=True)
+        return False
 
     def _feed_to_intake(self, local_slot):
         instance = self.instance
@@ -146,7 +175,22 @@ class IntakeGatedTransfer:
             f"{limit:.0f}mm of extruder pull."
         )
 
-    # --- unload ----------------------------------------------------------
+    # --- park and unload -------------------------------------------------
+    def park(self, local_slot, extruder_limit, extruder_speed):
+        """Take the slot's cut filament out of the hotend and no further:
+        the extruder retracts until the toolhead sensor clears (at most
+        ``extruder_limit`` mm) and the ACE does not pull. The tip stays in
+        the gear, for load(parked=True). Raises ValueError when the sensor
+        does not clear."""
+        self._extruder_until(self._clear_of_toolhead_sensor, -1,
+                             extruder_speed, extruder_limit)
+        if not self._clear_of_toolhead_sensor():
+            raise ValueError(
+                f"ACE[{self.instance.instance_num}]: Toolhead sensor still "
+                f"sees filament after {extruder_limit:.0f}mm of extruder "
+                f"retract."
+            )
+
     def unload(self, local_slot, extruder_limit, extruder_speed, park=None):
         """Take the slot's cut filament out of the toolhead: the extruder
         retracts until the toolhead sensor clears (at most

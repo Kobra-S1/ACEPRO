@@ -2160,9 +2160,21 @@ class TestAceSetRetractSpeed:
 class TestToolChangeIntegration:
     """Integration tests for ACE_CHANGE_TOOL - the most critical business logic."""
 
+    def test_cmd_ACE_CHANGE_TOOL_unload_with_park_parks_the_tool(self, mock_gcmd, setup_mocks):
+        """TOOL=-1 PARK=1: out of the hotend only, not a full unload."""
+        mock_gcmd.get_int = Mock(
+            side_effect=lambda name, default=None: 1 if name == "PARK" else -1)
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=2)
+
+        ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
+
+        INSTANCE_MANAGERS[0].park_tool.assert_called_once_with(2)
+        INSTANCE_MANAGERS[0].smart_unload.assert_not_called()
+        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
+
     def test_cmd_ACE_CHANGE_TOOL_unload_tool_success(self, mock_gcmd, setup_mocks):
         """Test tool unload (TOOL=-1) - happy path."""
-        mock_gcmd.get_int = Mock(return_value=-1)
+        mock_gcmd.get_int = Mock(return_value=0)
         
         # Mock state.get to return current tool
         INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
@@ -2177,7 +2189,7 @@ class TestToolChangeIntegration:
 
     def test_cmd_ACE_CHANGE_TOOL_unload_failure(self, mock_gcmd, setup_mocks):
         """Test tool unload failure - error handling."""
-        mock_gcmd.get_int = Mock(return_value=-1)
+        mock_gcmd.get_int = Mock(return_value=0)
         
         # Mock smart_unload to fail
         INSTANCE_MANAGERS[0].smart_unload = Mock(return_value=False)

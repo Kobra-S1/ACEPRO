@@ -7,6 +7,7 @@ import time
 import json
 import copy
 from .config import (
+    park_pull_length,
     INSTANCE_MANAGERS,
     SLOTS_PER_ACE,
     AceSlotStateMachineState,
@@ -112,7 +113,10 @@ class AceInstance:
         self.feed_speed = float(ace_config["feed_speed"])
         self.retract_speed = float(ace_config["retract_speed"])
         self.total_max_feeding_length = float(ace_config["total_max_feeding_length"])
-        self.parkposition_to_toolhead_length = float(ace_config["parkposition_to_toolhead_length"])
+        # The pull from the toolhead back to where an unloaded filament
+        # rests. Named after the hub layout's config key; with a tube per
+        # tool it is toolhead_clear_length (park_pull_length picks).
+        self.parkposition_to_toolhead_length = park_pull_length(ace_config)
         self.toolchange_load_length = float(ace_config["toolchange_load_length"])
         self.parkposition_to_rdm_length = float(ace_config["parkposition_to_rdm_length"])
         self.rdm_overshoot_length = float(ace_config["rdm_overshoot_length"])
@@ -1134,10 +1138,12 @@ class AceInstance:
                 raise ValueError("Cannot feed, filament in nozzle")
 
         attempts = 1 + self.toolhead_load_retries
+        # A failed attempt's pull-back below ends the park.
+        parked = self.transfer is not None and self.manager.is_parked(tool)
         for attempt in range(1, attempts + 1):
             try:
                 if self.transfer is not None:
-                    self.transfer.load(local_slot)
+                    self.transfer.load(local_slot, parked=parked and attempt == 1)
                 else:
                     self._feed_to_toolhead_with_extruder_assist(
                         local_slot,

@@ -23,6 +23,9 @@ from .config import (
 )
 from .persistent_state import PersistentState
 from .intake_gated import (
+    PATHS,
+    PATHS_PER_TOOL,
+    PATHS_SHARED,
     STRATEGIES,
     STRATEGY_INTAKE_GATED,
     STRATEGY_SENSOR_PUSH,
@@ -285,6 +288,8 @@ class AceManager:
         # instance_num -> IntakeGatedTransfer (toolhead_strategy:
         # intake_gated); each instance holds the same object for its loads.
         self.transfers = {}
+        # toolhead_paths, read with the strategy in _setup_toolhead_strategy.
+        self.toolhead_paths = PATHS_SHARED
         self._prev_sensors_enabled_state = {}
 
         # Create endless spool handler (passing self for sensor access)
@@ -869,6 +874,11 @@ class AceManager:
     def _setup_toolhead_strategy(self):
         """With toolhead_strategy: intake_gated, give every instance its
         transfer, bound to the printer's intake sensor."""
+        self.toolhead_paths = self.ace_config.get("toolhead_paths", PATHS_SHARED)
+        if self.toolhead_paths not in PATHS:
+            raise self.config.error(
+                f"toolhead_paths '{self.toolhead_paths}' is not one of "
+                f"{', '.join(PATHS)}")
         strategy = self.ace_config.get("toolhead_strategy", STRATEGY_SENSOR_PUSH)
         if strategy not in STRATEGIES:
             raise self.config.error(
@@ -1252,8 +1262,90 @@ class AceManager:
             script += f" FEEDER={FEEDER_ACE}"
         self.gcode.run_script_from_command(script)
 
+    # --- filaments parked at the toolhead's intake ------------------------
+    def parked_tools(self):
+        """Tools whose filament park_tool() left at the intake."""
+        return list(self.state.get("ace_parked_tools", None) or [])
+
+    def is_parked(self, tool_index):
+        return tool_index in self.parked_tools()
+
+    def _set_parked(self, tool_index, parked):
+        tools = [t for t in self.parked_tools() if t != tool_index]
+        if parked:
+            tools.append(tool_index)
+        if tools != self.parked_tools():
+            self.state.set("ace_parked_tools", tools)
+
+    def park_tool(self, tool_index):
+        """Take the loaded tool out of the hotend and leave it parked at
+        the intake: cut, then the extruder retracts until the toolhead
+        sensor clears. Its next load is a short pull. Without an intake to
+        park at (toolhead_strategy: sensor_push) this is a full unload. The
+        heater is left as it is: a load usually follows."""
+        instance_num = get_instance_from_tool(tool_index)
+        if instance_num < 0:
+            raise Exception(f"Tool {tool_index} not managed by any ACE instance")
+        transfer = self.transfers.get(instance_num)
+        if transfer is None:
+            return self.smart_unload(tool_index)
+        instance = self.instances[instance_num]
+        local_slot = get_local_slot(tool_index, instance_num)
+
+        self.gcode.respond_info(f"ACE: Parking tool {tool_index} at the toolhead")
+        self.route_to_tool(tool_index)
+        if self.get_switch_state(SENSOR_TOOLHEAD):
+            self.prepare_toolhead_for_filament_retraction(tool_index=tool_index)
+            if instance._feed_assist_index == local_slot:
+                instance._disable_feed_assist(local_slot)
+            try:
+                transfer.park(local_slot,
+                              extruder_limit=self.toolhead_retraction_length,
+                              extruder_speed=self.toolhead_retraction_speed)
+            finally:
+                self.gcode.run_script_from_command("G92 E0")
+                self.gcode.run_script_from_command("G90")
+        self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        self._set_parked(tool_index, True)
+        self.gcode.respond_info(f"ACE: Tool {tool_index} parked")
+        return True
+
+    def _clear_parked_for(self, target_tool):
+        """Before a load. In a shared tube a parked filament of another
+        tool is in the way and is pulled back out; with a tube per tool it
+        stays. The target's own park is its resume."""
+        if self.toolhead_paths != PATHS_SHARED:
+            return
+        for tool in self.parked_tools():
+            if tool == target_tool:
+                continue
+            instance, local_slot = get_ace_instance_and_slot_for_tool(tool)
+            if instance is None or instance.inventory[local_slot].get("status") == "empty":
+                # Taken out by hand, or run out: nothing to pull.
+                self._set_parked(tool, False)
+                continue
+            self.gcode.respond_info(
+                f"ACE: T{tool} is parked in the tube T{target_tool} needs - "
+                f"unloading it first"
+            )
+            if not self.smart_unload(tool, keep_heater=True):
+                raise Exception(f"Failed to unload parked T{tool}")
+
     def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
                      cycle_on_blocked=False):
+        """_smart_unload, and the unloaded filament is no longer parked."""
+        unloaded = self._smart_unload(tool_index, prepare_toolhead, keep_heater,
+                                      cycle_on_blocked)
+        if unloaded:
+            if tool_index >= 0:
+                self._set_parked(tool_index, False)
+            elif self.toolhead_paths == PATHS_SHARED and self.parked_tools():
+                # Whichever filament was in the shared tube is out of it.
+                self.state.set("ace_parked_tools", [])
+        return unloaded
+
+    def _smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
+                      cycle_on_blocked=False):
         """
         Unload with slot cycling when tool is unknown.
 
@@ -1313,6 +1405,12 @@ class AceManager:
                     param = "parkposition_to_rdm_length" if self.has_rdm_sensor() \
                         else "parkposition_to_toolhead_length"
                     retract_dist = self._get_config_for_tool(tool_index, param)
+                    if (instance.instance_num in self.transfers
+                            and not self.has_rdm_sensor()):
+                        # The extruder has not driven the tip out of the
+                        # gear here: the ACE pulls that stretch as well
+                        # (extruder_feeding_length bounds intake to sensor).
+                        retract_dist += instance.extruder_feeding_length
                     self.gcode.respond_info(
                         f"ACE: Filament path fully free for T{tool_index} "
                         f"(filament may have been manually removed) - "
@@ -2809,6 +2907,10 @@ class AceManager:
         # failure handling: pause+prompt mid-print, abort at startup.
         self.ensure_tool_slot_loaded(target_tool)
 
+        self._clear_parked_for(target_tool)
+        # A parked target in a shared tube lies across the RDM: expected.
+        resuming = target_tool >= 0 and self.is_parked(target_tool)
+
         # The sensor readings below are those of the routed path: the loaded
         # tool's, or with nothing loaded the one about to be fed.
         self.route_to_tool(current_tool if current_tool >= 0 else target_tool)
@@ -2837,7 +2939,7 @@ class AceManager:
                         f"ACE: Target tool T{target_tool} inventory temp: {target_temp}°C"
                     )
 
-        if (toolhead_sensor or rdm_sensor) and (filament_pos == FILAMENT_STATE_BOWDEN):
+        if (toolhead_sensor or (rdm_sensor and not resuming)) and (filament_pos == FILAMENT_STATE_BOWDEN):
             self.gcode.respond_info(
                 f"ACE: PLAUSIBILITY MISMATCH - Sensors show filament present "
                 f"but state='{filament_pos}'. Performing smart_unload to clear path. May help or not..."
@@ -3110,6 +3212,7 @@ class AceManager:
             purged_amount = target_ace._feed_filament_into_toolhead(target_tool, check_pre_condition=False)
 
             self.state.set("ace_current_index", target_tool)
+            self._set_parked(target_tool, False)
             # Load confirmed -- the attempted toolchange is no longer in flight.
             self.state.set("ace_target_index", -1)
             self.gcode.run_script_from_command(

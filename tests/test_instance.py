@@ -83,6 +83,28 @@ class TestAceInstance(unittest.TestCase):
         return default
 
     @patch('ace.instance.AceSerialManager')
+    def test_a_tool_with_its_own_tube_parks_just_clear_of_the_toolhead(self, mock_serial_mgr_class):
+        """toolhead_paths: per_tool - every ACE pull to the park position
+        uses toolhead_clear_length; the hub tube's length stays configured
+        and unused."""
+        ace_config = dict(self.ace_config, toolhead_paths="per_tool",
+                          toolhead_clear_length=25.0)
+
+        instance = AceInstance(0, ace_config, self.mock_printer, ace_enabled=True)
+
+        self.assertEqual(instance.parkposition_to_toolhead_length, 25.0)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_tools_sharing_a_tube_park_behind_the_hub(self, mock_serial_mgr_class):
+        ace_config = dict(self.ace_config, toolhead_paths="shared",
+                          toolhead_clear_length=25.0)
+
+        instance = AceInstance(0, ace_config, self.mock_printer, ace_enabled=True)
+
+        self.assertEqual(instance.parkposition_to_toolhead_length,
+                         float(self.ace_config['parkposition_to_toolhead_length']))
+
+    @patch('ace.instance.AceSerialManager')
     def test_instance_initialization(self, mock_serial_mgr_class):
         """Test AceInstance initializes with correct parameters."""
         instance = AceInstance(0, self.ace_config, self.mock_printer, ace_enabled=True)
@@ -2799,18 +2821,42 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
     def test_an_intake_gated_load_replaces_the_default_feed(self, mock_serial_mgr_class):
         instance = self._instance_with_failing_feeds(failures=0, retries=0)
         instance.transfer = Mock()
-        instance.transfer.load.side_effect = lambda slot: self.steps.append(f"transfer {slot}")
+        instance.transfer.load.side_effect = (
+            lambda slot, parked: self.steps.append(f"transfer {slot} parked={parked}"))
+        instance.manager.is_parked = Mock(return_value=False)
 
         instance._feed_filament_into_toolhead(2, check_pre_condition=False)
 
-        self.assertEqual(self.steps, ["transfer 2"])
+        self.assertEqual(self.steps, ["transfer 2 parked=False"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_parked_tool_is_resumed_and_a_retry_feeds_from_the_ace(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=0, retries=1)
+        outcomes = [ValueError("no sensor"), None]
+
+        def load(slot, parked):
+            self.steps.append(f"transfer parked={parked}")
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        instance.transfer = Mock()
+        instance.transfer.load.side_effect = load
+        instance.manager.is_parked = Mock(return_value=True)
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        # The failed attempt's 150 mm pull-back ended the park.
+        self.assertEqual(
+            [s for s in self.steps if s.startswith("transfer")],
+            ["transfer parked=True", "transfer parked=False"])
 
     @patch('ace.instance.AceSerialManager')
     def test_an_intake_gated_retry_routes_for_the_extruder(self, mock_serial_mgr_class):
         instance = self._instance_with_failing_feeds(failures=0, retries=1)
         outcomes = [ValueError("no intake"), None]
 
-        def load(slot):
+        def load(slot, parked):
             self.steps.append("transfer")
             outcome = outcomes.pop(0)
             if outcome is not None:
@@ -2818,6 +2864,7 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
 
         instance.transfer = Mock()
         instance.transfer.load.side_effect = load
+        instance.manager.is_parked = Mock(return_value=False)
 
         instance._feed_filament_into_toolhead(2, check_pre_condition=False)
 

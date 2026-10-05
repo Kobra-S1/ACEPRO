@@ -69,6 +69,9 @@ class TestUnloadWithTheSensorAlreadyClear:
             side_effect=lambda *args: self.order.append(("route",) + args))
         instance._smart_unload_slot.side_effect = (
             lambda *args, **kwargs: self.order.append(("ace retract",)) or True)
+        instance.extruder_feeding_length = 80.0
+        manager.has_rdm_sensor = Mock(return_value=False)
+        self.instance = instance
         fixture._unload(manager)
 
     def test_the_route_frees_the_filament_before_the_ace_pulls(self):
@@ -78,11 +81,20 @@ class TestUnloadWithTheSensorAlreadyClear:
         assert (self.order.index(("route", 1, FEEDER_ACE))
                 < self.order.index(("ace retract",)))
 
-    def test_the_default_strategy_routes_as_before(self):
+    def test_the_ace_pulls_the_gear_stretch_too(self):
+        """Parked, the tip stands in the gear. The extruder does not drive
+        it out here, so the ACE pull covers that stretch as well - short of
+        it, the next feed pushes against a gear already holding the tip."""
+        self._unload({0: Mock()})
+
+        self.instance._smart_unload_slot.assert_called_once_with(
+            1, length=800.0 + 80.0)
+
+    def test_the_default_strategy_routes_and_pulls_as_before(self):
         self._unload({})
 
         assert ("route", 1, FEEDER_ACE) not in self.order
-        assert ("ace retract",) in self.order
+        self.instance._smart_unload_slot.assert_called_once_with(1, length=800.0)
 
 
 class TestLoadFeeder:
@@ -153,4 +165,19 @@ class TestSetup:
         manager, _ = self._manager(toolhead_strategy="magic")
 
         with pytest.raises(ValueError, match="magic"):
+            manager._setup_toolhead_strategy()
+
+    def test_the_tools_share_one_tube_unless_the_config_says_otherwise(self):
+        manager, _ = self._manager()
+        manager._setup_toolhead_strategy()
+        assert manager.toolhead_paths == "shared"
+
+        manager, _ = self._manager(toolhead_paths="per_tool")
+        manager._setup_toolhead_strategy()
+        assert manager.toolhead_paths == "per_tool"
+
+    def test_an_unknown_path_layout_is_a_config_error(self):
+        manager, _ = self._manager(toolhead_paths="star")
+
+        with pytest.raises(ValueError, match="star"):
             manager._setup_toolhead_strategy()

@@ -594,3 +594,30 @@ class TestToolheadLoadRetriesConfig:
 
     def test_a_negative_value_means_no_retry(self):
         assert self._read({"toolhead_load_retries": -1})["toolhead_load_retries"] == 0
+
+
+class TestParkPullLength:
+    """How far the ACE pulls a fully unloaded filament back to where it
+    rests. Two config keys, because they measure different hardware: the
+    tube from the toolhead back to behind the hub
+    (parkposition_to_toolhead_length), and the short stretch that gets a
+    filament clear of the toolhead itself (toolhead_clear_length).
+    toolhead_paths picks; rearranging the tubes changes neither length."""
+
+    CONFIG = {"parkposition_to_toolhead_length": 650,
+              "toolhead_clear_length": 20.0}
+
+    def test_tools_sharing_a_tube_rest_behind_the_hub(self):
+        from ace.config import park_pull_length
+
+        assert park_pull_length(dict(self.CONFIG, toolhead_paths="shared")) == 650.0
+
+    def test_a_tool_with_its_own_tube_rests_just_clear_of_the_toolhead(self):
+        from ace.config import park_pull_length
+
+        assert park_pull_length(dict(self.CONFIG, toolhead_paths="per_tool")) == 20.0
+
+    def test_without_a_layout_the_tools_share(self):
+        from ace.config import park_pull_length
+
+        assert park_pull_length(dict(self.CONFIG)) == 650.0

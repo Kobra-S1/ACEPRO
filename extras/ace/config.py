@@ -106,6 +106,15 @@ GLOBAL_PURGE_SPEED = None
 
 
 # ========== Configuration Helpers ==========
+def park_pull_length(ace_config):
+    """How far the ACE pulls a fully unloaded filament back from the
+    toolhead to where it rests (mm): behind the hub when the tools share a
+    tube, just clear of the toolhead when each has its own."""
+    if ace_config.get("toolhead_paths") == "per_tool":
+        return float(ace_config["toolhead_clear_length"])
+    return float(ace_config["parkposition_to_toolhead_length"])
+
+
 def read_ace_config(config):
     """
     Read and validate all ACE config values, return as dict.
@@ -149,7 +158,11 @@ def read_ace_config(config):
     if ace_config["rfid_temp_mode"] not in ("average", "min", "max"):
         ace_config["rfid_temp_mode"] = "average"
 
+    # Two lengths for where a fully unloaded filament rests; toolhead_paths
+    # picks (park_pull_length). Tube from the toolhead back to behind the hub:
     ace_config["parkposition_to_toolhead_length"] = config.getint("parkposition_to_toolhead_length", 1000)
+    # Pull that gets a filament clear of the toolhead when the tube is its own:
+    ace_config["toolhead_clear_length"] = config.getfloat("toolhead_clear_length", 20.)
     ace_config["parkposition_to_rdm_length"] = config.getint("parkposition_to_rdm_length", 150)
     # Extra retraction (mm) after the RDM sensor clears during unload (safety
     # margin past the splitter exit). Only used when an RDM sensor is present.
@@ -162,6 +175,10 @@ def read_ace_config(config):
     # intake_gated.py; needs filament_intake_sensor_name).
     ace_config["toolhead_strategy"] = config.get("toolhead_strategy", "sensor_push").lower()
     ace_config["filament_intake_sensor_name"] = config.get("filament_intake_sensor_name", None)
+    # Whether a filament parked at the intake (ACE_CHANGE_TOOL TOOL=-1
+    # PARK=1) is in another tool's way: "shared" - the tools meet in one
+    # tube - or "per_tool" - a tube per tool, each to its own intake.
+    ace_config["toolhead_paths"] = config.get("toolhead_paths", "shared").lower()
     # ACE speed up to the intake sensor; 0 = feed_speed.
     ace_config["intake_feed_speed"] = config.getfloat("intake_feed_speed", 0.)
     # intake_gated unload: extruder travel without an intake count that

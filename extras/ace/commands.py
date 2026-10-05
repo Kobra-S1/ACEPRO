@@ -1592,8 +1592,13 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     if tool_index == -1:
         current_tool = manager.state.get("ace_current_index", -1)
 
+        # PARK=1: out of the hotend only, parked at the toolhead's intake.
+        park = gcmd.get_int("PARK", 0) and current_tool >= 0
         try:
-            success = manager.smart_unload(current_tool)
+            if park:
+                success = manager.park_tool(current_tool)
+            else:
+                success = manager.smart_unload(current_tool)
             if success:
                 # gcmd.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
                 manager.state.set("ace_current_index", -1)

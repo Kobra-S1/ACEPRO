@@ -1886,6 +1886,24 @@ sensor. Decided once per printer in the ACE config.
   offering `intake_edges()` - a growing count of filament movement in the
   path in front of the extruder (Kobra X: `kx_clog_check`, the encoder of
   the turret's inlet).
+- Parking (`AceManager.park_tool`, `ACE_CHANGE_TOOL TOOL=-1 PARK=1`): cut,
+  then the extruder retracts only until the toolhead sensor clears; the ACE
+  does not pull, the tip stays in the gear, and the tool is recorded in the
+  saved variable `ace_parked_tools`. Its next load is a short extruder pull
+  (`IntakeGatedTransfer.load(parked=True)`), falling back to the normal
+  feed. The printer side asks for a park; only it knows that its toolhead
+  can hold a filament out of the way (Kobra X: the turret leaves the
+  inlet). `toolhead_paths` says whether a parked filament blocks other
+  tools: `shared` (default, the tools meet in one tube) - it is fully
+  unloaded before another tool loads (`_clear_parked_for`); `per_tool` -
+  it stays. A full `smart_unload` of a tool ends its park. The same key
+  picks how far the ACE pulls on a full unload (`config.park_pull_length`):
+  `parkposition_to_toolhead_length` (the tube back to behind the hub) or
+  `toolhead_clear_length` (just clear of the toolhead) - two keys, so that
+  rearranging the tubes changes `toolhead_paths` and no length. Decided against:
+  parking from `perform_tool_change` on its own - a single-gear toolhead
+  cannot hold a parked filament out of the next one's way. Proof:
+  `tests/test_intake_parking.py`.
 - Not yet: the ACE Pro 2's rollback-assist mode during the extruder retract;
   the unload relies on an idle ACE letting the filament be pushed back.
 - Proof: `tests/test_intake_gated.py`, `tests/test_intake_gated_wiring.py`.

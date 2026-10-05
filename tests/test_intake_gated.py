@@ -38,11 +38,13 @@ class FakeFilament:
         self.tip = tip
         self.gear_above_sensor = gear_above_sensor
         self.gripped = True
+        # False: parked out of the gear's reach, until the ACE brings it.
+        self.at_gear = True
         self.intake = None
         self._uncounted = 0.0
 
     def moved(self, length):
-        if not self.gripped:
+        if not (self.gripped and self.at_gear):
             return
         if length < 0:
             length = -min(-length, max(0.0, self.tip + self.gear_above_sensor))
@@ -107,6 +109,7 @@ class FakeInstance:
             self.polls_to_intake -= 1
             if self.polls_to_intake == 0:
                 self.intake.edges += 1
+                self.filament.at_gear = True
 
     def execute_feed_with_retries(self, slot, length, speed):
         self.steps.append(f"ace feed {slot} {length:g}@{speed:g}")
@@ -318,6 +321,61 @@ def test_a_given_park_step_replaces_the_fixed_ace_pull():
 
     assert result == "parked"
     assert instance.without_extruder()[-1] == "park"
+
+
+# --- parking at the intake ----------------------------------------------
+
+def park(instance, extruder_limit=100.0):
+    return transfer_for(instance).park(
+        SLOT, extruder_limit=extruder_limit, extruder_speed=15.0)
+
+
+def test_a_park_stops_when_the_sensor_clears_and_the_ace_does_not_pull():
+    instance = FakeInstance(FakeFilament(tip=30.0))
+
+    park(instance)
+
+    assert instance.without_extruder() == ["wait moves"]
+    assert not instance.filament.at_sensor
+    # Still in the gear: the next load of this filament is a short pull.
+    assert instance.filament.in_gear
+    assert -30.0 - 1.5 - 1e-9 <= instance.extruder_travel() <= -30.0
+
+
+def test_a_park_that_does_not_clear_the_sensor_raises():
+    instance = FakeInstance(FakeFilament(tip=30.0))
+
+    with pytest.raises(ValueError, match="still sees filament"):
+        park(instance, extruder_limit=20.0)
+
+
+def test_a_parked_filament_is_loaded_by_a_short_extruder_pull():
+    instance = FakeInstance(FakeFilament(tip=-1.0))
+
+    transfer_for(instance).load(SLOT, parked=True)
+
+    assert instance.filament.at_sensor
+    # The ACE only follows at the extruder's speed; no fast feed to the
+    # intake, which a filament standing in the gear could not follow.
+    assert instance.without_extruder() == [
+        "assist off", "ace feed 2 15@5", "wait moves", "ace stop", "assist on"]
+    assert 1.0 <= instance.extruder_travel() <= 1.0 + 0.5 + 1e-9
+
+
+def test_a_parked_filament_out_of_the_gears_reach_is_fed_the_normal_way():
+    filament = FakeFilament(tip=-20.0)
+    filament.at_gear = False
+    instance = FakeInstance(filament, polls_to_intake=100)
+
+    transfer_for(instance).load(SLOT, parked=True)
+
+    assert instance.filament.at_sensor
+    steps = instance.without_extruder()
+    assert steps.index("ace feed 2 15@5") < steps.index("ace feed 2 300@30")
+    assert steps[-1] == "assist on"
+    # The pull into nothing is turned back before the feed.
+    assert instance.steps.index("extruder -15@5") < instance.steps.index(
+        "ace feed 2 300@30")
 
 
 # --- the intake sensor --------------------------------------------------
