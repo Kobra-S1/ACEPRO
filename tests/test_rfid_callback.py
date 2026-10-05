@@ -469,7 +469,9 @@ class TestRfidTempModeConfig:
         mock_config.getint = MagicMock(return_value=1)
         mock_config.getfloat = MagicMock(return_value=1.0)
         mock_config.getboolean = MagicMock(return_value=True)
-        mock_config.get = MagicMock(return_value="average")
+        mock_config.get = MagicMock(
+            side_effect=lambda key, default=None:
+                "xyz" if key == "toolchange_homing_axes" else "average")
         
         result = read_ace_config(mock_config)
         

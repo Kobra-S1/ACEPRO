@@ -616,3 +616,28 @@ class TestParkPullLength:
         from ace.config import park_pull_length
 
         assert park_pull_length(self.CONFIG, "per_tool") == 20.0
+
+
+class TestToolchangeHomingAxes:
+    def _read(self, value):
+        from unittest.mock import MagicMock
+        from ace.config import read_ace_config
+
+        config = MagicMock()
+        config.error = ValueError
+        config.getint = MagicMock(return_value=1)
+        config.getfloat = MagicMock(return_value=1.0)
+        config.getboolean = MagicMock(return_value=True)
+        config.get = MagicMock(
+            side_effect=lambda key, default=None:
+                value if key == "toolchange_homing_axes" else "average")
+        return read_ace_config(config)
+
+    def test_a_printer_may_need_fewer_axes_than_all(self):
+        assert self._read("X")["toolchange_homing_axes"] == "x"
+
+    def test_anything_but_axes_is_a_config_error(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="toolchange_homing_axes"):
+            self._read("xa")

@@ -197,6 +197,12 @@ def read_ace_config(config):
     ace_config["purge_max_chunk_length"] = config.getint("purge_max_chunk_length", "300")
     ace_config["purge_multiplier"] = config.getfloat("purge_multiplier", "1.0")
     ace_config["pre_cut_retract_length"] = config.getint("pre_cut_retract_length", "2")
+    # Axes a tool change moves and therefore homes first when unhomed.
+    homing_axes = config.get("toolchange_homing_axes", "xyz").lower()
+    if not homing_axes or set(homing_axes) - set("xyz"):
+        raise config.error(
+            f"toolchange_homing_axes '{homing_axes}' must be made of x, y and z")
+    ace_config["toolchange_homing_axes"] = homing_axes
     ace_config["status_debug_logging"] = config.getboolean("status_debug_logging", False)
     ace_config["runout_debounce_count"] = config.getint("runout_debounce_count", 1)
     ace_config["ace_connection_supervision"] = config.getboolean(

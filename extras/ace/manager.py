@@ -172,6 +172,7 @@ class AceManager:
         self.toolchange_purge_speed = self.default_color_change_purge_speed
         self.purge_max_chunk_length = float(self.ace_config["purge_max_chunk_length"])
         self.pre_cut_retract_length = float(self.ace_config["pre_cut_retract_length"])
+        self.toolchange_homing_axes = self.ace_config.get("toolchange_homing_axes", "xyz")
         self.ace_count = self.ace_config["ace_count"]
         self.purge_multiplier = float(self.ace_config.get("purge_multiplier", 1.0))
 

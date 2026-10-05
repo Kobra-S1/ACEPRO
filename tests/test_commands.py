@@ -2032,6 +2032,7 @@ class TestAceChangeTool:
         manager.get_ace_global_enabled.return_value = True
         manager.perform_tool_change = Mock(return_value="OK")
         manager.state.get = Mock(return_value=0)
+        manager.toolchange_homing_axes = "xyz"
         printer, gcode = self._make_printer(homed_axes="xy")  # missing z -> triggers homing
 
         with patch('ace.commands.get_printer', return_value=printer):
@@ -2040,6 +2041,44 @@ class TestAceChangeTool:
         manager.perform_tool_change.assert_called_once_with(0, 2)
         # Homing warning should have triggered a G28
         gcode.run_script_from_command.assert_any_call("G28")
+
+
+class TestToolChangeHoming:
+    """A tool change homes what its moves need and nothing else. On most
+    printers that is everything (Z lift, a throw position in X and Y); a
+    toolhead whose change only travels in X says so with
+    toolchange_homing_axes, and a load at standstill then does not run a
+    full homing cycle after the cut has already homed X."""
+
+    def test_everything_needed_and_something_missing_is_a_full_homing(self):
+        assert ace.commands.toolchange_homing_script("xyz", "xy") == "G28"
+        assert ace.commands.toolchange_homing_script("xyz", "") == "G28"
+
+    def test_nothing_missing_is_no_homing(self):
+        assert ace.commands.toolchange_homing_script("xyz", "xyz") is None
+        assert ace.commands.toolchange_homing_script("x", "x") is None
+
+    def test_only_the_missing_needed_axes_are_homed(self):
+        assert ace.commands.toolchange_homing_script("x", "") == "G28 X"
+        assert ace.commands.toolchange_homing_script("xy", "x") == "G28 Y"
+
+    def test_axes_that_are_not_needed_stay_unhomed(self):
+        assert ace.commands.toolchange_homing_script("x", "xz") is None
+
+    def test_the_change_homes_by_the_managers_axes(self, mock_gcmd, setup_mocks):
+        manager = INSTANCE_MANAGERS[0]
+        manager.get_ace_global_enabled.return_value = True
+        manager.perform_tool_change = Mock(return_value="OK")
+        manager.state.get = Mock(return_value=0)
+        manager.toolchange_homing_axes = "x"
+        printer, gcode = TestAceChangeTool()._make_printer(homed_axes="x")
+
+        with patch('ace.commands.get_printer', return_value=printer):
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, tool_index=2)
+
+        scripts = [c.args[0] for c in gcode.run_script_from_command.call_args_list]
+        assert not any(script.startswith("G28") for script in scripts), scripts
+        manager.perform_tool_change.assert_called_once_with(0, 2)
 
 
 class TestToolChangeFailureDuringResume:
@@ -2242,6 +2281,7 @@ class TestToolChangeIntegration:
     def test_cmd_ACE_CHANGE_TOOL_homing_check(self, mock_gcmd, setup_mocks):
         """Test that printer is homed before tool change."""
         mock_gcmd.get_int = Mock(return_value=1)
+        INSTANCE_MANAGERS[0].toolchange_homing_axes = "xyz"
         
         # Mock printer objects
         mock_printer = Mock()

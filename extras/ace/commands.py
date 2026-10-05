@@ -1581,6 +1581,18 @@ def cmd_ACE_SMART_LOAD(gcmd):
         gcmd.respond_info(f"ACE: Smart load error: {e}")
 
 
+def toolchange_homing_script(needed_axes, homed_axes):
+    """The homing a tool change runs first, or None: only axes it needs
+    (toolchange_homing_axes) and that are not homed yet. Needing all three
+    is a plain G28, which keeps the printer's own homing order."""
+    missing = [axis for axis in needed_axes if axis not in homed_axes]
+    if not missing:
+        return None
+    if set(needed_axes) == set("xyz"):
+        return "G28"
+    return "G28 " + " ".join(axis.upper() for axis in missing)
+
+
 def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     """Handle tool change command."""
     if not manager.get_ace_global_enabled():
@@ -1627,10 +1639,12 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             kin_status = toolhead.get_kinematics().get_status(reactor.monotonic())
             homed_axes = kin_status.get('homed_axes', '')
 
-            if 'xyz' not in homed_axes:
+            homing = toolchange_homing_script(
+                manager.toolchange_homing_axes, homed_axes)
+            if homing is not None:
                 gcode = printer.lookup_object("gcode")
-                gcode.respond_info("ACE: Printer not homed, homing now...")
-                gcode.run_script_from_command("G28")
+                gcode.respond_info(f"ACE: Printer not homed, homing now ({homing})...")
+                gcode.run_script_from_command(homing)
 
         except Exception as e:
             gcode = printer.lookup_object("gcode")

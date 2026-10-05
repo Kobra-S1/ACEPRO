@@ -1937,6 +1937,12 @@ know the paths; it announces the tool and the printer config acts.
 - A load that does not reach the toolhead sensor is repeated
   `toolhead_load_retries` times (default 0): 150 mm back, `FEEDER=ACE`
   routed again, feed again.
+- `toolchange_homing_axes` (default `xyz`): the axes `ACE_CHANGE_TOOL` homes
+  first when they are unhomed (`commands.toolchange_homing_script`);
+  `_ACE_PRE_TOOLCHANGE` skips its Z lift while Z is unhomed. Kobra X: `x`.
+- `_ACE_POST_TOOLCHANGE` hands the purge to the optional `_ACE_PURGE` macro
+  (`PURGE=<mm> SPEED=<mm/min>`) and then skips its own nozzle wipe (Kobra X:
+  stock's sweep and throw into the bin).
 - `_ACE_PREPARE_FOR_RETRACTION` runs the optional `_ACE_AFTER_CUT` macro
   between `CUT_TIP` and the unload retract (Kobra X: to the purge position).
 - The printer side reads the loaded tool back from `ace_state` status
