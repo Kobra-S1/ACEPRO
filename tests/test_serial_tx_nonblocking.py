@@ -187,6 +187,24 @@ def test_the_port_is_opened_non_blocking():
         assert serial_mod.Serial.call_args.kwargs["write_timeout"] == 0
 
 
+def test_a_port_that_vanishes_while_being_opened_is_a_failed_connect():
+    """The ACE re-enumerates between the port scan and the open: pyserial's
+    DTR ioctl then raises a plain OSError, in a reactor timer, where an
+    escaping exception shuts Klipper down."""
+    serial_error = type("SerialException", (Exception,), {})
+    with patch("ace.serial_manager.serial") as serial_mod, \
+            patch("ace.serial_manager.SerialException", serial_error):
+        from ace.serial_manager import AceSerialManager
+
+        serial_mod.Serial.side_effect = OSError(5, "Input/output error")
+        gcode = Mock()
+        serial_manager = AceSerialManager(
+            gcode=gcode, reactor=Mock(), instance_num=0, ace_enabled=True)
+
+        assert serial_manager.connect("/dev/ttyACM0", 115200) is False
+        assert "Input/output error" in gcode.respond_info.call_args[0][0]
+
+
 def full(port):
     """Leave the port taking nothing more."""
     try:

@@ -142,6 +142,7 @@ class AceInstance:
         self.intake_feed_speed = (
             float(ace_config.get("intake_feed_speed") or 0.) or self.feed_speed
         )
+        self.intake_clear_length = float(ace_config.get("intake_clear_length", 15.))
         # Set by the manager once the printer's sensors exist, when
         # toolhead_strategy is intake_gated.
         self.transfer = None

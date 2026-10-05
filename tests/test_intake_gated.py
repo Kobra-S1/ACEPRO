@@ -27,19 +27,38 @@ class FakeIntake:
 
 class FakeFilament:
     """Position of the tip relative to the toolhead sensor (mm, positive is
-    past it), moved by the extruder; the sensor reads `tip > 0`."""
+    past it), moved by the extruder; the sensor reads `tip > 0`. The gear
+    sits GEAR_ABOVE_SENSOR in front of the sensor: retracted that far, the
+    tip is out of it and the extruder turns without moving the filament.
+    Movement turns the intake encoder, one count per MM_PER_EDGE."""
 
-    def __init__(self, tip):
+    MM_PER_EDGE = 5.0
+
+    def __init__(self, tip, gear_above_sensor=10.0):
         self.tip = tip
+        self.gear_above_sensor = gear_above_sensor
         self.gripped = True
+        self.intake = None
+        self._uncounted = 0.0
 
     def moved(self, length):
-        if self.gripped:
-            self.tip += length
+        if not self.gripped:
+            return
+        if length < 0:
+            length = -min(-length, max(0.0, self.tip + self.gear_above_sensor))
+        self.tip += length
+        self._uncounted += abs(length)
+        while self._uncounted >= self.MM_PER_EDGE:
+            self._uncounted -= self.MM_PER_EDGE
+            self.intake.edges += 1
 
     @property
     def at_sensor(self):
         return self.tip > 0
+
+    @property
+    def in_gear(self):
+        return self.tip > -self.gear_above_sensor
 
 
 class FakeInstance:
@@ -56,11 +75,13 @@ class FakeInstance:
     extruder_feeding_speed = 5.0
     parkposition_to_toolhead_length = 90.0
     retract_speed = 50.0
+    intake_clear_length = 15.0
 
     def __init__(self, filament, polls_to_intake=3):
         self.filament = filament
         self.polls_to_intake = polls_to_intake
         self.intake = FakeIntake()
+        filament.intake = self.intake
         self.steps = []
         self.feeding = False
         self.slot_error = None
@@ -221,15 +242,51 @@ def unload(instance, extruder_limit=100.0):
         SLOT, extruder_limit=extruder_limit, extruder_speed=15.0)
 
 
-def test_an_unload_retracts_to_the_sensor_then_the_ace_parks_the_filament():
+def test_an_unload_drives_the_filament_out_of_the_gear_then_the_ace_parks_it():
     instance = FakeInstance(FakeFilament(tip=30.0))
 
     unload(instance)
 
-    assert instance.without_extruder() == ["wait moves", "ace retract 2 90@50"]
-    assert not instance.filament.at_sensor
-    # 30 mm to clear the sensor, plus at most one poll's queued motion.
-    assert -30.0 - 1.5 - 1e-9 <= instance.extruder_travel() <= -30.0
+    assert instance.without_extruder()[-1] == "ace retract 2 90@50"
+    assert not instance.filament.in_gear
+    # 30 mm to the sensor and 10 mm more out of the gear, then the extruder
+    # turns until the intake has not counted for intake_clear_length.
+    assert -(40.0 + 15.0 + 5.0) <= instance.extruder_travel() <= -(40.0 + 10.0)
+
+
+def test_filament_past_the_sensor_but_still_in_the_gear_is_driven_out_first():
+    """The toolhead sensor clearing does not mean the gear has let go: an
+    ACE pulling then grinds the filament and leaves it in the gear, where
+    the next feed cannot move it either."""
+    instance = FakeInstance(FakeFilament(tip=-5.0))
+
+    unload(instance)
+
+    assert not instance.filament.in_gear
+    last_extruder = max(i for i, s in enumerate(instance.steps)
+                        if s.startswith("extruder"))
+    assert instance.steps.index("ace retract 2 90@50") > last_extruder
+
+
+def test_a_gear_that_never_lets_go_raises_before_the_ace_pulls():
+    instance = FakeInstance(FakeFilament(tip=30.0, gear_above_sensor=500.0))
+
+    with pytest.raises(ValueError, match="intake"):
+        unload(instance)
+
+    assert not any(s.startswith("ace retract") for s in instance.steps)
+
+
+def test_the_quiet_length_before_the_ace_pulls_is_the_configured_one():
+    short = FakeInstance(FakeFilament(tip=-10.0))
+    long = FakeInstance(FakeFilament(tip=-10.0))
+    long.intake_clear_length = 30.0
+
+    unload(short)
+    unload(long)
+
+    assert short.extruder_travel() == pytest.approx(-15.0)
+    assert long.extruder_travel() == pytest.approx(-30.0)
 
 
 def test_the_ace_does_not_pull_while_the_extruder_holds_the_filament():
@@ -252,14 +309,6 @@ def test_an_unload_that_does_not_clear_the_sensor_raises_before_the_ace_pulls():
     assert not any(s.startswith("ace retract") for s in instance.steps)
 
 
-def test_an_unload_with_the_sensor_already_clear_only_parks():
-    instance = FakeInstance(FakeFilament(tip=-5.0))
-
-    unload(instance)
-
-    assert instance.steps == ["wait moves", "ace retract 2 90@50"]
-
-
 def test_a_given_park_step_replaces_the_fixed_ace_pull():
     instance = FakeInstance(FakeFilament(tip=30.0))
 
@@ -268,7 +317,7 @@ def test_a_given_park_step_replaces_the_fixed_ace_pull():
         park=lambda: instance.steps.append("park") or "parked")
 
     assert result == "parked"
-    assert instance.without_extruder() == ["wait moves", "park"]
+    assert instance.without_extruder()[-1] == "park"
 
 
 # --- the intake sensor --------------------------------------------------

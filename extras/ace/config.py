@@ -164,6 +164,9 @@ def read_ace_config(config):
     ace_config["filament_intake_sensor_name"] = config.get("filament_intake_sensor_name", None)
     # ACE speed up to the intake sensor; 0 = feed_speed.
     ace_config["intake_feed_speed"] = config.getfloat("intake_feed_speed", 0.)
+    # intake_gated unload: extruder travel without an intake count that
+    # means the gear has let go of the filament. Several counts' worth.
+    ace_config["intake_clear_length"] = config.getfloat("intake_clear_length", 15.)
     # Extra attempts when a load does not reach the toolhead sensor.
     ace_config["toolhead_load_retries"] = max(0, config.getint("toolhead_load_retries", 0))
     ace_config["toolhead_slow_loading_speed"] = config.getint("toolhead_slow_loading_speed", 5)

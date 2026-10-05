@@ -798,7 +798,9 @@ class AceSerialManager:
                         )
 
                 return True
-        except SerialException as e:
+        except (SerialException, OSError) as e:
+            # OSError: the device left between the port scan and the open
+            # (pyserial's DTR ioctl does not wrap it).
             self.gcode.respond_info(f"ACE[{self.instance_num}]: Connection failed: {e}")
             self._serial = None
         return False

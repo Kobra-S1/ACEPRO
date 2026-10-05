@@ -52,6 +52,39 @@ class TestUnloadUsesTheTransfer:
             fixture._unload(manager)
 
 
+class TestUnloadWithTheSensorAlreadyClear:
+    """Nothing at the toolhead sensor says nothing about the gear in front
+    of it, and the extruder may be cold: the ACE pulls alone, so the route
+    has to free the filament for it first."""
+
+    def _unload(self, transfers):
+        fixture = UnloadFixture()
+        instance = fixture._instance()
+        manager = fixture._manager(instance, rdm_has_filament=False)
+        manager.get_instant_switch_state = Mock(return_value=False)
+        manager.get_switch_state = Mock(return_value=False)
+        manager.transfers = transfers
+        self.order = []
+        manager.route_to_tool = Mock(
+            side_effect=lambda *args: self.order.append(("route",) + args))
+        instance._smart_unload_slot.side_effect = (
+            lambda *args, **kwargs: self.order.append(("ace retract",)) or True)
+        fixture._unload(manager)
+
+    def test_the_route_frees_the_filament_before_the_ace_pulls(self):
+        self._unload({0: Mock()})
+
+        assert ("route", 1, FEEDER_ACE) in self.order
+        assert (self.order.index(("route", 1, FEEDER_ACE))
+                < self.order.index(("ace retract",)))
+
+    def test_the_default_strategy_routes_as_before(self):
+        self._unload({})
+
+        assert ("route", 1, FEEDER_ACE) not in self.order
+        assert ("ace retract",) in self.order
+
+
 class TestLoadFeeder:
     def _instance(self):
         instance = object.__new__(AceInstance)

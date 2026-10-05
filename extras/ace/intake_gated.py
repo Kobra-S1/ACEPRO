@@ -8,8 +8,9 @@ whose extruder gear sits between two filament sensors.
 
 So a load is "ACE feeds to the intake, extruder pulls to the toolhead
 sensor", and an unload is "extruder retracts until the toolhead sensor
-clears, then the ACE pulls the freed filament back". Both stop on the
-sensors; the configured lengths are limits. This is the sequence Anycubic's
+clears and on until the intake stops counting, then the ACE pulls the
+freed filament back". Both stop on the sensors; the configured lengths are
+limits. This is the sequence Anycubic's
 firmware runs on the Kobra X (ACE feed and unwind state machines).
 
 Selected with ``toolhead_strategy: intake_gated``; the default,
@@ -149,12 +150,12 @@ class IntakeGatedTransfer:
     def unload(self, local_slot, extruder_limit, extruder_speed, park=None):
         """Take the slot's cut filament out of the toolhead: the extruder
         retracts until the toolhead sensor clears (at most
-        ``extruder_limit`` mm), then the ACE pulls it back - by
-        parkposition_to_toolhead_length, or as ``park()`` does it (a setup
-        with a sensor on the way back stops on that). The ACE does not pull
-        while the gear still holds the filament. Returns whether the park
-        step succeeded; raises ValueError when the toolhead sensor does not
-        clear."""
+        ``extruder_limit`` mm) and on until the gear has let go, then the
+        ACE pulls it back - by parkposition_to_toolhead_length, or as
+        ``park()`` does it (a setup with a sensor on the way back stops on
+        that). The ACE does not pull while the gear still holds the
+        filament. Returns whether the park step succeeded; raises
+        ValueError when the filament does not leave sensor or gear."""
         instance = self.instance
         self._extruder_until(self._clear_of_toolhead_sensor, -1,
                              extruder_speed, extruder_limit)
@@ -163,8 +164,39 @@ class IntakeGatedTransfer:
                 f"ACE[{instance.instance_num}]: Toolhead sensor still sees "
                 f"filament after {extruder_limit:.0f}mm of extruder retract."
             )
+        self._retract_out_of_gear(extruder_speed)
         if park is not None:
             return park()
         instance._retract(local_slot, instance.parkposition_to_toolhead_length,
                           instance.retract_speed)
         return True
+
+    def _retract_out_of_gear(self, speed):
+        """Keep retracting until the intake has not counted for
+        intake_clear_length: the toolhead sensor is behind the gear, so its
+        clearing leaves the tip still in the gear. Out of it, the extruder
+        turns and nothing moves."""
+        instance = self.instance
+        limit = instance.extruder_feeding_length
+        clear_length = instance.intake_clear_length
+        step = speed * EXTRUDER_STEP_S
+        mark = self.intake.intake_edges()
+        travelled = quiet = 0.0
+        while quiet < clear_length and travelled < limit:
+            length = min(step, limit - travelled)
+            instance._extruder_move(-length, speed)
+            travelled += length
+            instance.dwell(length / speed)
+            edges = self.intake.intake_edges()
+            if edges != mark:
+                mark = edges
+                quiet = 0.0
+            else:
+                quiet += length
+        instance.manager._wait_toolhead_move_finished()
+        if quiet < clear_length:
+            raise ValueError(
+                f"ACE[{instance.instance_num}]: The intake sensor still "
+                f"counts after {limit:.0f}mm of extruder retract past the "
+                f"toolhead sensor - the filament has not left the gear."
+            )

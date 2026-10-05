@@ -1871,8 +1871,11 @@ sensor. Decided once per printer in the ACE config.
 - `intake_gated` (`extras/ace/intake_gated.py`): for an extruder gear
   between two sensors. Load: ACE feeds until the intake sensor counts, the
   extruder pulls until the toolhead sensor triggers. Unload: the extruder
-  retracts until the toolhead sensor clears, then the ACE pulls back. The
-  configured lengths are limits. Rejected alternative: printer-side
+  retracts until the toolhead sensor clears and on until the intake has not
+  counted for `intake_clear_length` (the sensor is behind the gear, so its
+  clearing leaves the tip in the gear), then the ACE pulls back. The
+  configured lengths are limits. An unload that finds the toolhead sensor
+  already clear routes with `FEEDER=ACE` before the ACE pulls alone. Rejected alternative: printer-side
   load/unload macros - the same sequence fits other toolheads with an
   encoder in front of the gear, so it lives here.
 - Seams: `AceInstance._feed_filament_into_toolhead` (load) and the

@@ -1301,6 +1301,11 @@ class AceManager:
 
             # Sensor already clear - choose retract distance based on path state
             if not self.get_instant_switch_state(SENSOR_TOOLHEAD):
+                if instance.instance_num in self.transfers:
+                    # The sensor is behind the gear: the filament can still
+                    # be in it, and the extruder may be cold. The ACE pulls
+                    # alone below, so the route has to free the filament.
+                    self.route_to_tool(tool_index, FEEDER_ACE)
                 if self.is_filament_path_free_instant():
                     # All sensors clear: filament was likely manually removed.
                     # A short safety retract is enough to pull back any tip sitting
