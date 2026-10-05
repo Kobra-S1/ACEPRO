@@ -61,7 +61,7 @@ class TestSmartUnloadRdmEarlyStopGuard:
         mgr._extruder_move = Mock()
         mgr._wait_toolhead_move_finished = Mock()
         mgr.is_filament_path_free_instant = Mock(return_value=True)
-        mgr._turn_off_heater_if_idle = Mock()
+        mgr._restore_heater_if_idle = Mock()
 
         # Toolhead sensor triggered -> take the coordinated-retraction branch.
         def read(sensor_name):

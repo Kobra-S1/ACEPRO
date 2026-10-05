@@ -4535,12 +4535,12 @@ class TestSmartUnload(unittest.TestCase):
         manager.prepare_toolhead_for_filament_retraction = Mock()
         manager.get_switch_state = Mock(return_value=False)
         manager.is_filament_path_free = Mock(return_value=True)
-        manager._turn_off_heater_if_idle = Mock()
+        manager._restore_heater_if_idle = Mock()
 
         result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=False)
 
         self.assertTrue(result)
-        manager._turn_off_heater_if_idle.assert_called_once()
+        manager._restore_heater_if_idle.assert_called_once()
 
     def test_keep_heater_true_preserves_heater(self):
         """When keep_heater=True (toolchange), heater stays on for next load."""
@@ -4552,12 +4552,12 @@ class TestSmartUnload(unittest.TestCase):
         manager.prepare_toolhead_for_filament_retraction = Mock()
         manager.get_switch_state = Mock(return_value=False)
         manager.is_filament_path_free = Mock(return_value=True)
-        manager._turn_off_heater_if_idle = Mock()
+        manager._restore_heater_if_idle = Mock()
 
         result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=True)
 
         self.assertTrue(result)
-        manager._turn_off_heater_if_idle.assert_not_called()
+        manager._restore_heater_if_idle.assert_not_called()
 
     def test_keep_heater_true_sensor_triggered_path(self):
         """keep_heater=True also works on sensor-triggered coordinated retraction path."""
@@ -4571,12 +4571,12 @@ class TestSmartUnload(unittest.TestCase):
         manager.is_filament_path_free = Mock(return_value=True)
         manager._extruder_move = Mock()
         manager._wait_toolhead_move_finished = Mock()
-        manager._turn_off_heater_if_idle = Mock()
+        manager._restore_heater_if_idle = Mock()
 
         result = manager.smart_unload(tool_index=0, prepare_toolhead=False, keep_heater=True)
 
         self.assertTrue(result)
-        manager._turn_off_heater_if_idle.assert_not_called()
+        manager._restore_heater_if_idle.assert_not_called()
 
     def test_known_tool_invalid_instance_raises(self):
         instance = self._make_instance()
@@ -4642,7 +4642,7 @@ class TestSmartUnload(unittest.TestCase):
 
 
 class TestTurnOffHeaterIfIdle(unittest.TestCase):
-    """Tests for _turn_off_heater_if_idle — heater control after unload."""
+    """Tests for _restore_heater_if_idle — heater control after unload."""
 
     def setUp(self):
         ACE_INSTANCES.clear()
@@ -4736,9 +4736,31 @@ class TestTurnOffHeaterIfIdle(unittest.TestCase):
         mock_print_stats.get_status.return_value = {"state": "standby"}
         manager.printer.lookup_object = Mock(return_value=mock_print_stats)
 
-        manager._turn_off_heater_if_idle()
+        manager._restore_heater_if_idle()
 
         manager.gcode.run_script_from_command.assert_called_once_with("M104 S0")
+
+    def test_a_target_set_before_the_unload_is_put_back_when_idle(self):
+        """The unload's own heating must not cost a target the user had
+        set: it goes back to what it was, and off only if it was off."""
+        manager = self._build_manager()
+        mock_print_stats = Mock()
+        mock_print_stats.get_status.return_value = {"state": "standby"}
+        manager.printer.lookup_object = Mock(return_value=mock_print_stats)
+        manager._heater_target_before = 250.0
+
+        manager._restore_heater_if_idle()
+
+        manager.gcode.run_script_from_command.assert_called_once_with("M104 S250")
+
+    def test_an_unload_notes_the_target_it_found(self):
+        manager = self._build_manager()
+        manager._extruder_target = Mock(return_value=250.0)
+        manager._smart_unload = Mock(return_value=True)
+
+        manager.smart_unload(tool_index=1)
+
+        self.assertEqual(manager._heater_target_before, 250.0)
 
     def test_heater_stays_on_when_printing(self):
         """Heater should stay on when printer is actively printing."""
@@ -4747,7 +4769,7 @@ class TestTurnOffHeaterIfIdle(unittest.TestCase):
         mock_print_stats.get_status.return_value = {"state": "printing"}
         manager.printer.lookup_object = Mock(return_value=mock_print_stats)
 
-        manager._turn_off_heater_if_idle()
+        manager._restore_heater_if_idle()
 
         manager.gcode.run_script_from_command.assert_not_called()
 
@@ -4758,7 +4780,7 @@ class TestTurnOffHeaterIfIdle(unittest.TestCase):
         mock_print_stats.get_status.return_value = {"state": "paused"}
         manager.printer.lookup_object = Mock(return_value=mock_print_stats)
 
-        manager._turn_off_heater_if_idle()
+        manager._restore_heater_if_idle()
 
         manager.gcode.run_script_from_command.assert_not_called()
 
@@ -4767,7 +4789,7 @@ class TestTurnOffHeaterIfIdle(unittest.TestCase):
         manager = self._build_manager()
         manager.printer.lookup_object = Mock(return_value=None)
 
-        manager._turn_off_heater_if_idle()
+        manager._restore_heater_if_idle()
 
         manager.gcode.run_script_from_command.assert_called_once_with("M104 S0")
 
@@ -4777,7 +4799,7 @@ class TestTurnOffHeaterIfIdle(unittest.TestCase):
         manager.printer.lookup_object = Mock(side_effect=Exception("lookup failed"))
 
         # Should not raise
-        manager._turn_off_heater_if_idle()
+        manager._restore_heater_if_idle()
 
         # Should log warning
         manager.gcode.respond_info.assert_called()
@@ -6581,7 +6603,7 @@ class TestSmartUnloadCyclingFallback(_ManagerCycleFixture):
         manager._get_config_for_tool = Mock(return_value=500.0)
         manager.has_rdm_sensor = Mock(return_value=True)
         manager._identify_and_unload_by_cycling = Mock(return_value=True)
-        manager._turn_off_heater_if_idle = Mock()
+        manager._restore_heater_if_idle = Mock()
         self.variables["ace_current_index"] = 0
         return manager, instance
 

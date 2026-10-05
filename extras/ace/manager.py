@@ -1031,13 +1031,20 @@ class AceManager:
             # RDM not available - check only toolhead
             return not toolhead_blocked
 
-    def _turn_off_heater_if_idle(self):
-        """
-        Turn off extruder heater if the printer is not currently printing.
+    def _extruder_target(self):
+        """The extruder heater's target (°C), 0 when it is off or unknown."""
+        try:
+            extruder = self.printer.lookup_object("extruder", None)
+            return float(extruder.get_heater().get_temp(self.reactor.monotonic())[1])
+        except Exception:
+            return 0.
 
-        Called after successful unload operations to avoid leaving the
-        heater on indefinitely when unloading outside of a print job.
-        During printing, the heater must stay on for the next toolchange.
+    def _restore_heater_if_idle(self):
+        """
+        Outside a print, put the extruder heater's target back to what it
+        was before the unload or park heated for its cut: a target the user
+        had set stays, and only a heater that was off goes off again.
+        During printing the heater is left alone for the next toolchange.
         """
         try:
             print_stats = self.printer.lookup_object("print_stats", None)
@@ -1049,8 +1056,13 @@ class AceManager:
                         "ACE: Printer is printing/paused — keeping heater on"
                     )
                     return
-            self.gcode.respond_info("ACE: Not printing — turning off extruder heater")
-            self.gcode.run_script_from_command("M104 S0")
+            target = getattr(self, "_heater_target_before", 0.)
+            if target > 0:
+                self.gcode.respond_info(
+                    f"ACE: Not printing — extruder heater back to {target:.0f}°C")
+            else:
+                self.gcode.respond_info("ACE: Not printing — turning off extruder heater")
+            self.gcode.run_script_from_command(f"M104 S{target:.0f}")
         except Exception as e:
             self.gcode.respond_info(f"ACE: Warning — could not turn off heater: {e}")
 
@@ -1300,8 +1312,7 @@ class AceManager:
         """Take the loaded tool out of the hotend and leave it parked at
         the intake: cut, then the extruder retracts until the toolhead
         sensor clears. Its next load is a short pull. Without an intake to
-        park at (toolhead_strategy: sensor_push) this is a full unload. The
-        heater is left as it is: a load usually follows."""
+        park at (toolhead_strategy: sensor_push) this is a full unload."""
         instance_num = get_instance_from_tool(tool_index)
         if instance_num < 0:
             raise Exception(f"Tool {tool_index} not managed by any ACE instance")
@@ -1312,6 +1323,7 @@ class AceManager:
         local_slot = get_local_slot(tool_index, instance_num)
 
         self.gcode.respond_info(f"ACE: Parking tool {tool_index} at the toolhead")
+        self._heater_target_before = self._extruder_target()
         self.route_to_tool(tool_index)
         if self.get_switch_state(SENSOR_TOOLHEAD):
             self.prepare_toolhead_for_filament_retraction(tool_index=tool_index)
@@ -1327,6 +1339,7 @@ class AceManager:
         self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
         self._set_parked(tool_index, True)
         self.gcode.respond_info(f"ACE: Tool {tool_index} parked")
+        self._restore_heater_if_idle()
         return True
 
     def _clear_parked_for(self, target_tool):
@@ -1353,6 +1366,7 @@ class AceManager:
     def smart_unload(self, tool_index=-1, prepare_toolhead=True, keep_heater=False,
                      cycle_on_blocked=False):
         """_smart_unload, and the unloaded filament is no longer parked."""
+        self._heater_target_before = self._extruder_target()
         unloaded = self._smart_unload(tool_index, prepare_toolhead, keep_heater,
                                       cycle_on_blocked)
         if unloaded:
@@ -1472,7 +1486,7 @@ class AceManager:
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     if not keep_heater:
-                        self._turn_off_heater_if_idle()
+                        self._restore_heater_if_idle()
                     return True
                 else:
                     # The known tool's slot has been retracted (it may even
@@ -1561,7 +1575,7 @@ class AceManager:
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     if not keep_heater:
-                        self._turn_off_heater_if_idle()
+                        self._restore_heater_if_idle()
                     return True
                 else:
                     # Same escalation as the toolhead-clear branch above: the

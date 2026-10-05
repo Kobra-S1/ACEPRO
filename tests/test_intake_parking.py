@@ -71,6 +71,15 @@ class TestParkTool:
         assert manager.parked_tools() == [1]
         assert manager.variables["ace_filament_pos"] == FILAMENT_STATE_BOWDEN
 
+    def test_a_park_leaves_the_heater_target_as_it_found_it(self):
+        manager, instance = manager_with(PATHS_PER_TOOL)
+        manager._extruder_target = Mock(return_value=250.0)
+
+        run(instance, lambda: manager.park_tool(1))
+
+        assert manager._heater_target_before == 250.0
+        manager._restore_heater_if_idle.assert_called_once_with()
+
     def test_a_failed_park_is_not_recorded(self):
         manager, instance = manager_with(PATHS_PER_TOOL)
         manager.transfers[0].park.side_effect = ValueError("still sees filament")
