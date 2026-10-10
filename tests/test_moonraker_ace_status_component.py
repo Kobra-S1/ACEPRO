@@ -70,22 +70,38 @@ def test_handle_status_request_does_not_fallback_for_unavailable_requested_insta
     assert result["available_instances"] == [1]
 
 
-def test_handle_status_request_keeps_default_current_index_fallback_without_instance_param():
+def _unit(first_tool, temp):
+    """An ace_instance_N status: its slots carry their tool numbers."""
+    return {"temp": temp, "status": "ready",
+            "slots": [{"index": i, "tool": first_tool + i} for i in range(4)]}
+
+
+def _default_unit(current_index, instances):
     comp = _build_component()
 
     async def _query():
-        return {
-            "manager": {"current_index": 1},
-            "instances": {
-                0: {"temp": 25, "status": "ready"},
-                1: {"temp": 45, "status": "busy"},
-            },
-            "count": 2,
-        }
+        return {"manager": {"current_index": current_index},
+                "instances": instances, "count": len(instances)}
 
     comp._query_ace_instances = _query
+    return asyncio.run(comp.handle_status_request(_DummyWebRequest()))
 
-    result = asyncio.run(comp.handle_status_request(_DummyWebRequest(instance=None)))
 
-    assert result["instance_index"] == 1
-    assert result["temp"] == 45
+def test_without_instance_param_the_unit_holding_the_loaded_tool_is_shown():
+    # T5 is the second unit's slot 1; T1 is the first unit's.
+    two_units = {0: _unit(0, 25), 1: _unit(4, 45)}
+    assert _default_unit(5, two_units)["instance_index"] == 1
+    assert _default_unit(5, two_units)["temp"] == 45
+    assert _default_unit(1, two_units)["instance_index"] == 0
+
+
+def test_the_loaded_tool_is_found_behind_a_tool_base():
+    # Kobra X, three direct inlets first: the units hold T3-T6 and T7-T10.
+    two_units = {0: _unit(3, 25), 1: _unit(7, 45)}
+    assert _default_unit(8, two_units)["instance_index"] == 1
+    assert _default_unit(1, two_units)["instance_index"] == 0   # a direct tool
+
+
+def test_without_a_loaded_tool_the_first_unit_is_shown():
+    two_units = {0: _unit(0, 25), 1: _unit(4, 45)}
+    assert _default_unit(-1, two_units)["instance_index"] == 0

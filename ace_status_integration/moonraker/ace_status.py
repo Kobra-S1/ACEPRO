@@ -44,6 +44,20 @@ def _sanitize_value(val: Any) -> str:
     return text.replace("\n", " ").replace("\r", " ").strip()
 
 
+def _unit_holding_tool(instances: Dict[int, Dict[str, Any]],
+                       tool: int) -> Optional[int]:
+    """The unit whose slots carry `tool`, or None. Read from the slots'
+    own tool numbers: the units do not start at T0 behind a printer-side
+    tool changer, and Moonraker cannot know where they start."""
+    if tool < 0:
+        return None
+    for idx, data in sorted(instances.items()):
+        for slot in data.get("slots") or []:
+            if isinstance(slot, dict) and slot.get("tool") == tool:
+                return idx
+    return None
+
+
 class AceStatus:
     def __init__(self, config: ConfigHelper):
         self.confighelper = config
@@ -133,7 +147,8 @@ class AceStatus:
             instances: Dict[int, Dict[str, Any]] = query_result["instances"]
             instance_count = query_result["count"]
 
-            # Choose which instance to expose at top-level (default: current_index or 0)
+            # Choose which instance to expose at top-level (default: the unit
+            # holding the loaded tool, else 0)
             chosen_idx = 0
             if instance_idx is not None:
                 if instance_idx < 0 or instance_idx >= instance_count:
@@ -153,9 +168,10 @@ class AceStatus:
                 chosen_idx = instance_idx
             elif isinstance(ace_mgr, dict):
                 try:
-                    current_idx = int(ace_mgr.get("current_index", -1))
-                    if current_idx in instances:
-                        chosen_idx = current_idx
+                    loaded = _unit_holding_tool(
+                        instances, int(ace_mgr.get("current_index", -1)))
+                    if loaded is not None:
+                        chosen_idx = loaded
                 except Exception:
                     pass
 
