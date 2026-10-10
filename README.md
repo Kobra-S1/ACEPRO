@@ -658,9 +658,10 @@ driven by the Kobra Klipper fork, not by this driver.
   `parkposition_to_rdm_length`. ADC mode of `[filament_tracker]` needs the
   fork's ADC API fix. Its polarity and `length_per_pulse` are Kobra S1
   values, not checked on a Kobra X.
-- **ACE lengths are Kobra 3 values.** `parkposition_to_toolhead_length`,
-  `toolchange_load_length` and the extruder feed lengths in `ace_KX.cfg` are
-  not measured on a Kobra X.
+- **Most ACE lengths are Kobra 3 values.** `toolchange_load_length` and the
+  extruder feed lengths in `ace_KX.cfg` are not measured on a Kobra X;
+  `parkposition_to_toolhead_length` (900) and `rdm_overshoot_length` (200)
+  are, for the combo setup with the 4-in-1 and RDM.
 - **Orca lanes come from the fork's `[kx_filament]`**, numbered as printer
   tools, ACE-fed ones included. `ace_KX.cfg` therefore sets
   `moonraker_lane_sync_enabled: False`; with it on there would be two writers
