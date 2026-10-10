@@ -89,3 +89,40 @@ def test_disabled_ace_support_refuses_a_tool_changers_change():
     with pytest.raises(CommandError, match="disabled"):
         ace.commands.cmd_ACE_CHANGE_TOOL(manager, _gcmd(), 4)
     manager.perform_tool_change.assert_not_called()
+
+
+def _registered(name):
+    """The handler Klipper calls for `name`, as register_all_commands
+    hands it over - with the wrapping a direct call skips."""
+    handlers = {}
+    gcode = Mock()
+    gcode.register_command = Mock(
+        side_effect=lambda cmd, handler, desc=None: handlers.update({cmd: handler}))
+    printer = Mock()
+    printer.lookup_object = Mock(return_value=gcode)
+    ace.commands.register_all_commands(printer)
+    return handlers[name]
+
+
+def test_the_registered_command_passes_the_failure_on():
+    # Every ACE command is registered wrapped; the wrapper turned this
+    # error into a console line and a dialog, and kx_toolchanger saw success.
+    INSTANCE_MANAGERS[0] = _manager(owned_by_tool_changer=True, enabled=False)
+    try:
+        with patch("ace.commands.get_printer", return_value=_printer("standby")[0]):
+            with pytest.raises(CommandError, match="disabled"):
+                _registered("ACE_CHANGE_TOOL")(_gcmd(tool=4))
+    finally:
+        INSTANCE_MANAGERS.clear()
+
+
+def test_an_unexpected_exception_is_still_caught_by_the_registered_command():
+    # Anything but a G-code error escaping a command shuts Klipper down.
+    INSTANCE_MANAGERS[0] = _manager(owned_by_tool_changer=True)
+    gcmd = _gcmd(tool=4)
+    gcmd.get_int = Mock(side_effect=KeyError("boom"))
+    try:
+        with patch("ace.commands.get_printer", return_value=_printer("standby")[0]):
+            _registered("ACE_QUERY_SLOTS")(gcmd)   # no raise
+    finally:
+        INSTANCE_MANAGERS.clear()

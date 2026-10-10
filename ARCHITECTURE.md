@@ -124,7 +124,9 @@ During a print, the existing print-recovery branch already records the requested
 **Failure reported to a printer-side tool changer:**
 `ACE_CHANGE_TOOL` reports every failed change as a G-code error, so its
 caller sees it: the wrapper converts whatever escapes, as an exception that
-is not a G-code error shuts Klipper down. With `register_tool_macros: False`
+is not a G-code error shuts Klipper down, and `safe_gcode_command`, which
+wraps every registered ACE command, lets G-code errors through and catches
+only the rest. With `register_tool_macros: False`
 (`manager.tool_changer_owns_tools`) a failure mid-print also raises, after
 the state decision above and without `PAUSE` or the Retry prompt: the tool
 changer holds the print and offers its own retry, and records the tool only

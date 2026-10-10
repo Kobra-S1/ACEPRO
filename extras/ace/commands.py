@@ -185,6 +185,11 @@ def safe_gcode_command(func):
         try:
             return func(gcmd)
         except Exception as e:
+            # A G-code error is the command's answer to its caller (a macro,
+            # a printer-side tool changer, the start sequence) and is safe to
+            # raise; only other exceptions would shut Klipper down.
+            if isinstance(gcmd.error, type) and isinstance(e, gcmd.error):
+                raise
             traceback.print_exc()
             error_msg = f"ACE ERROR: {type(e).__name__}: {e}"
             gcmd.respond_info(error_msg)
