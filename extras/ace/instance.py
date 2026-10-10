@@ -1467,13 +1467,6 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: RDM CLEAR after {elapsed:.1f}s — "
                     f"applying {overshoot_length}mm overshoot"
                 )
-
-                # Overshoot: let the motor run a bit longer before stopping
-                overshoot_time = overshoot_length / self.retract_speed
-                if overshoot_time > 0:
-                    self.reactor.pause(
-                        self.reactor.monotonic() + overshoot_time
-                    )
                 return f"RDM clear at {elapsed:.1f}s"
 
             return None
@@ -1489,6 +1482,11 @@ class AceInstance:
                 slot, length, self.retract_speed,
                 early_stop_callback=rdm_early_stop_check,
             )
+            # A move of its own: the RDM may clear only after the retract
+            # above has ended (Kobra X: the path back to the RDM is about as
+            # long as `length`), and then no running move is left to extend.
+            if rdm_state["cleared"] and overshoot_length > 0:
+                self._retract(slot, overshoot_length, self.retract_speed)
         except Exception as e:
             self._stop_retract(slot)
             self.gcode.respond_info(

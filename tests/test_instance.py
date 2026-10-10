@@ -4386,11 +4386,10 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
 
         self.assertTrue(result)
         instance._disable_feed_assist.assert_called_once_with(1)
-        # _retract called with early_stop_callback kwarg
-        instance._retract.assert_called_once()
-        call_kwargs = instance._retract.call_args[1]
-        self.assertIn('early_stop_callback', call_kwargs)
-        self.assertIsNotNone(call_kwargs['early_stop_callback'])
+        # The RDM-monitored retract, then the overshoot as a move of its own
+        monitored, overshoot = instance._retract.call_args_list
+        self.assertIsNotNone(monitored[1].get('early_stop_callback'))
+        self.assertEqual(overshoot[0], (1, 20, 100.0))
         instance._update_feed_assist.assert_called_once_with(2)
 
     @patch('ace.instance.AceSerialManager')
