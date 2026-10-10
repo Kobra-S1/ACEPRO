@@ -1597,6 +1597,13 @@ def toolchange_homing_script(needed_axes, homed_axes):
 def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     """Handle tool change command."""
     if not manager.get_ace_global_enabled():
+        if getattr(manager, "tool_changer_owns_tools", False) is True:
+            # Ignoring it would let the tool changer record a tool that
+            # never loaded.
+            raise gcmd.error(
+                f"ACE: Global ACE Pro support disabled - cannot change to "
+                f"T{tool_index}"
+            )
         gcmd.respond_info("ACE: Global ACE Pro support disabled - tool change ignored")
         return
 
@@ -1760,6 +1767,14 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
         # instance_num = get_instance_from_tool(tool_index)
         # slot_index = get_local_slot(tool_index, instance_num)
+
+        if (is_printing and not is_startup
+                and getattr(manager, "tool_changer_owns_tools", False) is True):
+            # The tool changer holds the print and offers its own retry; a
+            # pause and prompt of ours would run beside it, and no RESUME
+            # of ours follows to use ace_target_index.
+            manager.state.set("ace_target_index", -1)
+            raise gcmd.error(f"Tool change to T{tool_index} failed: {str(e)}")
 
         if is_printing and not is_startup:
             gcode.run_script_from_command('PAUSE')
@@ -2160,7 +2175,10 @@ def cmd_ACE_CHANGE_TOOL_WRAPPER(gcmd):
         manager = ace_get_manager(0)
         cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index)
     except Exception as e:
-        gcmd.respond_info(f"ACE_CHANGE_TOOL error: {e}")
+        # The caller (a T<n> macro, a printer-side tool changer, the start
+        # sequence) has to see the failure; converted, as any other
+        # exception escaping a G-code command shuts Klipper down.
+        raise gcmd.error(f"ACE_CHANGE_TOOL error: {e}")
 
 
 def cmd_ACE_FULL_UNLOAD(gcmd):

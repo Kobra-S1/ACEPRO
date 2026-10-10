@@ -121,6 +121,20 @@ This prevents silent loss of the stuck-tool identity, which previously caused th
 next tool change to hit the plausibility block and cycle blindly through parked slots.
 During a print, the existing print-recovery branch already records the requested tool correctly.
 
+**Failure reported to a printer-side tool changer:**
+`ACE_CHANGE_TOOL` reports every failed change as a G-code error, so its
+caller sees it: the wrapper converts whatever escapes, as an exception that
+is not a G-code error shuts Klipper down. With `register_tool_macros: False`
+(`manager.tool_changer_owns_tools`) a failure mid-print also raises, after
+the state decision above and without `PAUSE` or the Retry prompt: the tool
+changer holds the print and offers its own retry, and records the tool only
+when the call succeeded. A change asked for while ACE support is disabled
+raises there too instead of being ignored. Rejected: the tool changer
+checking `ace_current_index` after every call - the failure belongs to the
+command that failed, and a check per caller is skipped by the next caller.
+
+Proof: `tests/test_change_tool_failure.py`.
+
 **In-Flight Toolchange Tracking (`ace_target_index`):**
 Tracks the tool of an in-flight or failed toolchange attempt (-1 = none),
 separate from `ace_current_index` (last confirmed loaded tool). Owned
@@ -1157,7 +1171,7 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
-| `register_tool_macros` | True | Register `T<n>` for every ACE slot. False when a printer-side tool changer owns `T<n>` and calls `ACE_CHANGE_TOOL` with ACE numbering (Kobra X `[kx_toolchanger]`) |
+| `register_tool_macros` | True | Register `T<n>` for every ACE slot. False when a printer-side tool changer owns `T<n>` and calls `ACE_CHANGE_TOOL` with printer tool numbers (Kobra X `[kx_toolchanger]`); it also owns the recovery of a failed change, see "Failure reported to a printer-side tool changer" |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
 | `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (ACE1 + ACE2; requires active feed assist). Shipped printer configs set it to True and enable the `[output_pin TANGLE_DETECTION]` dashboard slider (authoritative when present) |
 | `tangle_pump_time` | 5.0 | Seconds of continuous ACE pumping before suspecting a tangle (clamped to 3.0 minimum — ACE2's starved-runout assist retry cycles up to ~3.9 s) |

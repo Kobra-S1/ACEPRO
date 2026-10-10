@@ -175,6 +175,10 @@ class AceManager:
         self.purge_max_chunk_length = float(self.ace_config["purge_max_chunk_length"])
         self.pre_cut_retract_length = float(self.ace_config["pre_cut_retract_length"])
         self.toolchange_homing_axes = self.ace_config.get("toolchange_homing_axes", "xyz")
+        # A printer-side tool changer owns T<n> and recovers a failed change
+        # itself: ACE_CHANGE_TOOL then reports the failure instead.
+        self.tool_changer_owns_tools = not self.ace_config.get(
+            "register_tool_macros", True)
         self.ace_count = self.ace_config["ace_count"]
         self.purge_multiplier = float(self.ace_config.get("purge_multiplier", 1.0))
 

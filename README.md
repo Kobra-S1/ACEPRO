@@ -1677,6 +1677,10 @@ When a tool change fails (e.g., filament loading issue, sensor timeout, path blo
    - **Cancel Print** (during print) - Abort the print job
    - **Continue** (not printing) - Dismiss dialog and continue
 
+Behind a printer-side tool changer that owns `T<n>` (`register_tool_macros:
+False`, Kobra X) the failure is reported to it as an error instead; it holds
+the print and offers its own retry.
+
 **If not printing:** Extruder heater is automatically turned off for safety.
 If printing, the idle time of the printer in PAUSE mode (before shutting down) is extended to a couple of hours to survive overnight pauses.
 Heatbed is left ON, but nozzle temp is reduced in PAUSE mode, so resuming / retry toolchange can take few minutes until the nozzle reaches print temperature again.
