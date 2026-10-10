@@ -140,7 +140,7 @@ def read_ace_config(config):
     )
     # False when a printer-side tool changer owns T<n> and reaches the ACE
     # through ACE_CHANGE_TOOL (Kobra X: [kx_toolchanger] maps its tools onto
-    # turret inlets, so its T3 can be ACE T0).
+    # turret inlets; behind three direct ones T3 is the first ACE slot).
     ace_config["register_tool_macros"] = config.getboolean(
         "register_tool_macros", True
     )
@@ -305,9 +305,29 @@ def read_ace_config(config):
     return ace_config
 
 
+# Printer tool number of the first ACE's slot 0. A printer-side tool changer
+# that puts its own tools first (Kobra X: the direct-fed inlets) owns it and
+# the manager sets it at klippy:connect; 0 without one. Process-global like
+# ACE_INSTANCES.
+_tool_base = 0
+
+
+def set_tool_base(base):
+    """Number the ACE tools from `base` on; every tool number ACEPRO takes
+    or shows follows. Raises ValueError for a negative base."""
+    global _tool_base
+    if base < 0:
+        raise ValueError(f"ACE tool base must be >= 0, got {base}")
+    _tool_base = base
+
+
+def get_tool_base():
+    return _tool_base
+
+
 def get_tool_offset(instance_num):
     """Get the first tool index managed by this instance."""
-    return instance_num * SLOTS_PER_ACE
+    return _tool_base + instance_num * SLOTS_PER_ACE
 
 
 def get_ace_instance_and_slot_for_tool(tool):
@@ -345,10 +365,10 @@ def get_instance_from_tool(tool_index):
     Returns:
         int: Instance number, or -1 if not managed by any instance
     """
-    if tool_index < 0:
+    if tool_index < _tool_base:
         return -1
 
-    instance_num = tool_index // SLOTS_PER_ACE
+    instance_num = (tool_index - _tool_base) // SLOTS_PER_ACE
 
     # Verify instance exists
     if instance_num in ACE_INSTANCES:
@@ -368,8 +388,7 @@ def get_local_slot(tool_index, instance_num):
     Returns:
         int: Local slot (0-3), or -1 if tool not managed by instance
     """
-    instance_offset = instance_num * SLOTS_PER_ACE
-    local_slot = tool_index - instance_offset
+    local_slot = tool_index - get_tool_offset(instance_num)
 
     if 0 <= local_slot < SLOTS_PER_ACE:
         return local_slot

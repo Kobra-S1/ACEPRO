@@ -14,6 +14,7 @@ from .config import (
     CHOICE_OVERRIDABLE_PARAMS,
     get_instance_from_tool,
     get_local_slot,
+    get_tool_base,
     get_tool_offset,
     get_ace_instance_and_slot_for_tool,
     parse_instance_config,
@@ -22,6 +23,7 @@ from .config import (
     create_inventory,
 )
 from .persistent_state import PersistentState
+from .tool_base import apply_tool_base
 from .intake_gated import (
     PATHS,
     PATHS_PER_TOOL,
@@ -357,6 +359,7 @@ class AceManager:
 
         # Register event handlers
         handler = self.printer.register_event_handler
+        handler("klippy:connect", self._handle_connect)
         handler("klippy:ready", self._handle_ready)
         handler("klippy:disconnect", self._handle_disconnect)
         handler("klippy:shutdown", self._handle_shutdown)
@@ -392,6 +395,16 @@ class AceManager:
         return self.printer
 
     # ========== Lifecycle ==========
+
+    def _handle_connect(self):
+        # Before any klippy:ready handler reads a tool number - the printer's
+        # tool changer reads ace_current_index at ready.
+        moved_from = apply_tool_base(self.printer, self.state)
+        if moved_from is not None:
+            self.gcode.respond_info(
+                f"ACE: Tools now start at T{get_tool_base()} "
+                f"(saved tool numbers moved from T{moved_from})"
+            )
 
     def _handle_ready(self):
         """

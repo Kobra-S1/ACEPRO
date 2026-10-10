@@ -205,7 +205,6 @@ class AceInstance:
             protocol=self.protocol,
             target_usb_location=target_usb_location,
         )
-        self.tool_offset = get_tool_offset(self.instance_num)
         if not self.transport_spec.shared_bus:
             self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)
         self.serial_mgr.set_on_connect_callback(self._on_ace_connect)
@@ -215,6 +214,12 @@ class AceInstance:
         # a status poll interleaved with the image transfer is a request the
         # bootloader cannot answer, and its timeouts feed the disconnect logic.
         self.firmware_update_active = False
+
+    @property
+    def tool_offset(self):
+        """Global tool number of this unit's slot 0. Looked up on use: the
+        tool base is set at klippy:connect, after the instance exists."""
+        return get_tool_offset(self.instance_num)
 
     def set_firmware_update_active(self, active):
         """Suspend (True) or resume (False) this box's shared-bus status polls."""

@@ -26,6 +26,16 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _reset_ace_tool_base():
+    """The tool base is process-global like ACE_INSTANCES; a test that sets
+    it must not renumber the tools of the tests after it."""
+    from ace import config
+    config.set_tool_base(0)
+    yield
+    config.set_tool_base(0)
+
+
+@pytest.fixture(autouse=True)
 def _reset_ace_connected_ports_registry():
     """Clear the process-global claimed-ports registry around every test.
 

@@ -81,6 +81,8 @@ extras/ace/
   - Instance 2: T8-T11 (slots 0-3)
   - Instance 3: T12-T15 (slots 0-3)
   - Instance N: ...
+  - All shifted by the tool base when a printer-side tool changer puts its
+    own tools first (see "Tool numbering behind a printer-side tool changer")
 - **Global State Management**:
   - `ace_filament_pos`: Tracks filament position ("bowden", "splitter", "toolhead", "nozzle")
 - `ace_current_index`: Currently active tool (-1 = none) — last **CONFIRMED** physically loaded tool
@@ -243,7 +245,7 @@ ensure_tool_slot_loaded(tool_index)         # Raise before homing/heating/feedin
 **Key Attributes:**
 ```python
 instance_num: int                   # 0, 1, 2, 3...
-tool_offset: int                    # First tool: 0, 4, 8, 12...
+tool_offset: int                    # First tool: base + 0, 4, 8, 12...
 SLOT_COUNT = 4                      # Fixed per ACE unit
 inventory: List[Dict]               # Per-slot: material, color, temp, status
 serial_mgr: AceSerialManager        # Communication handler
@@ -1114,7 +1116,8 @@ OVERRIDABLE_PARAMS = [
 **Helper Functions:**
 ```python
 # Tool Mapping
-get_tool_offset(instance_num)                        # → instance_num * 4
+set_tool_base(base)                                  # first ACE tool (klippy:connect)
+get_tool_offset(instance_num)                        # → base + instance_num * 4
 get_instance_from_tool(tool_index)                   # T7 → instance 1
 get_local_slot(tool_index, instance)                 # T7, instance 1 → slot 3
 get_ace_instance_and_slot_for_tool(tool)             # T7 → (instance_obj, slot 3)
@@ -1839,14 +1842,15 @@ initial `lane_data` snapshot.
 
 ### Printer-side lane writer (Kobra X)
 
-A printer whose tool numbers are not ACE tool numbers publishes the lanes
-itself: the Kobra X's `[kx_filament]` (Kobra Klipper fork) maps printer
-`T<n>` onto turret inlets, so its `T3` can be ACE `T0`. ACEPRO then keeps
+A printer whose tools are not all ACE slots publishes the lanes itself: the
+Kobra X's `[kx_filament]` (Kobra Klipper fork) maps printer `T<n>` onto
+turret inlets, direct-fed ones included. ACEPRO then keeps
 `moonraker_lane_sync_enabled: False` (two writers delete each other's lanes)
 and offers its entries instead, with no import either way:
 
 - `ace_state` status `lanes`: `MoonrakerLaneSyncAdapter.lane_entries()`, the
-  entries above as a list indexed by ACE tool, built also with the sync off.
+  entries above as a list in slot order (first unit's slot 0 first), built
+  also with the sync off.
 - Event `ace:lanes_changed`: sent from `manager._sync_moonraker_lane_data()`
   on every call, before the sync itself, so a disabled sync still announces
   the change.
@@ -1958,12 +1962,42 @@ know the paths; it announces the tool and the printer config acts.
   between `CUT_TIP` and the unload retract (Kobra X: to the purge position).
 - The printer side reads the loaded tool back from `ace_state` status
   `current_index`.
-- The KlipperScreen panel shows and sends printer tool numbers: ACE tool +
-  `ace_tool_offset` from the status of the printer's tool changer
-  (`TOOL_CHANGER` in `KlipperScreen/acepro.py`), 0 when that object does not
-  exist. ACE commands (`ACE_SET_SLOT`, `ACE_FEED`, ...) keep ACE numbers.
 
-Proof: `tests/test_tool_route_hook.py`,
+Proof: `tests/test_tool_route_hook.py`.
+
+### Tool numbering behind a printer-side tool changer
+
+The ACE's tools are numbered as the printer numbers them. A printer-side tool
+changer that puts its own tools first (Kobra X: `[kx_toolchanger]`, direct-fed
+turret inlets) owns the number of the first ACE slot and returns it from
+`ace_tool_offset()`; three direct inlets make the first unit `T3-T6`, a
+second unit `T7-T10`. Without that object the ACE starts at `T0`.
+
+- `tool_base.apply_tool_base()` reads it at `klippy:connect`, before any
+  `klippy:ready` handler reads a tool number, and sets
+  `config.set_tool_base()`. Every number ACEPRO takes or shows follows: `T=`
+  and `TOOL=` of its commands, `ACE_QUERY_SLOTS`, its messages, `ace_state`
+  `current_index`/`target_index`, the lane numbers, the `_ACE_ROUTE_TOOL`
+  hook. The printer-side tool changer sends and reads the same numbers.
+- Code that maps a tool number to a unit and slot goes through `config.py`
+  (`get_tool_offset`, `get_instance_from_tool`, `get_local_slot`); code
+  that cannot (endless spool's wrap-around, the runout monitor's
+  resolution, range checks) starts from the base, never from 0.
+- Saved tool numbers (`ace_current_index`, `ace_target_index`,
+  `ace_parked_tools`) carry the base they were written under in
+  `ace_tool_base` and are moved to the current one at start, so a changed
+  tool changer layout keeps the loaded tool.
+- The KlipperScreen panel reads the same offset from the tool changer's
+  status (`TOOL_CHANGER` in `KlipperScreen/acepro.py`), numbers its slots
+  from it and shows and sends those numbers unchanged.
+
+Rejected: translating at the edges (commands and messages in printer
+numbers, ACE numbers inside). The numbering already had a per-unit start
+for daisy-chained units; a base on that start moves every number at once,
+where the edge translation needed every message site converted by hand.
+
+Proof: `tests/test_tool_base.py`, `TestToolBase` in
+`tests/test_config_utils.py`,
 `tests/test_klipperscreen_printer_tool_numbers.py`.
 
 ### Config (`[ace]`)

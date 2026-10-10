@@ -42,6 +42,7 @@ from .config import (
     SLOTS_PER_ACE,
     get_instance_from_tool,
     get_local_slot,
+    get_tool_base,
     ACE_INSTANCES,
 )
 
@@ -806,10 +807,10 @@ class RunoutMonitor:
                 # fall through to the first-match scan below, i.e. exactly
                 # the wrong-instance behavior this resolution exists to
                 # prevent.  manager.instances is the authority here.
-                inst_num = current_tool // SLOTS_PER_ACE
-                if inst_num < len(instances):
+                inst_num, slot = divmod(current_tool - get_tool_base(),
+                                        SLOTS_PER_ACE)
+                if 0 <= inst_num < len(instances):
                     inst = instances[inst_num]
-                    slot = current_tool % SLOTS_PER_ACE
                     if getattr(inst, "_feed_assist_index", -1) == slot:
                         return inst
                     # Assist not on the loaded tool's slot: nothing valid

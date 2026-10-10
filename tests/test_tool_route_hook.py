@@ -233,7 +233,6 @@ class TestFeedHandsOverToTheExtruder(unittest.TestCase):
         )
         instance = object.__new__(AceInstance)
         instance.instance_num = 1
-        instance.tool_offset = 4
         instance.gcode = Mock()
         instance._info = {"slots": [{"index": i, "status": "ready"} for i in range(4)]}
         instance.dwell = Mock()

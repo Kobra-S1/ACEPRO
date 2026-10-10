@@ -224,8 +224,9 @@ class MoonrakerLaneSyncAdapter:
                 for lane_index, entry in self._lane_entries_by_tool()}
 
     def lane_entries(self):
-        """Lane entries indexed by ACE tool number, independent of whether
-        this adapter writes to Moonraker. A printer-side tool changer that
+        """Lane entries in slot order (first unit's slot 0 first),
+        independent of whether this adapter writes to Moonraker. A
+        printer-side tool changer that
         owns the printer's tool numbers (Kobra X [kx_filament]) reads these
         through the ace_state status and publishes them under its own keys.
         """

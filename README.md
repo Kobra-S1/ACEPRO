@@ -645,8 +645,11 @@ driven by the Kobra Klipper fork, not by this driver.
   alone pushes a filament to the inlet switch the turret stays home
   (`FEEDER=ACE`), and engages once the switch has it. Raw `ACE_FEED` and
   `ACE_RETRACT` do not turn it.
-- **The ACE panel uses printer tool numbers.** With direct-fed inlets before
-  the ACE, slot 0 of the first unit is shown and loaded as `T3`, not `T0`.
+- **ACE tools use printer tool numbers.** With direct-fed inlets before the
+  ACE, ACEPRO numbers the ACE slots after them (`ace_tool_offset` of
+  `[kx_toolchanger]`): behind three direct inlets slot 0 of the first unit
+  is `T3`, not `T0`, in the panel, in `ACE_QUERY_SLOTS`, in `T=`/`TOOL=` of
+  every ACE command and in its messages; a second unit follows at `T7`.
 - **Combo setup with the RDM.** With the ACE slots merged onto one inlet
   (`inlet4: ace` in `kx_multimaterial.cfg`), the mainboard's RDM connector
   gives filament presence and movement at the merge point: uncomment
@@ -764,6 +767,9 @@ Each unit is automatically detected by USB topology and assigned:
 - **Instance 1**: T4-T7 (second ACE connected)
 - **Instance 2**: T8-T11 (third ACE connected)
 - **Instance 3**: T12-T15 (fourth ACE connected)
+
+Behind a printer-side tool changer with tools of its own (Kobra X direct
+inlets) the numbering starts after those, see the Kobra X section.
 
 **Multiple Instance Example:**
 ```ini

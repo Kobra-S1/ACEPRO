@@ -27,6 +27,8 @@ from .config import (
     RFID_STATE_IDENTIFYING,
     get_instance_from_tool,
     get_local_slot,
+    get_tool_offset,
+    SLOTS_PER_ACE,
     OVERRIDABLE_PARAMS,
 )
 
@@ -949,8 +951,7 @@ def cmd_ACE_QUERY_SLOTS(gcmd):
         if not ace_connected and status != 'empty':
             status = '???'
 
-        # Calculate tool number: instance 0 slot 0 = T0, instance 1 slot 0 = T4, etc.
-        tool_num = (inst_num * 4) + idx
+        tool_num = get_tool_offset(inst_num) + idx
 
         # Plain text values for padding calculations
         status_text = '-----' if status == 'empty' else status
@@ -1288,6 +1289,16 @@ def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
     gcmd.respond_info(f"ACE[{ace.instance_num}]: Active toolhead state reset")
 
 
+def _check_ace_tool(gcmd, tool):
+    """Refuse a TOOL= that is neither -1 (none) nor one of the ACE's tools."""
+    first = get_tool_offset(0)
+    last = first + len(ACE_INSTANCES) * SLOTS_PER_ACE - 1
+    if tool != -1 and not (first <= tool <= last):
+        raise gcmd.error(
+            f"TOOL={tool} is out of range. Valid: -1 (none) or T{first}-T{last}"
+        )
+
+
 def cmd_ACE_DEBUG_SET_CURRENT_INDEX(gcmd):
     """Manually override ace_current_index.
 
@@ -1306,12 +1317,7 @@ def cmd_ACE_DEBUG_SET_CURRENT_INDEX(gcmd):
     # Default -1 = no tool loaded
     tool = gcmd.get_int("TOOL", default=-1)
 
-    # Validate range
-    total_tools = len(ACE_INSTANCES) * 4
-    if tool != -1 and not (0 <= tool < total_tools):
-        raise gcmd.error(
-            f"TOOL={tool} is out of range. Valid range: -1 (none) to {total_tools - 1}"
-        )
+    _check_ace_tool(gcmd, tool)
 
     prev = manager.state.get("ace_current_index", -1)
     manager.state.set_and_save("ace_current_index", tool)
@@ -1347,12 +1353,7 @@ def cmd_ACE_DEBUG_SET_TARGET_INDEX(gcmd):
     # Default -1 = no toolchange in flight
     tool = gcmd.get_int("TOOL", default=-1)
 
-    # Validate range
-    total_tools = len(ACE_INSTANCES) * 4
-    if tool != -1 and not (0 <= tool < total_tools):
-        raise gcmd.error(
-            f"TOOL={tool} is out of range. Valid range: -1 (none) to {total_tools - 1}"
-        )
+    _check_ace_tool(gcmd, tool)
 
     prev = manager.state.get("ace_target_index", -1)
     manager.state.set_and_save("ace_target_index", tool)

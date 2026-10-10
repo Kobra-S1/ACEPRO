@@ -11,6 +11,7 @@ from ace.config import (
     get_tool_offset,
     get_instance_from_tool,
     get_local_slot,
+    set_tool_base,
     normalize_ace_slot_state,
     parse_instance_baud_config,
     parse_instance_number,
@@ -142,6 +143,40 @@ class TestGetLocalSlot:
         assert get_local_slot(5, instance_num=1) == 1
         # T10 in instance 2: 10 - (2 * 4) = 2
         assert get_local_slot(10, instance_num=2) == 2
+
+
+class TestToolBase:
+    """Behind a printer-side tool changer that puts its own tools first
+    (Kobra X: three direct inlets), the ACE's tools start at its offset:
+    the first ACE's slot 2 is printer T5, not T2."""
+
+    @pytest.fixture(autouse=True)
+    def two_instances(self):
+        ACE_INSTANCES.clear()
+        ACE_INSTANCES.update({0: {}, 1: {}})
+        set_tool_base(3)
+        yield
+        ACE_INSTANCES.clear()
+
+    def test_the_first_ace_starts_at_the_base(self):
+        assert get_tool_offset(0) == 3
+        assert get_instance_from_tool(5) == 0
+        assert get_local_slot(5, instance_num=0) == 2
+
+    def test_a_daisy_chained_ace_follows_the_first(self):
+        assert get_tool_offset(1) == 7
+        assert get_instance_from_tool(7) == 1
+        assert get_local_slot(10, instance_num=1) == 3
+        assert get_instance_from_tool(11) == -1
+
+    def test_the_tool_changers_own_tools_belong_to_no_ace(self):
+        for tool in (0, 1, 2):
+            assert get_instance_from_tool(tool) == -1, tool
+            assert get_local_slot(tool, instance_num=0) == -1, tool
+
+    def test_a_negative_base_is_refused(self):
+        with pytest.raises(ValueError):
+            set_tool_base(-1)
 
 
 class TestParseInstanceNumber:

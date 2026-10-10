@@ -11,8 +11,9 @@ from ks_includes.widgets.keypad import Keypad  # noqa: E402
 
 
 # A printer-side tool changer that puts tools of its own before the ACE's
-# (Kobra X: direct-fed turret inlets) reports how many in its status; absent
-# on every other printer, where printer and ACE tool numbers are the same.
+# (Kobra X: direct-fed turret inlets) reports how many in its status; ACEPRO
+# numbers its tools from there, and so does the panel. Absent on every other
+# printer: the ACE starts at T0.
 TOOL_CHANGER = "kx_toolchanger"
 
 
@@ -76,8 +77,9 @@ class Panel(ScreenPanel):
 
         # Global state
         self.current_loaded_slot = -1
-        # Added to an ACE tool number to get the printer's (see TOOL_CHANGER).
-        # Unknown until the first status reply; slot taps wait for it.
+        # Printer tool number of the first ACE's slot 0 (see TOOL_CHANGER);
+        # ACEPRO numbers its tools from it too. Unknown until the first
+        # status reply; slot taps wait for it.
         self.printer_tool_offset = 0
         self.printer_tools_known = False
         self.target_tool_index = -1  # -1 = no toolchange in flight/unconfirmed
@@ -473,6 +475,8 @@ class Panel(ScreenPanel):
                 self.printer_tools_known = True
                 if offset != self.printer_tool_offset:
                     self.printer_tool_offset = offset
+                    for instance_id, data in self.instance_data.items():
+                        data['tool_offset'] = offset + instance_id * 4
                     self.update_slot_loaded_states()
 
             # Global/manager state
@@ -1334,30 +1338,24 @@ class Panel(ScreenPanel):
         color = Gdk.RGBA(r/255.0, g/255.0, b/255.0, 1.0)
         color_box.override_background_color(Gtk.StateFlags.NORMAL, color)
 
-    def _printer_tool(self, global_tool):
-        """The printer's tool number for an ACE tool: what the user sees and
-        what T<n> takes. ACE commands keep the ACE's own number."""
-        return global_tool + self.printer_tool_offset
-
     def _load_tool(self, global_tool):
-        printer_tool = self._printer_tool(global_tool)
-        self._send_gcode(f"T{printer_tool}")
-        self._screen.show_popup_message(f"Loading T{printer_tool}...", 1)
+        self._send_gcode(f"T{global_tool}")
+        self._screen.show_popup_message(f"Loading T{global_tool}...", 1)
 
     def _format_tool_label(self, global_tool, slot_data):
         """Return tool label; RFID shown on second line when applicable."""
         rfid = " (RFID)" if slot_data.get('rfid') else ""
-        return f"T{self._printer_tool(global_tool)}{rfid}"
+        return f"T{global_tool}{rfid}"
 
     def _format_tool_label_markup(self, global_tool, slot_data, loaded=False):
         """Return pango markup for tool label with RFID on its own smaller line."""
         if slot_data.get('rfid'):
             if loaded:
-                return f'<b><span foreground="#4CAF50">T{self._printer_tool(global_tool)}</span></b>\n<span size="small" foreground="#4CAF50">(RFID)</span>'
-            return f'<b>T{self._printer_tool(global_tool)}</b>\n<span size="small" foreground="#aaaaaa">(RFID)</span>'
+                return f'<b><span foreground="#4CAF50">T{global_tool}</span></b>\n<span size="small" foreground="#4CAF50">(RFID)</span>'
+            return f'<b>T{global_tool}</b>\n<span size="small" foreground="#aaaaaa">(RFID)</span>'
         if loaded:
-            return f'<b><span foreground="#4CAF50">T{self._printer_tool(global_tool)}</span></b>'
-        return f'T{self._printer_tool(global_tool)}'
+            return f'<b><span foreground="#4CAF50">T{global_tool}</span></b>'
+        return f'T{global_tool}'
 
     def _set_slot_visual_state(self, instance_id, local_slot, is_ready):
         """Dim empty slots to make them less prominent."""
@@ -1446,9 +1444,9 @@ class Panel(ScreenPanel):
         if hasattr(self, 'status_label'):
             target = getattr(self, 'target_tool_index', -1)
             if target != -1 and target != current_loaded:
-                self.status_label.set_text(f"ACE: Toolchange to T{self._printer_tool(target)} unconfirmed")
+                self.status_label.set_text(f"ACE: Toolchange to T{target} unconfirmed")
             elif current_loaded != -1:
-                self.status_label.set_text(f"ACE: Tool T{self._printer_tool(current_loaded)} Loaded")
+                self.status_label.set_text(f"ACE: Tool T{current_loaded} Loaded")
             else:
                 self.status_label.set_text("ACE: No Tool Loaded")
 
@@ -1523,9 +1521,9 @@ class Panel(ScreenPanel):
             return
 
         current_loaded = self.get_current_loaded_slot()
-        message = f"Load Tool T{self._printer_tool(global_tool)}?\n\n{slot_info}"
+        message = f"Load Tool T{global_tool}?\n\n{slot_info}"
         if current_loaded != -1:
-            message += f"\n\nCurrent: T{self._printer_tool(current_loaded)}"
+            message += f"\n\nCurrent: T{current_loaded}"
 
         label = Gtk.Label(label=message)
         label.set_line_wrap(True)
@@ -1541,7 +1539,7 @@ class Panel(ScreenPanel):
             if response_id == Gtk.ResponseType.OK:
                 self._load_tool(global_tool)
 
-        self._gtk.Dialog(f"Load Tool T{self._printer_tool(global_tool)}", buttons, label, load_response)
+        self._gtk.Dialog(f"Load Tool T{global_tool}", buttons, label, load_response)
 
     def _sensors_indicate_no_filament(self):
         """Return True if any configured sensor reports filament absent.
@@ -1655,7 +1653,7 @@ class Panel(ScreenPanel):
                 f"but sensors report clear ({_sensor_summary()})"
             )
             message = (
-                f"⚠ Inconsistent state for T{self._printer_tool(global_tool)}\n\n"
+                f"⚠ Inconsistent state for T{global_tool}\n\n"
                 f"{slot_info}\n\n"
                 f"ACE tool state is indicatingloaded, but the filament sensors "
                 f"report no filament ({_sensor_summary()}).\n\n"
@@ -1685,13 +1683,13 @@ class Panel(ScreenPanel):
                     self._screen.show_popup_message("Unloading...", 1)
 
             self._gtk.Dialog(
-                f"Inconsistent State — T{self._printer_tool(global_tool)}",
+                f"Inconsistent State — T{global_tool}",
                 buttons, label, inconsistency_response
             )
             return
 
         # Normal case: sensors confirm filament is present — straightforward unload
-        message = f"Unload Tool T{self._printer_tool(global_tool)}?\n\n{slot_info}"
+        message = f"Unload Tool T{global_tool}?\n\n{slot_info}"
 
         label = Gtk.Label(label=message)
         label.set_line_wrap(True)
@@ -1708,7 +1706,7 @@ class Panel(ScreenPanel):
                 self._send_gcode("TR")
                 self._screen.show_popup_message("Unloading...", 1)
 
-        self._gtk.Dialog(f"Unload Tool T{self._printer_tool(global_tool)}", buttons, label, unload_response)
+        self._gtk.Dialog(f"Unload Tool T{global_tool}", buttons, label, unload_response)
 
     def show_slot_settings(self, widget, instance_id, local_slot):
         """Show slot configuration screen"""
@@ -2089,12 +2087,12 @@ class Panel(ScreenPanel):
         if active_index < 0:
             listbox.select_row(none_row)
 
-        for tool_index in range(self.total_slots):
-            instance_id = tool_index // 4
-            local_slot = tool_index % 4
+        for slot_number in range(self.total_slots):
+            instance_id, local_slot = divmod(slot_number, 4)
+            tool_index = self.printer_tool_offset + slot_number
             slot_status = self.instance_data.get(instance_id, {}).get('inventory', [{}] * 4)[local_slot].get('status', 'ready')
             is_empty = slot_status == 'empty'
-            label_text = f"T{self._printer_tool(tool_index)}" if not is_empty else f"T{self._printer_tool(tool_index)} (empty)"
+            label_text = f"T{tool_index}" if not is_empty else f"T{tool_index} (empty)"
             markup = label_text if not is_empty else f"<span foreground='gray'>{label_text}</span>"
 
             row = Gtk.ListBoxRow()
@@ -2122,7 +2120,7 @@ class Panel(ScreenPanel):
         popover.show_all()
         popover.popdown()
         tool_button.set_popover(popover)
-        tool_button.set_label("Not selected" if active_index < 0 else f"T{self._printer_tool(active_index)}")
+        tool_button.set_label("Not selected" if active_index < 0 else f"T{active_index}")
 
         self.spool_tool_button = tool_button
         self.spool_tool_popover = popover
@@ -2267,7 +2265,7 @@ class Panel(ScreenPanel):
         else:
             self.spool_selected_tool = tool_index
             if getattr(self, "spool_tool_button", None):
-                self.spool_tool_button.set_label(f"T{self._printer_tool(self.spool_selected_tool)}")
+                self.spool_tool_button.set_label(f"T{self.spool_selected_tool}")
 
         if getattr(self, "spool_tool_popover", None):
             self.spool_tool_popover.popdown()
@@ -2292,7 +2290,7 @@ class Panel(ScreenPanel):
         sent = self._send_gcode(cmd)
         if sent:
             logging.info(f"ACE: Sent {cmd}")
-            msg = "Smart unload" if tool is None else f"Smart unload T{self._printer_tool(tool)}"
+            msg = "Smart unload" if tool is None else f"Smart unload T{tool}"
             self._screen.show_popup_message(msg, 1)
         else:
             logging.error(f"ACE: Failed to send {cmd}")
@@ -2307,35 +2305,35 @@ class Panel(ScreenPanel):
         if tool is None:
             return
         self._send_gcode(f"ACE_FULL_UNLOAD TOOL={tool}")
-        self._screen.show_popup_message(f"Full unload T{self._printer_tool(tool)}", 1)
+        self._screen.show_popup_message(f"Full unload T{tool}", 1)
 
     def spool_enable_feed_assist(self, widget):
         tool = self._spool_selected_tool_or_popup()
         if tool is None:
             return
         self._send_gcode(f"ACE_ENABLE_FEED_ASSIST T={tool}")
-        self._screen.show_popup_message(f"Feed assist ON T{self._printer_tool(tool)}", 1)
+        self._screen.show_popup_message(f"Feed assist ON T{tool}", 1)
 
     def spool_disable_feed_assist(self, widget):
         tool = self._spool_selected_tool_or_popup()
         if tool is None:
             return
         self._send_gcode(f"ACE_DISABLE_FEED_ASSIST T={tool}")
-        self._screen.show_popup_message(f"Feed assist OFF T{self._printer_tool(tool)}", 1)
+        self._screen.show_popup_message(f"Feed assist OFF T{tool}", 1)
 
     def spool_stop_feed(self, widget):
         tool = self._spool_selected_tool_or_popup()
         if tool is None:
             return
         self._send_gcode(f"ACE_STOP_FEED T={tool}")
-        self._screen.show_popup_message(f"Stop feed T{self._printer_tool(tool)}", 1)
+        self._screen.show_popup_message(f"Stop feed T{tool}", 1)
 
     def spool_stop_retract(self, widget):
         tool = self._spool_selected_tool_or_popup()
         if tool is None:
             return
         self._send_gcode(f"ACE_STOP_RETRACT T={tool}")
-        self._screen.show_popup_message(f"Stop retract T{self._printer_tool(tool)}", 1)
+        self._screen.show_popup_message(f"Stop retract T{tool}", 1)
 
     def spool_enable_rfid_sync(self, widget):
         self.rfid_sync_enabled = True
@@ -2438,7 +2436,7 @@ class Panel(ScreenPanel):
         cmd = "ACE_FEED" if is_feed else "ACE_RETRACT"
         self._send_gcode(f"{cmd} T={tool} LENGTH={length}")
         action = "Feeding" if is_feed else "Retracting"
-        self._screen.show_popup_message(f"{action} {length}mm on T{self._printer_tool(tool)}", 1)
+        self._screen.show_popup_message(f"{action} {length}mm on T{tool}", 1)
         GLib.timeout_add(200, self.return_to_spool_panel)
 
     def _create_dryer_instance_control(self, instance_id):
@@ -2931,7 +2929,7 @@ class Panel(ScreenPanel):
             main_box.set_margin_bottom(3)
 
             # Title
-            config_title = Gtk.Label(label=f"Configure T{self._printer_tool(global_tool)}")
+            config_title = Gtk.Label(label=f"Configure T{global_tool}")
             config_title.get_style_context().add_class("description")
             main_box.pack_start(config_title, False, False, 0)
 
@@ -3036,7 +3034,7 @@ class Panel(ScreenPanel):
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
 
         # Compact title for left column
-        config_title = Gtk.Label(label=f"Configure T{self._printer_tool(global_tool)}")
+        config_title = Gtk.Label(label=f"Configure T{global_tool}")
         config_title.get_style_context().add_class("description")
         left_box.pack_start(config_title, False, False, 0)
 
@@ -3500,7 +3498,7 @@ class Panel(ScreenPanel):
         self._send_gcode(gcode)
 
         self._screen.show_popup_message(
-            f"✓ T{self._printer_tool(global_tool)} saved: {material} {temp}°C", 1
+            f"✓ T{global_tool} saved: {material} {temp}°C", 1
         )
 
         # Return to main after brief delay
