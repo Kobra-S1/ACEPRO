@@ -18,6 +18,7 @@ import time
 
 from ace.manager import AceManager, toolchange_in_progress_guard
 from ace.config import (
+    SLOT_PARK_STATE_PARKED,
     ACE_INSTANCES,
     INSTANCE_MANAGERS,
     SLOTS_PER_ACE,
@@ -5346,6 +5347,35 @@ class TestSmartLoad(unittest.TestCase):
         manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_SPLITTER)
         manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_BOWDEN)
         manager.state.set.assert_any_call("ace_current_index", -1)
+
+    def _smart_load_one_slot(self, retract_early_stopped):
+        instance = self._make_instance()
+        instance._last_retract_early_stopped = retract_early_stopped
+        manager = self._build_manager(lambda *a, **k: instance)
+        manager.state.set = Mock()
+        manager.instances[0].inventory = [
+            {"status": "ready"},
+            {"status": "empty"},
+            {"status": "empty"},
+            {"status": "empty"},
+        ]
+        manager.has_rdm_sensor = Mock(return_value=True)
+        manager.get_switch_state = Mock(return_value=True)  # sensor triggered
+        manager.is_filament_path_free = Mock(return_value=True)
+        manager.smart_load()
+        return instance
+
+    def test_parked_slot_is_marked_parked(self):
+        instance = self._smart_load_one_slot(retract_early_stopped=False)
+
+        instance.set_slot_park_state.assert_called_once_with(0, SLOT_PARK_STATE_PARKED)
+
+    def test_retract_cut_short_by_empty_slot_is_not_marked_parked(self):
+        """Runout mid smart load: _retract() stopped on the slot's empty report,
+        the path is clear, but the filament was not parked."""
+        instance = self._smart_load_one_slot(retract_early_stopped=True)
+
+        instance.set_slot_park_state.assert_not_called()
 
     def test_sensor_not_triggered_safety_retract(self):
         instance = self._make_instance()

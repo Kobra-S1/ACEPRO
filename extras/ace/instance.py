@@ -1419,9 +1419,8 @@ class AceInstance:
             )
             self._restore_assist_after_unload(manager, f_index)
             # If the sensor already cleared, the physical unload succeeded
-            # even if wait_ready timed out afterward
-            if rdm_state["cleared"]:
-                self.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
+            # even if wait_ready timed out afterward. The end position is
+            # unconfirmed though, so park_state stays unknown.
             return rdm_state["cleared"]
 
         self._restore_assist_after_unload(manager, f_index)
@@ -1582,7 +1581,8 @@ class AceInstance:
                     self.gcode.respond_info(
                         f"ACE[{self.instance_num}]: ✓ Path clear (both sensors)"
                     )
-                    self.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
+                    if not self._last_retract_early_stopped:
+                        self.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
                     return True
                 else:
                     if not self.rmd_triggered_unload_slot(self.manager, slot, length, self.parkposition_to_rdm_length):
@@ -1616,7 +1616,8 @@ class AceInstance:
                     self.gcode.respond_info(
                         f"ACE[{self.instance_num}]: ✓ Toolhead sensor clear"
                     )
-                    self.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
+                    if not self._last_retract_early_stopped:
+                        self.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
                     return True
                 else:
                     self.gcode.respond_info(
@@ -1792,8 +1793,17 @@ class AceInstance:
                     if old_status != new_status:
                         inventory_changed = True
                         # A spool was inserted or ran out: whatever position we
-                        # knew for this slot no longer applies.
-                        self.set_slot_park_state(idx, SLOT_PARK_STATE_UNKNOWN)
+                        # knew for this slot no longer applies. Motion states
+                        # (shifting/feeding/unwinding) are not spool changes:
+                        # every commanded move walks the slot through them,
+                        # and an ACE 2 reports shifting for as long as feed
+                        # assist is on. Those moves are covered by the hooks
+                        # in _feed()/_retract().
+                        if (
+                            old_status == AceSlotStateMachineState.EMPTY.value
+                            or new_status == AceSlotStateMachineState.EMPTY.value
+                        ):
+                            self.set_slot_park_state(idx, SLOT_PARK_STATE_UNKNOWN)
 
                         # ANY slot reaching ready means a (pre)load cycle just
                         # finished - the ACE hardware disables feed assist

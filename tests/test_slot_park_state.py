@@ -260,5 +260,102 @@ class TestSlotParkState(unittest.TestCase):
         self.assertEqual(instance.slot_park_state[1], SLOT_PARK_STATE_PARKED)
 
 
+    # --- motion states are not spool changes ----------------------------------------
+
+    @patch('ace.instance.AceSerialManager')
+    def test_motion_transitions_keep_known_state(self, mock_serial_mgr_class):
+        """Hardware (ACE Pro V1.3.863, ACE 2 V1.1.31): every commanded move walks
+        the slot through shifting/unwinding/feeding and back to ready, and an
+        ACE 2 reports shifting for as long as feed assist is on. None of these
+        say anything about where the filament was left."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        for idx in (1, 2):
+            instance.inventory[idx].update({'status': 'ready', 'material': 'PLA', 'color': [1, 2, 3], 'temp': 210})
+        instance.set_slot_park_state(1, SLOT_PARK_STATE_PARKED)
+        instance.set_slot_park_state(2, SLOT_PARK_STATE_LOADED)
+
+        for status in ('shifting', 'unwinding', 'ready'):
+            instance._status_update_callback({'result': {'slots': [{'index': 1, 'status': status}]}})
+        instance._status_update_callback({'result': {'slots': [{'index': 2, 'status': 'shifting'}]}})
+
+        self.assertEqual(instance.slot_park_state[1], SLOT_PARK_STATE_PARKED)
+        self.assertEqual(instance.slot_park_state[2], SLOT_PARK_STATE_LOADED)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_spool_insert_resets_to_unknown(self, mock_serial_mgr_class):
+        """Companion to the motion filter: a slot leaving empty is a new spool."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance.inventory[0].update({'status': 'empty'})
+        instance.inventory[1].update({'status': 'empty'})
+        instance.set_slot_park_state(0, SLOT_PARK_STATE_PARKED)
+        instance.set_slot_park_state(1, SLOT_PARK_STATE_PARKED)
+
+        instance._status_update_callback({'result': {'slots': [
+            {'index': 0, 'status': 'preload'},
+            {'index': 1, 'status': 'ready'},
+        ]}})
+
+        self.assertEqual(instance.slot_park_state[0], SLOT_PARK_STATE_UNKNOWN)
+        self.assertEqual(instance.slot_park_state[1], SLOT_PARK_STATE_UNKNOWN)
+
+    # --- a retract the slot sensor cut short is not a park -----------------------------
+
+    @patch('ace.instance.AceSerialManager')
+    def test_smart_unload_stopped_by_empty_slot_is_not_parked(self, mock_serial_mgr_class):
+        """Runout during an unload: _retract() stops early on the empty report.
+        The inventory is already 'empty' by then, so nothing would ever reset a
+        wrongly written 'parked'."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        manager = Mock()
+        manager.has_rdm_sensor.return_value = True
+        manager.get_switch_state.side_effect = lambda sensor: False  # path clear
+        INSTANCE_MANAGERS[0] = manager
+        monitor = Mock(return_value=None)
+        monitor.get_timing.return_value = None
+        monitor.get_call_count.return_value = 3
+        instance._make_sensor_trigger_monitor = Mock(return_value=monitor)
+        instance._disable_feed_assist = Mock()
+        instance.dwell = Mock()
+
+        def mock_retract(slot, *args, **kwargs):
+            instance.set_slot_park_state(slot, SLOT_PARK_STATE_UNKNOWN)
+            instance._last_retract_early_stopped = True
+            return {'code': 0, 'msg': 'Retract stopped early: slot empty'}
+        instance._retract = Mock(side_effect=mock_retract)
+
+        instance._smart_unload_slot(1, length=100)
+
+        self.assertEqual(instance.slot_park_state[1], SLOT_PARK_STATE_UNKNOWN)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_rdm_unload_exception_after_clear_is_not_parked(self, mock_serial_mgr_class):
+        """RDM cleared but _retract() then raised (e.g. wait_ready timeout):
+        the end position is unconfirmed, so the slot stays unknown."""
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        manager = Mock()
+        manager.has_rdm_sensor.return_value = True
+        manager.get_instant_switch_state = Mock(return_value=False)  # RDM clears
+        instance._disable_feed_assist = Mock()
+        instance._get_current_feed_assist_index = Mock(return_value=-1)
+        instance._update_feed_assist = Mock()
+        instance._stop_retract = Mock()
+
+        def mock_retract(slot, length, speed, early_stop_callback=None):
+            instance.set_slot_park_state(slot, SLOT_PARK_STATE_UNKNOWN)
+            if early_stop_callback:
+                early_stop_callback()
+            raise TimeoutError("wait_ready timed out")
+        instance._retract = Mock(side_effect=mock_retract)
+
+        times = self._time_generator(step=0.4)
+        with patch('ace.instance.time.time', side_effect=lambda: next(times)):
+            result = instance.rmd_triggered_unload_slot(manager, slot=1, length=100, overshoot_length=20)
+
+        self.assertTrue(result)  # physical unload did succeed
+        self.assertEqual(instance.slot_park_state[1], SLOT_PARK_STATE_UNKNOWN)
+
+
 if __name__ == '__main__':
     unittest.main()

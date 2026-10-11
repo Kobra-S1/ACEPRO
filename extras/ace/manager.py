@@ -1980,7 +1980,9 @@ class AceManager:
                         continue
 
                     self.gcode.respond_info(f"ACE[{instance.instance_num}]: " f"Slot {slot} loaded successfully")
-                    instance.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
+                    # A retract the slot's empty report cut short did not park anything
+                    if not instance._last_retract_early_stopped:
+                        instance.set_slot_park_state(slot, SLOT_PARK_STATE_PARKED)
                     success_count += 1
 
                 except Exception as e:
