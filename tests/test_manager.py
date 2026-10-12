@@ -2891,6 +2891,35 @@ class TestPerformToolChange(unittest.TestCase):
         # The heat guard must run before the unload.
         self.assertEqual(call_order[:2], ['heat', 'unload'])
 
+    @patch('ace.manager.AceInstance')
+    @patch('ace.manager.EndlessSpool')
+    def test_plausibility_unload_restores_target_before_pre_macro(self, mock_endless_spool, mock_ace_instance):
+        """After a recovery heat-up the previous nozzle target (0 = manual change)
+        must be restored before _ACE_PRE_TOOLCHANGE, otherwise PRE treats the
+        recovery temperature as a print temperature and POST keeps the nozzle hot."""
+        manager = AceManager(self.mock_config)
+        self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
+        manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
+        manager._ensure_hot_for_recovery_unload = Mock(return_value=0.0)
+        manager.smart_unload = Mock(return_value=True)
+
+        mock_instance = Mock()
+        mock_instance.instance_num = 0
+        mock_instance.inventory = {1: {'status': 'loaded', 'temp': 250}}
+        mock_instance._feed_filament_into_toolhead = Mock(return_value=5.0)
+        mock_instance._enable_feed_assist = Mock()
+        manager.instances[0] = mock_instance
+
+        with patch('ace.manager.get_ace_instance_and_slot_for_tool') as mock_get_ace:
+            mock_get_ace.return_value = (mock_instance, 1)
+            manager.check_and_wait_for_spool_ready = Mock(return_value=True)
+            manager.perform_tool_change(current_tool=-1, target_tool=1)
+
+        scripts = [c[0][0] for c in manager.gcode.run_script_from_command.call_args_list]
+        restore = scripts.index("M104 S0")
+        pre = next(i for i, sc in enumerate(scripts) if sc.startswith("_ACE_PRE_TOOLCHANGE"))
+        self.assertLess(restore, pre)
+
     def _inject_extruder(self, manager, cur_temp, min_temp=170.0):
         """Make printer.lookup_object('extruder') return a heater at cur_temp."""
         heater = Mock()
@@ -4396,6 +4425,20 @@ class TestSmartUnload(unittest.TestCase):
         with patch('ace.manager.get_ace_instance_and_slot_for_tool', return_value=(cur_ace, 1)):
             manager._ensure_hot_for_recovery_unload(current_tool=1, target_temp=240)
         self.assertIn("M109 S230", self._m109_calls(manager))
+
+    def test_recovery_heat_returns_previous_target(self):
+        """Cold nozzle -> heats and returns the target from before (to restore)."""
+        extruder = self._make_extruder(20.0, min_temp=170.0)
+        extruder.get_heater().get_status = Mock(return_value={"target": 0.0, "temperature": 20.0})
+        manager = self._manager_with_extruder(extruder)
+        prev = manager._ensure_hot_for_recovery_unload(current_tool=-1, target_temp=240)
+        self.assertEqual(prev, 0.0)
+        self.assertIn("M109 S240", self._m109_calls(manager))
+
+    def test_recovery_heat_returns_none_when_already_hot(self):
+        """No heat-up -> nothing to restore."""
+        manager = self._manager_with_extruder(self._make_extruder(250.0, min_temp=170.0))
+        self.assertIsNone(manager._ensure_hot_for_recovery_unload(current_tool=-1, target_temp=240))
 
     def test_recovery_heat_noop_without_extruder(self):
         """No extruder object -> guard is a safe no-op (no crash, no M109)."""
