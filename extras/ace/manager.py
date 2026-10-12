@@ -52,6 +52,11 @@ import time
 _INVENTORY_KEY_RE = re.compile(r"^ace_inventory_(\d+)$")
 _BUS_BINDINGS_KEY_RE = re.compile(r"^ace2_bus_bindings_\d+(_\d+)*$")
 
+# Startup tool-state validation: how long to wait for the filament sensors
+# to report their initial state, and how often to re-read them meanwhile.
+STARTUP_SENSOR_SETTLE_TIME = 5.0
+STARTUP_SENSOR_POLL_INTERVAL = 0.25
+
 
 class FilamentTrackerAdapter:
     """Thin shim that exposes a filament_tracker's RunoutHelper.
@@ -654,19 +659,30 @@ class AceManager:
         # back to the reactor loop for 0.5 s, which is more than enough for
         # any pending MCU button-state callbacks to drain and update
         # filament_present before we read it.
-        self.reactor.pause(self.reactor.monotonic() + 0.5)
+        #
+        # A single fixed 0.5 s pause is not always enough (observed on a
+        # Kobra S1 with tunneled MCUs: both sensors still read "clear" while
+        # filament was loaded, so the loaded tool was forgotten on every
+        # restart).  Poll instead: a sensor reporting filament confirms the
+        # state at once; only if all sensors stay clear for the whole settle
+        # window is the state treated as stale.
+        polls = max(1, int(round(STARTUP_SENSOR_SETTLE_TIME / STARTUP_SENSOR_POLL_INTERVAL)))
+        for _ in range(polls):
+            self.reactor.pause(self.reactor.monotonic() + STARTUP_SENSOR_POLL_INTERVAL)
 
-        # A toolchange may have started while we were paused above (e.g. a
-        # PLR recovery macro run concurrently) — don't race with it.
-        if self.toolchange_in_progress:
-            return
+            # A toolchange may have started while we were paused above (e.g. a
+            # PLR recovery macro run concurrently) — don't race with it.
+            if self.toolchange_in_progress:
+                return
 
-        toolhead_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
-        rdm_has_filament = (
-            self.get_switch_state(SENSOR_RDM)
-            if self.has_rdm_sensor()
-            else False
-        )
+            toolhead_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
+            rdm_has_filament = (
+                self.get_switch_state(SENSOR_RDM)
+                if self.has_rdm_sensor()
+                else False
+            )
+            if toolhead_has_filament or rdm_has_filament:
+                break
 
         if toolhead_has_filament or rdm_has_filament:
             # At least one sensor confirms filament — state looks plausible.
