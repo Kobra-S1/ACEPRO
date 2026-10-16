@@ -1142,7 +1142,7 @@ For detailed command examples with config parameters, see [example_cmds.txt](exa
 
 **For complete command documentation with examples, see [example_cmds.txt](example_cmds.txt)**
 
-This driver registers **49 GCode commands** (plus the `T<n>` tool macros) organized by category:
+This driver registers **50 GCode commands** (plus the `T<n>` tool macros) organized by category:
 
 ### Tool Selection
 
@@ -1177,6 +1177,7 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 | `ACE_SMART_UNLOAD` | Intelligent unload with coordinated retract + RDM-aware validation; when idle, puts the heater back to its previous target after success | `[TOOL=<index>]` (default: current tool) |
 | `ACE_SMART_LOAD` | Load all non-empty slots to the verification sensor (RDM if configured, else toolhead) | - |
 | `ACE_CHECK_TOOL` | One tool's spool to the toolhead sensor and back to its park; an error if it fails | `TOOL=` |
+| `ACE_CHECK_PRINT_TOOLS` | Refuse the print when a tool its file uses has no usable ACE spool (`ready`, `preload` or `identifying`); first command of `G9111` on K3/K3M/KS1/KS1M, no motion | - |
 | `ACE_FULL_UNLOAD` | Complete unload until slot sensor reports empty (active/non-active aware flow) | `[TOOL=<index>\|ALL]` (default: current tool) |
 | `_ACE_HANDLE_PRINT_END` | End-of-print cleanup (disable runout, optionally unload) | `[CUT_TIP=1]` (1=unload+cut, 0=keep loaded) |
 

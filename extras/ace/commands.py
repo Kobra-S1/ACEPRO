@@ -11,6 +11,7 @@ import traceback
 import logging
 
 from . import ace2_ota
+from . import print_tools
 from .version import get_driver_version
 from .config import (
     ACE_INSTANCES,
@@ -1599,6 +1600,30 @@ def cmd_ACE_CHECK_TOOL(gcmd):
     gcmd.respond_info(f"ACE: T{tool} reached the toolhead and is parked")
 
 
+def cmd_ACE_CHECK_PRINT_TOOLS(gcmd):
+    """Refuse the print when a tool its file uses has no ACE slot or no
+    usable spool; the start macro's first command, so nothing moves first."""
+    manager = ace_get_manager(0)
+    if not manager.get_ace_global_enabled():
+        gcmd.respond_info("ACE: ACE Pro disabled - print tools not checked")
+        return
+    printer = manager.get_printer()
+    sdcard = printer.lookup_object("virtual_sdcard", None)
+    path = sdcard.file_path() if sdcard is not None else None
+    if path is None:
+        gcmd.respond_info("ACE: no file printing, no tools to check")
+        return
+    reactor = printer.get_reactor()
+    used = print_tools.tools_used(path, lambda: reactor.pause(reactor.NOW))
+    problems = print_tools.unusable_tools(used)
+    if problems:
+        details = "; ".join(f"T{tool}: {reason}" for tool, reason in problems)
+        raise gcmd.error(f"ACE: the print uses {print_tools.tool_names(t for t, _ in problems)}"
+                         f" without a usable spool ({details}). Load it and start again")
+    gcmd.respond_info(f"ACE: the print uses {print_tools.tool_names(used) or 'no tool'},"
+                      " each with a usable spool")
+
+
 def toolchange_homing_script(needed_axes, homed_axes):
     """The homing a tool change runs first, or None: only axes it needs
     (toolchange_homing_axes) and that are not homed yet. Needing all three
@@ -2563,6 +2588,8 @@ ACE_COMMANDS = [
     ("ACE_SMART_UNLOAD", cmd_ACE_SMART_UNLOAD,
      "Unload filament, trys also other filament slots if sensor still triggers after unload of current tool [TOOL=]"),
     ("ACE_SMART_LOAD", cmd_ACE_SMART_LOAD, "Load all non-empty slots to verification sensor."),
+    ("ACE_CHECK_PRINT_TOOLS", cmd_ACE_CHECK_PRINT_TOOLS,
+     "Refuse the print when a tool its file uses has no usable ACE spool"),
     ("ACE_CHECK_TOOL", cmd_ACE_CHECK_TOOL, "One tool's spool to the toolhead sensor and back to its park: TOOL=<n>"),
     ("_ACE_HANDLE_PRINT_END", cmd_ACE_HANDLE_PRINT_END, "Execute print end sequence (retract, cut, store)"),
     ("ACE_SET_SLOT", cmd_ACE_SET_SLOT,

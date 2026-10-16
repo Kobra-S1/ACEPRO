@@ -34,6 +34,7 @@ extras/ace/
 ├── intake_gated.py         # toolhead_strategy intake_gated load/unload transfer
 ├── rollback_assist.py      # ACE2 follows an extruder-only retract (rollback assist)
 ├── tool_base.py            # Printer-side tool changer queries: tool base, RDM in path
+├── print_tools.py          # Tools a G-code file uses (slicer summary, else T lines) vs usable ACE slots
 └── version.py              # Driver git version for klippy.log
 
 extras/temperature_ace.py   # sensor_type: temperature_ace - ACE device temperature as a temperature_sensor
@@ -1373,6 +1374,7 @@ ACE_SMART_UNLOAD [TOOL=<n>]                # Intelligent unload with fallback st
 
 ACE_SMART_LOAD                             # Load all non-empty slots to verification sensor (toolhead)
 ACE_CHECK_TOOL TOOL=<n>                    # One spool to the toolhead sensor and back to park, error on failure
+ACE_CHECK_PRINT_TOOLS                      # Print start: refuse when a used tool has no usable spool (no motion)
 
 ACE_CHANGE_TOOL TOOL=<n> [PARK=1]          # Execute tool change T<n>
                                            # TOOL=-1: unload current tool
