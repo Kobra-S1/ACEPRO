@@ -174,6 +174,22 @@ def test_disconnect_drops_unsent_bytes(manager, port):
     assert port.drained() == frame_of(manager, {"id": 2, "method": "get_info"})
 
 
+def test_a_write_error_fails_every_request_whose_bytes_were_dropped(manager, port):
+    full(port)
+    answers = []
+    manager.send_request({"method": "first"}, lambda response: answers.append(("first", response)))
+    manager.send_request({"method": "second"}, lambda response: answers.append(("second", response)))
+    manager._writer(0)
+    assert manager.inflight and answers == []
+
+    port.drained()
+    port.write = Mock(side_effect=OSError(5, "Input/output error"))
+    manager._writer(0)
+
+    assert sorted(answers) == [("first", None), ("second", None)]
+    assert manager.inflight == {}
+
+
 def test_the_port_is_opened_non_blocking():
     with patch("ace.serial_manager.serial") as serial_mod:
         from ace.serial_manager import AceSerialManager

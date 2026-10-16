@@ -1159,19 +1159,21 @@ class AceSerialManager:
         data = self.protocol.serialize_request_frame(request, self._calc_crc)
 
         self._tx_buffer += data
-        if not self._drain_tx():
-            with self._lock:
-                rid = request.get('id')
-                if rid in self.inflight:
-                    self.inflight.pop(rid, None)
-                    cb = self._callback_map.pop(rid, None)
-                    if cb:
-                        try:
-                            cb(response=None)
-                        except Exception as cb_e:
-                            self.gcode.respond_info(
-                                f"ACE[{self.instance_num}]: Error callback error: {cb_e}"
-                            )
+        self._drain_tx()
+
+    def _fail_inflight(self):
+        """Answer every in-flight request with None and forget it."""
+        with self._lock:
+            for rid in list(self.inflight):
+                self.inflight.pop(rid, None)
+                cb = self._callback_map.pop(rid, None)
+                if cb:
+                    try:
+                        cb(response=None)
+                    except Exception as cb_e:
+                        self.gcode.respond_info(
+                            f"ACE[{self.instance_num}]: Error callback error: {cb_e}"
+                        )
 
     def _tx_writable(self):
         """Whether the port takes output right now, without waiting."""
@@ -1185,13 +1187,12 @@ class AceSerialManager:
         port is written only when it is writable (pyserial's own
         non-blocking write spins on EAGAIN), the rest stays buffered for
         the next writer tick, and a port that takes nothing for
-        TX_STALL_LIMIT_S is reconnected.
-
-        Returns False when the write failed and the output was dropped.
+        TX_STALL_LIMIT_S is reconnected. A failed write drops the output
+        and fails every in-flight request.
         """
         if not self._tx_buffer:
             self._tx_stalled_since = None
-            return True
+            return
         try:
             with self._serial_lock:
                 writable = self._tx_writable()
@@ -1202,10 +1203,13 @@ class AceSerialManager:
             self.gcode.respond_info(f"ACE[{self.instance_num}]: Serial write error: {e}")
             self._tx_buffer = bytearray()
             self._tx_stalled_since = None
-            return False
+            # The dropped bytes may hold any in-flight request; which ones
+            # is unknown, so none of them can be answered any more.
+            self._fail_inflight()
+            return
         if writable:
             self._tx_stalled_since = None
-            return True
+            return
 
         now = self.reactor.monotonic()
         if self._tx_stalled_since is None:
@@ -1218,7 +1222,6 @@ class AceSerialManager:
             self._tx_buffer = bytearray()
             self._tx_stalled_since = None
             self.reconnect()
-        return True
 
     # ========== Frame Reading and Parsing ==========
 
