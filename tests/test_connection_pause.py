@@ -140,3 +140,16 @@ def test_a_paused_print_gets_the_dialog_without_another_pause():
     manager.gcode.run_script.assert_not_called()
     manager._show_connection_issue_dialog.assert_called_once_with(
         issue(), is_printing=True)
+
+
+def test_a_pause_that_fails_still_shows_the_dialog():
+    # The print may sit paused half-way; the dialog says why.
+    manager = make_manager()
+    manager.gcode.run_script_from_command.side_effect = RuntimeError(
+        "Must home axis first")
+    manager._handle_connection_issue(issue(), eventtime=0.0)
+    connection_pause.run_pause(manager)
+    manager._show_connection_issue_dialog.assert_called_once_with(
+        issue(), is_printing=True)
+    assert "Must home axis first" in str(
+        manager.gcode.respond_info.call_args_list)

@@ -55,7 +55,12 @@ def run_pause(manager):
     state = print_state(manager)
     if state == "printing":
         manager.gcode.respond_info("ACE: Pausing print due to connection issue")
-        manager.gcode.run_script_from_command("PAUSE")
+        try:
+            manager.gcode.run_script_from_command("PAUSE")
+        except Exception as e:
+            # The dialog still says why the print stopped.
+            manager.gcode.respond_info(
+                f"ACE: Error pausing print for the connection issue: {e}")
     elif state != "paused":
         manager.gcode.respond_info(
             f"ACE: connection issue pause dropped, the print is {state or 'not running'}")
