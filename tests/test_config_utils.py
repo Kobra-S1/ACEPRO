@@ -703,3 +703,30 @@ class TestToolchangeHomingAxes:
 
         with pytest.raises(ValueError, match="toolchange_homing_axes"):
             self._read("xa")
+
+
+class TestPreCutRetractLength:
+    """pre_cut_retract_length: mm ACEPRO retracts before CUT_TIP."""
+
+    @staticmethod
+    def _read(values):
+        from unittest.mock import MagicMock
+        from ace.config import read_ace_config
+
+        config = MagicMock()
+        config.error = ValueError
+        config.getint = MagicMock(return_value=1)
+        config.getfloat = MagicMock(
+            side_effect=lambda key, default=None, **kw: values.get(key, default))
+        config.getboolean = MagicMock(return_value=True)
+        config.get = MagicMock(side_effect=lambda key, default="": default)
+        return read_ace_config(config)
+
+    def test_default_is_two_mm(self):
+        assert self._read({})["pre_cut_retract_length"] == 2.0
+
+    def test_a_fractional_length_is_kept(self):
+        assert self._read({"pre_cut_retract_length": 1.5})["pre_cut_retract_length"] == 1.5
+
+    def test_a_negative_length_retracts_nothing(self):
+        assert self._read({"pre_cut_retract_length": -1.0})["pre_cut_retract_length"] == 0.0

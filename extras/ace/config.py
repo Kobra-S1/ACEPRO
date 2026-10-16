@@ -223,7 +223,8 @@ def read_ace_config(config):
     ace_config["default_color_change_purge_speed"] = config.getint("default_color_change_purge_speed", "400")
     ace_config["purge_max_chunk_length"] = config.getint("purge_max_chunk_length", "300")
     ace_config["purge_multiplier"] = config.getfloat("purge_multiplier", "1.0")
-    ace_config["pre_cut_retract_length"] = config.getint("pre_cut_retract_length", "2")
+    ace_config["pre_cut_retract_length"] = max(
+        0., config.getfloat("pre_cut_retract_length", 2.))
     # Axes a tool change moves and therefore homes first when unhomed.
     homing_axes = config.get("toolchange_homing_axes", "xyz").lower()
     if not homing_axes or set(homing_axes) - set("xyz"):

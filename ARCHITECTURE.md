@@ -1268,7 +1268,7 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `default_color_change_purge_length` | 50 | Default purge length for color change (mm) |
 | `default_color_change_purge_speed` | 400 | Default purge speed (mm/min) |
 | `purge_max_chunk_length` | 300 | Max chunk size per purge command (mm) |
-| `pre_cut_retract_length` | 2 | Safety retract before cutter (mm) |
+| `pre_cut_retract_length` | 2 | Retract before `CUT_TIP` (mm); 0 where the printer's `CUT_TIP` retracts itself (K3, K3M, KX) |
 | `timeout_multiplier` | 2 | Multiplier applied to ACE request timeouts |
 | `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
