@@ -1713,7 +1713,7 @@ class TestMonitorRunoutEdgeCases:
         monitor.last_print_state = 'printing'
         monitor.prev_toolhead_sensor_state = True
         self.manager.get_switch_state.return_value = False
-        monitor._handle_runout_detected = Mock(side_effect=CmdError("shutdown now"))
+        monitor._queue_event = Mock(side_effect=CmdError("shutdown now"))
 
         result = monitor._monitor_runout(3.0)
 
@@ -1734,7 +1734,7 @@ class TestMonitorRunoutEdgeCases:
         monitor.last_print_state = 'printing'
         monitor.prev_toolhead_sensor_state = True
         self.manager.get_switch_state.return_value = False
-        monitor._handle_runout_detected = Mock(side_effect=CmdError("temporary failure"))
+        monitor._queue_event = Mock(side_effect=CmdError("temporary failure"))
 
         result = monitor._monitor_runout(4.0)
 
@@ -1753,7 +1753,7 @@ class TestMonitorRunoutEdgeCases:
         monitor.last_print_state = 'printing'
         monitor.prev_toolhead_sensor_state = True
         self.manager.get_switch_state.return_value = False
-        monitor._handle_runout_detected = Mock(side_effect=RuntimeError("boom"))
+        monitor._queue_event = Mock(side_effect=RuntimeError("boom"))
 
         result = monitor._monitor_runout(5.0)
 
@@ -2062,6 +2062,12 @@ class TestResumeWithoutFilamentNet:
         self.monitor = RunoutMonitor(
             self.printer, self.gcode, self.reactor, Mock(), self.manager
         )
+        # The queued _ACE_MONITOR_EVENT, run as Klipper runs it once the
+        # command executing now ends.
+        self.reactor.register_callback = lambda callback: callback(0.0)
+        self.gcode.run_script = lambda script: (
+            self.monitor._handle_resume_without_filament(
+                int(script.rsplit("TOOL=", 1)[1])))
 
     def _pause_calls(self):
         return [
@@ -2078,6 +2084,15 @@ class TestResumeWithoutFilamentNet:
         ]
         assert prompts
         assert self.monitor._resume_no_filament_warned is True
+
+    def test_the_dry_resume_pause_waits_for_the_running_command(self):
+        # Seen on the RESUME's state change, inside the monitor timer: no
+        # G-code runs there, the pause is queued.
+        queued = []
+        self.reactor.register_callback = queued.append
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        assert not self._pause_calls()
+        assert len(queued) == 1
 
     def test_second_dry_resume_proceeds_unhindered(self):
         # After the one warning, "Resume anyway" must actually resume
@@ -2224,7 +2239,7 @@ class TestRunoutAtTheIntake:
         self.monitor.last_printing_active = True
         self.monitor.last_print_state = 'printing'
         self.monitor.prev_toolhead_sensor_state = True
-        self.monitor._handle_runout_detected = Mock()
+        self.monitor._queue_event = Mock()
         reads[SENSOR_RUNOUT] = False        # the switch below the gear stays
         self.monitor._monitor_runout(1.0)
-        self.monitor._handle_runout_detected.assert_called_once_with(0)
+        self.monitor._queue_event.assert_called_once_with("runout", 0)

@@ -37,6 +37,8 @@ state disambiguates, with generation-specific timing:
 
 import logging
 
+from . import monitor_events
+
 from .config import (
     SENSOR_RUNOUT,
     SLOTS_PER_ACE,
@@ -434,7 +436,7 @@ class RunoutMonitor:
                     f"{self.runout_debounce_count} readings)"
                 )
 
-                self._handle_runout_detected(current_tool)
+                self._queue_event("runout", current_tool)
 
                 self.prev_toolhead_sensor_state = current_sensor_state
                 return eventtime + 0.2
@@ -493,6 +495,15 @@ class RunoutMonitor:
         if getattr(self.manager, "toolchange_in_progress", False) is True:
             return  # a toolchange is still loading; not a dry resume
         self._resume_no_filament_warned = True
+        self._queue_event("dry_resume", tool_index)
+
+    def _queue_event(self, event, tool_index):
+        """From the monitor timer: the handling runs as a queued G-code
+        command (monitor_events), never inside the command running now."""
+        monitor_events.queue(self, event, tool_index)
+
+    def _handle_resume_without_filament(self, tool_index):
+        """The queued pause and dialog for a resume with no filament."""
         self.gcode.respond_info(
             f"ACE: Print resumed but NO filament at the toolhead sensor "
             f"(tool T{tool_index} recorded as loaded) - pausing to protect "
@@ -764,7 +775,7 @@ class RunoutMonitor:
             self.tangle_pump_time_hard, self.tangle_verify_time,
         )
         self._reset_tangle_phase()
-        self._handle_tangle_detected(current_tool)
+        self._queue_event("tangle", current_tool)
 
     def _assist_slot_empty(self, inst):
         """True when the device reports the pumping slot as empty.

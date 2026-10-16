@@ -566,7 +566,15 @@ Mode     | Material | Color/RGB | Example
 - **Resume Feed-Assist Verification**: on paused → printing, re-enable feed assist on the loaded tool if it was silently lost (ACE power cycle / klippy restart)
 
 **Architecture:**
-On a confirmed runout RunoutMonitor (`_handle_runout_detected`):
+The monitor's timer runs no G-code for an event: on a runout, a tangle or a
+resume without filament it stops the print file (`send_pause_command`) and
+queues `_ACE_MONITOR_EVENT EVENT=runout|tangle|dry_resume TOOL=n`
+(`monitor_events.py`), which runs once the G-code command executing then has
+ended, and only while the print is printing or paused - run inline with
+`run_script_from_command`, PAUSE and the swap ran inside a running command
+(a CANCEL_PRINT, a tool change). Proof: `tests/test_monitor_events.py`.
+
+On a confirmed runout the queued command runs `_handle_runout_detected`:
 - Pauses the print and disables the runout tool's feed assist
   (`disable_feed_assist_for_tool`)
 - With an intake transfer: `manager.park_after_runout()`; a slot that still
@@ -596,7 +604,7 @@ _monitor_runout(eventtime)          # Main monitoring loop (50ms interval)
                                     # - Guard: skip if toolchange in progress
                                     # - Guard: skip if detection disabled
                                     # - Detect print start, re-initialize baseline
-                                    # - On runout: call _handle_runout_detected()
+                                    # - On runout: queue it (_queue_event)
                                     # Returns: next callback time (eventtime + interval)
 
 _show_runout_prompt(tool_index, instance_num, local_slot, material, color)
@@ -654,7 +662,7 @@ Sensor State Check
       ├─ Counter < runout_debounce_count?
       │  └─ Not yet confirmed → Keep prev as True → Poll again (50ms)
       └─ Counter >= runout_debounce_count?
-         └─ CONFIRMED RUNOUT! Reset counter → Call _handle_runout_detected()
+         └─ CONFIRMED RUNOUT! Reset counter → queue _ACE_MONITOR_EVENT EVENT=runout
 ```
 
 **Debounce:**
@@ -1776,8 +1784,10 @@ ace_target_index = 3 (see "In-Flight Toolchange Tracking" for who clears it).
    - Debounce: requires N consecutive absent readings (runout_debounce_count, default 1)
    - Guards: not during toolchange, printing active, detection enabled
    - Tracks previous sensor state for transition detection
+   - Confirmed: stop the file (send_pause_command), queue
+     _ACE_MONITOR_EVENT EVENT=runout behind the running G-code command
    ↓
-3. RunoutMonitor._handle_runout_detected(tool_index)
+3. RunoutMonitor._handle_runout_detected(tool_index), in that command
    - Sets runout_handling_in_progress flag
    - Resets sensor baseline to prevent repeated triggers
    ↓

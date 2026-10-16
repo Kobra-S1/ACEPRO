@@ -12,6 +12,7 @@ import logging
 
 from . import ace2_ota
 from . import connection_pause
+from . import monitor_events
 from . import print_tools
 from .version import get_driver_version
 from .config import (
@@ -1598,6 +1599,16 @@ def cmd_ACE_CHECK_TOOL(gcmd):
     gcmd.respond_info(f"ACE: T{tool} reached the toolhead and is parked")
 
 
+def cmd__ACE_MONITOR_EVENT(gcmd):
+    """A runout monitor event the monitor queued; see monitor_events."""
+    manager = ace_get_manager(0)
+    try:
+        monitor_events.run(manager.runout_monitor, gcmd.get("EVENT"),
+                           gcmd.get_int("TOOL"))
+    except ValueError as e:
+        raise gcmd.error(f"ACE: {e}") from e
+
+
 def cmd__ACE_CONNECTION_PAUSE(gcmd):
     """The pause the connection monitor queued; see connection_pause."""
     connection_pause.run_pause(ace_get_manager(0))
@@ -2593,6 +2604,7 @@ ACE_COMMANDS = [
     ("ACE_SMART_LOAD", cmd_ACE_SMART_LOAD, "Load all non-empty slots to verification sensor."),
     ("ACE_CHECK_PRINT_TOOLS", cmd_ACE_CHECK_PRINT_TOOLS,
      "Refuse the print when a tool its file uses has no usable ACE spool"),
+    (monitor_events.EVENT_COMMAND, cmd__ACE_MONITOR_EVENT, "Internal: a runout monitor event, queued by the monitor"),
     (connection_pause.PAUSE_COMMAND, cmd__ACE_CONNECTION_PAUSE, "Internal: the ACE connection monitor's queued pause"),
     ("ACE_CHECK_TOOL", cmd_ACE_CHECK_TOOL, "One tool's spool to the toolhead sensor and back to its park: TOOL=<n>"),
     ("_ACE_HANDLE_PRINT_END", cmd_ACE_HANDLE_PRINT_END, "Execute print end sequence (retract, cut, store)"),
