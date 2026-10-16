@@ -1687,14 +1687,15 @@ class AceManager:
 
                 transfer = self.transfers.get(instance.instance_num)
                 if transfer is not None:
-                    park = None
-                    if self.has_rdm_sensor() and self.get_instant_switch_state(SENSOR_RDM):
-                        def park():
-                            return instance.rmd_triggered_unload_slot(
-                                self, local_slot,
-                                length=parkposition_to_toolhead_length,
-                                overshoot_length=instance.rdm_overshoot_length
-                            )
+                    def park_at_rdm():
+                        return instance.rmd_triggered_unload_slot(
+                            self, local_slot,
+                            length=parkposition_to_toolhead_length,
+                            overshoot_length=instance.rdm_overshoot_length
+                        )
+                    rdm_sees_filament = (self.has_rdm_sensor()
+                                         and self.get_instant_switch_state(SENSOR_RDM))
+                    park = park_at_rdm if rdm_sees_filament else None
                     unload_ok = transfer.unload(
                         local_slot, extruder_limit=retract_length,
                         extruder_speed=retract_speed, park=park
