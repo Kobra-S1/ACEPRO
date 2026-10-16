@@ -29,6 +29,10 @@ This catches:
 # Run all tests with coverage
 ./tests/run_all_tests.sh
 
+# The KlipperScreen panel tests need GTK (python3-gi, gir1.2-gtk-3.0) and a
+# display; run_all_tests.sh links the system's gi into .venv when present,
+# otherwise those tests skip.
+
 # Run specific test file
 pytest tests/test_commands.py -v
 
