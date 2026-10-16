@@ -608,7 +608,10 @@ class AceManager:
             logging.exception("ACE: Failed to flush state on disconnect")
 
         for instance in self._iter_unique_transport_instances():
-            instance.serial_mgr.disconnect()
+            try:
+                instance.serial_mgr.disconnect()
+            except Exception:
+                logging.exception("ACE[%s]: Failed to disconnect", instance.instance_num)
 
         self._stop_monitoring()
         self._restore_sensors()
