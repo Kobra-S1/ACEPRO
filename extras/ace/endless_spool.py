@@ -16,6 +16,7 @@ from .config import (
     SLOTS_PER_ACE,
     get_instance_from_tool,
     get_local_slot,
+    get_tool_offset,
 )
 
 
@@ -97,10 +98,12 @@ class EndlessSpool:
                 f"{current_material} RGB({current_color[0]},{current_color[1]},{current_color[2]})"
             )
 
+        first_tool = get_tool_offset(0)
         total_tools = len(ACE_INSTANCES) * SLOTS_PER_ACE
 
         for offset in range(1, total_tools):
-            candidate_tool = (current_tool + offset) % total_tools
+            candidate_tool = first_tool + (
+                current_tool - first_tool + offset) % total_tools
 
             candidate_inst_num = get_instance_from_tool(candidate_tool)
             candidate_local_slot = get_local_slot(candidate_tool, candidate_inst_num)

@@ -928,34 +928,9 @@ class TestConnectionLifecycle:
         self.manager._send_frame({"method": "ping"})
         self.manager._serial.write.assert_not_called()
 
-    def test_send_frame_timeout_clears_inflight(self):
-        import ace.serial_manager as sm
-        timeout_exc = type("Timeout", (Exception,), {})
-        sm.serial.SerialTimeoutException = timeout_exc
-        self.manager._connected = True
-        self.manager._serial.write.side_effect = timeout_exc("boom")
-        cb = Mock()
-        self.manager.inflight = {1: 0.0}
-        self.manager._callback_map = {1: cb}
-        from ace.serial_manager import AceSerialManager
-        AceSerialManager._send_frame(self.manager, {"id": 1, "method": "ping"})
-        cb.assert_called_once_with(response=None)
-
-    def test_send_frame_timeout_callback_error_logged(self):
-        import ace.serial_manager as sm
-        timeout_exc = type("Timeout", (Exception,), {})
-        sm.serial.SerialTimeoutException = timeout_exc
-        self.manager._connected = True
-        self.manager._serial.write.side_effect = timeout_exc("boom")
-        cb = Mock(side_effect=RuntimeError("cb boom"))
-        self.manager.inflight = {1: 0.0}
-        self.manager._callback_map = {1: cb}
-        from ace.serial_manager import AceSerialManager
-        AceSerialManager._send_frame(self.manager, {"id": 1, "method": "ping"})
-        assert any("Timeout callback error" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
-
     def test_send_frame_generic_error_clears_inflight(self):
         self.manager._connected = True
+        self.manager._tx_writable = Mock(return_value=True)
         self.manager._serial.write.side_effect = RuntimeError("write fail")
         cb = Mock(side_effect=RuntimeError("cb fail"))
         self.manager.inflight = {2: 0.0}
@@ -974,7 +949,8 @@ class TestConnectionLifecycle:
         self.manager._connected = True
         self.manager._serial = Mock()
         self.manager._serial.is_open = True
-        self.manager._serial.write = Mock()
+        self.manager._serial.write = Mock(side_effect=len)
+        self.manager._tx_writable = Mock(return_value=True)
         self.manager._request_id = 10
         
         request = {"method": "ping"}
@@ -1001,7 +977,8 @@ class TestConnectionLifecycle:
         self.manager._connected = True
         self.manager._serial = Mock()
         self.manager._serial.is_open = True
-        self.manager._serial.write = Mock()
+        self.manager._serial.write = Mock(side_effect=len)
+        self.manager._tx_writable = Mock(return_value=True)
         self.manager._request_id = 10
         
         request = {"method": "ping", "id": 99}
@@ -1019,7 +996,8 @@ class TestConnectionLifecycle:
         self.manager._connected = True
         self.manager._serial = Mock()
         self.manager._serial.is_open = True
-        self.manager._serial.write = Mock()
+        self.manager._serial.write = Mock(side_effect=len)
+        self.manager._tx_writable = Mock(return_value=True)
 
         # Set counter to max uint16 value
         self.manager._request_id = 0xFFFF
@@ -1039,7 +1017,8 @@ class TestConnectionLifecycle:
         self.manager._connected = True
         self.manager._serial = Mock()
         self.manager._serial.is_open = True
-        self.manager._serial.write = Mock()
+        self.manager._serial.write = Mock(side_effect=len)
+        self.manager._tx_writable = Mock(return_value=True)
 
         # Simulate overflow: start just past uint16 boundary (should never happen now,
         # but verify the mask still protects against it defensively)

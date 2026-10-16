@@ -241,6 +241,7 @@ class TestAceProtoProtocolAdapter:
                 "result": {
                     "status": "ready",
                     "status_code": 1,
+                    "action": "feeding",
                     "dryer_status": {
                         "status": "drying",
                         "state_detail": "keeping",
@@ -282,6 +283,52 @@ class TestAceProtoProtocolAdapter:
             }
         ]
 
+    def _filament_info_frame(self, payload):
+        inner = b"\x80\x0b\x00\x0d" + bytes([len(payload)]) + payload
+        return b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+
+    def test_a_filament_info_reply_with_a_tag_is_identified(self):
+        extruder = _pb_uint(1, 190) + _pb_uint(2, 230)
+        payload = (
+            _pb_uint(1, 2)
+            + _pb_bytes(3, b"AHPLBK-101")
+            + _pb_bytes(4, b"PLA")
+            + _pb_bytes(6, extruder)
+            + _pb_uint(12, 0)
+        )
+
+        responses, _, notices = self.adapter.extract_responses(
+            bytearray(self._filament_info_frame(payload)), _calc_crc)
+
+        assert notices == []
+        result = responses[0]["result"]
+        assert (result["sku"], result["type"], result["rfid"]) == ("AHPLBK-101", "PLA", 2)
+
+    def test_a_filament_info_reply_keeps_its_raw_fields_for_debugging(self):
+        # Fields the decoder does not map (a brand, a colour in another
+        # number) stay visible to ACE_DEBUG, so a box's reply can be read
+        # off the printer instead of guessed.
+        payload = (_pb_uint(1, 2) + _pb_bytes(3, b"AHPLBK-101")
+                   + _pb_bytes(13, b"AC") + _pb_uint(12, 0))
+
+        responses, _, _ = self.adapter.extract_responses(
+            bytearray(self._filament_info_frame(payload)), _calc_crc)
+
+        raw = responses[0]["result"]["raw_fields"]
+        assert raw[13][0][1] == b"AC", raw
+
+    def test_a_filament_info_reply_without_a_tag_is_not_identified(self):
+        # An ACE2 answers the query for a tagless spool with success and
+        # every field empty; that is no identification.
+        payload = _pb_uint(1, 2) + _pb_uint(12, 0)
+
+        responses, _, notices = self.adapter.extract_responses(
+            bytearray(self._filament_info_frame(payload)), _calc_crc)
+
+        assert notices == []
+        assert responses[0]["code"] == 0
+        assert responses[0]["result"]["rfid"] == 0
+
     def test_extract_responses_status_uses_unknown_fallbacks(self):
         dry_status = _pb_uint(1, 99) + _pb_uint(2, 40)
         slot_unknown = _pb_uint(1, 140) + _pb_uint(2, 1)
@@ -307,6 +354,7 @@ class TestAceProtoProtocolAdapter:
                 "result": {
                     "status": "unknown",
                     "status_code": 77,
+                    "action": "none",
                     "dryer_status": {
                         "status": "unknown",
                         "state_detail": "unknown",
@@ -336,6 +384,25 @@ class TestAceProtoProtocolAdapter:
                 },
             }
         ]
+
+    def _status_action(self, *slot_state_codes):
+        """Decode a GET_STATUS frame whose loaded slots carry the given states."""
+        payload = _pb_uint(1, 1)
+        for code in slot_state_codes:
+            payload += _pb_bytes(9, _pb_uint(1, code) + _pb_uint(2, 2))
+        inner = b"\x80\x09\x00\x06" + bytes([len(payload)]) + payload
+        frame = b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+        responses, _, _ = self.adapter.extract_responses(bytearray(frame), _calc_crc)
+        return responses[0]["result"]["action"]
+
+    def test_status_action_is_none_while_every_slot_is_idle(self):
+        assert self._status_action(0, 0) == "none"
+
+    def test_status_action_reports_the_unwinding_slot(self):
+        assert self._status_action(0, 2) == "unwinding"
+
+    def test_status_action_ignores_an_assist_hold(self):
+        assert self._status_action(0, 3) == "none"
 
     def test_extract_responses_normalizes_generic_response_code(self):
         payload = _pb_uint(1, 2)
@@ -406,6 +473,12 @@ class TestAceProtoProtocolAdapter:
                 request = self.adapter.build_discover_device_request()
             elif spec.name == "ASSIGN_DEVICE_ID":
                 request = self.adapter.build_assign_device_id_request(1, 2, 3, 4)
+            elif spec.name == "IAP_UPGRADE":
+                request = self.adapter.build_iap_upgrade_request(64, 0x1234, "V1.0.0")
+            elif spec.name == "IAP_FIRMWARE":
+                request = self.adapter.build_iap_firmware_request(0x08024000, bytes(64))
+            elif spec.name == "IAP_UPGRADE_FINISH":
+                request = self.adapter.build_iap_finish_request()
             else:
                 request = self.adapter.build_debug_request(
                     spec.name,

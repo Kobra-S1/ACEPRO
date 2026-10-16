@@ -11,6 +11,7 @@ from ace.config import (
     get_tool_offset,
     get_instance_from_tool,
     get_local_slot,
+    set_tool_base,
     normalize_ace_slot_state,
     parse_instance_baud_config,
     parse_instance_number,
@@ -142,6 +143,40 @@ class TestGetLocalSlot:
         assert get_local_slot(5, instance_num=1) == 1
         # T10 in instance 2: 10 - (2 * 4) = 2
         assert get_local_slot(10, instance_num=2) == 2
+
+
+class TestToolBase:
+    """Behind a printer-side tool changer that puts its own tools first
+    (Kobra X: three direct inlets), the ACE's tools start at its offset:
+    the first ACE's slot 2 is printer T5, not T2."""
+
+    @pytest.fixture(autouse=True)
+    def two_instances(self):
+        ACE_INSTANCES.clear()
+        ACE_INSTANCES.update({0: {}, 1: {}})
+        set_tool_base(3)
+        yield
+        ACE_INSTANCES.clear()
+
+    def test_the_first_ace_starts_at_the_base(self):
+        assert get_tool_offset(0) == 3
+        assert get_instance_from_tool(5) == 0
+        assert get_local_slot(5, instance_num=0) == 2
+
+    def test_a_daisy_chained_ace_follows_the_first(self):
+        assert get_tool_offset(1) == 7
+        assert get_instance_from_tool(7) == 1
+        assert get_local_slot(10, instance_num=1) == 3
+        assert get_instance_from_tool(11) == -1
+
+    def test_the_tool_changers_own_tools_belong_to_no_ace(self):
+        for tool in (0, 1, 2):
+            assert get_instance_from_tool(tool) == -1, tool
+            assert get_local_slot(tool, instance_num=0) == -1, tool
+
+    def test_a_negative_base_is_refused(self):
+        with pytest.raises(ValueError):
+            set_tool_base(-1)
 
 
 class TestParseInstanceNumber:
@@ -569,3 +604,75 @@ class TestRoundTripConversions:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestToolheadLoadRetriesConfig:
+    """toolhead_load_retries: extra load attempts, none unless configured."""
+
+    @staticmethod
+    def _read(values):
+        from unittest.mock import MagicMock
+        from ace.config import read_ace_config
+
+        config = MagicMock()
+        config.getint = MagicMock(side_effect=lambda key, default=1: values.get(key, default))
+        config.getfloat = MagicMock(return_value=1.0)
+        config.getboolean = MagicMock(return_value=True)
+        config.get = MagicMock(side_effect=lambda key, default="": default)
+        return read_ace_config(config)
+
+    def test_default_is_no_retry(self):
+        assert self._read({})["toolhead_load_retries"] == 0
+
+    def test_configured_value_is_read(self):
+        assert self._read({"toolhead_load_retries": 2})["toolhead_load_retries"] == 2
+
+    def test_a_negative_value_means_no_retry(self):
+        assert self._read({"toolhead_load_retries": -1})["toolhead_load_retries"] == 0
+
+
+class TestParkPullLength:
+    """How far the ACE pulls a fully unloaded filament back to where it
+    rests. Two config keys, because they measure different hardware: the
+    tube from the toolhead back to behind the hub
+    (parkposition_to_toolhead_length), and the short stretch that gets a
+    filament clear of the toolhead itself (toolhead_clear_length).
+    toolhead_paths picks; rearranging the tubes changes neither length."""
+
+    CONFIG = {"parkposition_to_toolhead_length": 650,
+              "toolhead_clear_length": 20.0}
+
+    def test_tools_sharing_a_tube_rest_behind_the_hub(self):
+        from ace.config import park_pull_length
+
+        assert park_pull_length(self.CONFIG, "shared") == 650.0
+
+    def test_a_tool_with_its_own_tube_rests_just_clear_of_the_toolhead(self):
+        from ace.config import park_pull_length
+
+        assert park_pull_length(self.CONFIG, "per_tool") == 20.0
+
+
+class TestToolchangeHomingAxes:
+    def _read(self, value):
+        from unittest.mock import MagicMock
+        from ace.config import read_ace_config
+
+        config = MagicMock()
+        config.error = ValueError
+        config.getint = MagicMock(return_value=1)
+        config.getfloat = MagicMock(return_value=1.0)
+        config.getboolean = MagicMock(return_value=True)
+        config.get = MagicMock(
+            side_effect=lambda key, default=None:
+                value if key == "toolchange_homing_axes" else "average")
+        return read_ace_config(config)
+
+    def test_a_printer_may_need_fewer_axes_than_all(self):
+        assert self._read("X")["toolchange_homing_axes"] == "x"
+
+    def test_anything_but_axes_is_a_config_error(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="toolchange_homing_axes"):
+            self._read("xa")

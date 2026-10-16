@@ -11,6 +11,12 @@ from enum import Enum
 from .protocol import get_default_baud_for_protocol
 
 
+class FeedAbortedByFirmware(ValueError):
+    """The ACE stopped its own feed on a stall (slot gear_err). The filament
+    is still in its gears and nothing was pushed by the extruder, so a
+    pull-back frees nothing and can only take it out of the gears' reach."""
+
+
 # ========== ACE Instance Constants ==========
 
 # Filament position state constants
@@ -34,6 +40,15 @@ SLOT_PARK_STATES = (
 # Sensor name constants
 SENSOR_TOOLHEAD = 'toolhead_sensor'
 SENSOR_RDM = 'return_module'
+# Where a spool's end is seen: the toolhead sensor, or with an intake that
+# reports presence (intake_gated) the intake.
+SENSOR_RUNOUT = 'runout_sensor'
+
+# AceManager.route_to_tool: who moves the routed tool's filament next - the
+# extruder (with or without the ACE), or the ACE alone while the extruder
+# stands still.
+FEEDER_EXTRUDER = "EXTRUDER"
+FEEDER_ACE = "ACE"
 
 # Slots per ACE unit (fixed)
 SLOTS_PER_ACE = 4
@@ -112,6 +127,16 @@ GLOBAL_PURGE_SPEED = None
 
 
 # ========== Configuration Helpers ==========
+def park_pull_length(ace_config, toolhead_paths):
+    """How far the ACE pulls a fully unloaded filament back from the
+    toolhead to where it rests (mm): behind the hub when the tools share a
+    tube ("shared"), just clear of the toolhead when each has its own
+    ("per_tool")."""
+    if toolhead_paths == "per_tool":
+        return float(ace_config["toolhead_clear_length"])
+    return float(ace_config["parkposition_to_toolhead_length"])
+
+
 def read_ace_config(config):
     """
     Read and validate all ACE config values, return as dict.
@@ -134,6 +159,12 @@ def read_ace_config(config):
     ace_config["feed_assist_active_after_ace_connect"] = config.getboolean(
         "feed_assist_active_after_ace_connect", True
     )
+    # False when a printer-side tool changer owns T<n> and reaches the ACE
+    # through ACE_CHANGE_TOOL (Kobra X: [kx_toolchanger] maps its tools onto
+    # turret inlets; behind three direct ones T3 is the first ACE slot).
+    ace_config["register_tool_macros"] = config.getboolean(
+        "register_tool_macros", True
+    )
     ace_config["rfid_inventory_sync_enabled"] = config.getboolean(
         "rfid_inventory_sync_enabled", True
     )
@@ -149,7 +180,11 @@ def read_ace_config(config):
     if ace_config["rfid_temp_mode"] not in ("average", "min", "max"):
         ace_config["rfid_temp_mode"] = "average"
 
+    # Two lengths for where a fully unloaded filament rests; toolhead_paths
+    # picks (park_pull_length). Tube from the toolhead back to behind the hub:
     ace_config["parkposition_to_toolhead_length"] = config.getint("parkposition_to_toolhead_length", 1000)
+    # Pull that gets a filament clear of the toolhead when the tube is its own:
+    ace_config["toolhead_clear_length"] = config.getfloat("toolhead_clear_length", 20.)
     ace_config["parkposition_to_rdm_length"] = config.getint("parkposition_to_rdm_length", 150)
     # Extra retraction (mm) after the RDM sensor clears during unload (safety
     # margin past the splitter exit). Only used when an RDM sensor is present.
@@ -157,6 +192,29 @@ def read_ace_config(config):
     ace_config["toolhead_retraction_speed"] = config.getint("toolhead_retraction_speed", 10)
     ace_config["toolhead_retraction_length"] = config.getint("toolhead_retraction_length", 40)
     ace_config["toolhead_full_purge_length"] = config.getint("toolhead_full_purge_length", 22)
+    # How the filament is moved into and out of the toolhead: "sensor_push"
+    # (fixed lengths around one toolhead sensor) or "intake_gated" (see
+    # intake_gated.py; needs filament_intake_sensor_name).
+    ace_config["toolhead_strategy"] = config.get("toolhead_strategy", "sensor_push").lower()
+    ace_config["filament_intake_sensor_name"] = config.get("filament_intake_sensor_name", None)
+    # Whether a filament parked at the intake (ACE_CHANGE_TOOL TOOL=-1
+    # PARK=1) is in another tool's way: "shared" - the tools meet in one
+    # tube - or "per_tool" - a tube per tool, each to its own intake. Or the
+    # name of a printer object that knows (its tools_share_path()).
+    ace_config["toolhead_paths"] = config.get("toolhead_paths", "shared")
+    # ACE speed up to the intake sensor; 0 = feed_speed.
+    ace_config["intake_feed_speed"] = config.getfloat("intake_feed_speed", 0.)
+    # intake_gated unload: extruder travel without an intake count that
+    # means the gear has let go of the filament. Several counts' worth.
+    ace_config["intake_clear_length"] = config.getfloat("intake_clear_length", 15.)
+    # intake_gated: after a runout the cut old piece is parked at the
+    # toolhead sensor, still in the gear; the next load through that path
+    # pulls this much further, the intake counting, so the refilled filament
+    # is in the gear and the old piece goes out with the purge. 0: none.
+    ace_config["runout_reload_length"] = max(
+        0., config.getfloat("runout_reload_length", 0.))
+    # Extra attempts when a load does not reach the toolhead sensor.
+    ace_config["toolhead_load_retries"] = max(0, config.getint("toolhead_load_retries", 0))
     ace_config["toolhead_slow_loading_speed"] = config.getint("toolhead_slow_loading_speed", 5)
     ace_config["extruder_feeding_length"] = config.getint("extruder_feeding_length", 1)
     ace_config["extruder_feeding_speed"] = config.getint("extruder_feeding_speed", 5)
@@ -166,6 +224,12 @@ def read_ace_config(config):
     ace_config["purge_max_chunk_length"] = config.getint("purge_max_chunk_length", "300")
     ace_config["purge_multiplier"] = config.getfloat("purge_multiplier", "1.0")
     ace_config["pre_cut_retract_length"] = config.getint("pre_cut_retract_length", "2")
+    # Axes a tool change moves and therefore homes first when unhomed.
+    homing_axes = config.get("toolchange_homing_axes", "xyz").lower()
+    if not homing_axes or set(homing_axes) - set("xyz"):
+        raise config.error(
+            f"toolchange_homing_axes '{homing_axes}' must be made of x, y and z")
+    ace_config["toolchange_homing_axes"] = homing_axes
     ace_config["status_debug_logging"] = config.getboolean("status_debug_logging", False)
     ace_config["runout_debounce_count"] = config.getint("runout_debounce_count", 1)
     ace_config["ace_connection_supervision"] = config.getboolean(
@@ -268,9 +332,29 @@ def read_ace_config(config):
     return ace_config
 
 
+# Printer tool number of the first ACE's slot 0. A printer-side tool changer
+# that puts its own tools first (Kobra X: the direct-fed inlets) owns it and
+# the manager sets it at klippy:connect; 0 without one. Process-global like
+# ACE_INSTANCES.
+_tool_base = 0
+
+
+def set_tool_base(base):
+    """Number the ACE tools from `base` on; every tool number ACEPRO takes
+    or shows follows. Raises ValueError for a negative base."""
+    global _tool_base
+    if base < 0:
+        raise ValueError(f"ACE tool base must be >= 0, got {base}")
+    _tool_base = base
+
+
+def get_tool_base():
+    return _tool_base
+
+
 def get_tool_offset(instance_num):
     """Get the first tool index managed by this instance."""
-    return instance_num * SLOTS_PER_ACE
+    return _tool_base + instance_num * SLOTS_PER_ACE
 
 
 def get_ace_instance_and_slot_for_tool(tool):
@@ -308,10 +392,10 @@ def get_instance_from_tool(tool_index):
     Returns:
         int: Instance number, or -1 if not managed by any instance
     """
-    if tool_index < 0:
+    if tool_index < _tool_base:
         return -1
 
-    instance_num = tool_index // SLOTS_PER_ACE
+    instance_num = (tool_index - _tool_base) // SLOTS_PER_ACE
 
     # Verify instance exists
     if instance_num in ACE_INSTANCES:
@@ -331,8 +415,7 @@ def get_local_slot(tool_index, instance_num):
     Returns:
         int: Local slot (0-3), or -1 if tool not managed by instance
     """
-    instance_offset = instance_num * SLOTS_PER_ACE
-    local_slot = tool_index - instance_offset
+    local_slot = tool_index - get_tool_offset(instance_num)
 
     if 0 <= local_slot < SLOTS_PER_ACE:
         return local_slot

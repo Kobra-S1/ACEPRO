@@ -23,9 +23,9 @@ This Anycubic-centric fork has structurally diverged from the original and focus
 - Purge sequence optimizations (avoids purging too much without intermediate flushing)
 - Adds more graceful error-handling if ACE rejects commands
 - Adding many console commands for experimentation ;)
-- Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5), plus K3M (beta) and S1 Max (alpha, untested)
+- Providing ready-to-use printer and ACE configs for Anycubic Kobra S1 and K3 (vanilla Klipper on USB-OTG SBCs like RPi4/5), plus K3M (beta), S1 Max (alpha, untested) and Kobra X (alpha, needs the Kobra Klipper fork)
 - Expanding controls/panels in the ACE KlipperScreen panel
-- Standalone browser dashboard (ValgACE-inspired) served by Moonraker at `/ace.html`
+- Standalone browser dashboard (ValgACE-inspired) at `/ace.html` of your Mainsail/Fluidd web root
 
 The provided configurations are tailored for use with Kobra-S1 and Kobra-3 printers (I have only those, so it's also only tested with those printers).
 
@@ -45,7 +45,6 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - [Commands Reference](#-commands-reference)
 - [Endless Spool Feature](#-endless-spool-feature)
 - [Inventory Management](#-inventory-management)
-- [Contributing](#-contributing)
 - [Credits](#-credits)
 
 ## ✨ Features
@@ -60,6 +59,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Tangle Detection (ACE 1 + ACE 2)**: Pauses the print when the ACE pumps continuously against a blocked spool, via the firmware-reported `cont_assist_time` field. ACE 2 firmware never self-detects tangles during feed assist, so host-side monitoring covers it too
 - ✅ **Fast Disconnect Pause**: Pauses within seconds when the ACE feeding the active tool dies mid-print (protocol-aware: ACE 2 clamps the filament and starves the extruder immediately; ACE 1 gets a lenient timeout since the extruder can still pull through it)
 - ✅ **Resume Feed-Assist Verification**: Re-enables feed assist on resume if it was silently lost (ACE power cycle, klippy restart) — prevents "resumed but extruding nothing"
+- ✅ **Feed Assist Pauses While Idle**: Klipper's idle timeout stops the loaded tool's feed assist (a standing assist warms the ACE motor and starts its fan); the next toolhead activity restores it on the same tool
 - ✅ **Feed Fail-Fast**: Load feeds honor the ACE firmware's own error verdict (`feed_error`, `stuck_error`, `tangled_error`, …) and abort within seconds to avoid extruder-assist filament grinding
 - ✅ **Filament Tracker Support**: Works with both `filament_switch_sensor` and `filament_tracker` sensor types
 - ✅ **ACE Temperature Sensor (optional)**: Expose ACE device temperature via `temperature_ace`
@@ -67,8 +67,12 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Multiple-ACE Pro inventory support**: Keeps track of spool data over several ACE units
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
-- ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
+- ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel at `/ace.html` of your Mainsail/Fluidd web root, talking to a Moonraker component
 - ✅ **Spoolman Integration**: Automatic spool selection via RFID-to-ID mapping or manual slot assignment
+- ✅ **ACE 2 Firmware Update**: Flash an ACE 2 box from the console (`ACE_FIRMWARE_UPDATE`)
+- ✅ **Rollback Assist (ACE 2)**: The ACE follows while the extruder pulls filament back, so an ACE 2 does not clamp against the retract
+- 🟠 **Kobra X Tool Changer Integration** *(alpha)*: Works behind the Kobra Klipper fork's `[kx_toolchanger]`, which owns `T<n>` and turns the turret
+- ✅ **Driver Version in the Log**: The ACEPRO commit is logged at startup (`ACE: ACEPRO driver ...`) for bug reports
 - 🟠 **OrcaSlicer Filament Sync** *(requires recent Orca version)*: Filament type and color can be synced automatically from the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
 
 ### Standalone Web Dashboard
@@ -77,7 +81,7 @@ The browser-based dashboard (adapted from ValgACE) gives you a full ACE view wit
 - Device status, firmware, USB path, RFID state, and temperature at a glance.
 - Dryer controls and per-slot actions (load/unload/assist), with RFID badges when tag data drives the slot metadata.
 - Multi-instance support on one page, mirroring the KlipperScreen panel layout.
-- Served by Moonraker at `http://<moonraker-host>:7125/ace.html` (or `https://...` if using TLS) after symlinking the assets in `ace_status_integration/web` as described in `ace_status_integration/README.md`.
+- Served by the web server of Mainsail/Fluidd at `http://<printer-host>/ace.html` once the assets in `ace_status_integration/web` are symlinked into the Mainsail/Fluidd directory (the installer's dashboard step, or manually as described in `ace_status_integration/README.md`); its data comes from the Moonraker component `ace_status.py` (`/server/ace/*` endpoints).
 
 ![ACE Dashboard](img/ace-dashboard.png)
 
@@ -96,7 +100,7 @@ The browser-based dashboard (adapted from ValgACE) gives you a full ACE view wit
 This implementation is organized into separate modules:
 
 ```
-ace/
+extras/ace/
 ├── __init__.py           # Module initialization
 ├── manager.py            # AceManager - orchestrates all ACE units
 ├── instance.py           # AceInstance - per-unit handler
@@ -106,9 +110,16 @@ ace/
 ├── protocol_ace2.py      # ACE2 protobuf adapter, command catalog, wire helpers
 ├── ace2_bus.py           # ACE2 shared-bus session: UID discovery, device-id
 │                         #   binding, assignment planning
+├── ace2_ota.py           # ACE2 box firmware update (IAP): image checks,
+│                         #   chunk plan, update state machine
 ├── serial_manager.py     # Serial transport: connect, frame I/O, request queue
 ├── endless_spool.py      # Automatic filament switching logic
 ├── runout_monitor.py     # Filament runout & tangle detection during printing
+├── idle_assist.py        # Feed assist paused while the printer is idle
+├── intake_gated.py       # Load/unload for an extruder gear between two sensors
+├── rollback_assist.py    # ACE follows an extruder retract (ACE2 clamps otherwise)
+├── tool_base.py          # What a printer-side tool changer tells the driver
+├── version.py            # Driver version line for klippy.log
 ├── commands.py           # G-code command handlers
 ├── config.py             # Configuration constants and helpers
 ├── persistent_state.py   # Deferred-flush saved_variables wrapper
@@ -119,10 +130,12 @@ config/
 ├── ace_K3M.cfg           # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg           # Kobra S1 ACE configuration
 ├── ace_KS1M.cfg          # Kobra S1 Max ACE configuration (ALPHA - UNTESTED)
+├── ace_KX.cfg            # Kobra X ACE configuration (ALPHA)
 ├── printer_K3.cfg        # Kobra 3 printer macros
 ├── printer_K3M.cfg       # Kobra K3M printer macros (BETA)
 ├── printer_KS1.cfg       # Kobra S1 printer macros
 ├── printer_KS1M.cfg      # Kobra S1 Max printer macros (ALPHA - UNTESTED)
+├── printer_KX.cfg        # Kobra X printer macros (ALPHA, needs the Kobra Klipper fork)
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
 ├── ace_macros_generic.cfg # Shared ACE helper macros
 └── spoolman_logic.cfg    # Logic for Spoolman ID mapping and tool hooks
@@ -138,12 +151,12 @@ ace_status_integration/   # Moonraker ACE status component + web dashboard
 KlipperScreen/            # ACE Pro KlipperScreen panel (acepro.py)
 patches/                  # KlipperScreen core patches (ACE subscription)
 
-├── ARCHITECTURE.md       # System design, components, data flow
-├── PROTOCOL.md           # ACE serial protocol documentation
-├── PROTOCOL_REDETECTION.md   # Protocol auto-detection details
-├── CONNECTION_SUPERVISION.md # Serial connection supervision notes
-├── example_cmds.txt
-└── README.md             # This file
+ARCHITECTURE.md           # System design, components, data flow
+PROTOCOL.md               # ACE serial protocol documentation
+PROTOCOL_REDETECTION.md   # Protocol auto-detection details
+CONNECTION_SUPERVISION.md # Serial connection supervision notes
+example_cmds.txt
+README.md                 # This file
 ```
 
 📖 **For Detailed Architecture Documentation, see [ARCHITECTURE.md](ARCHITECTURE.md)**
@@ -154,7 +167,7 @@ patches/                  # KlipperScreen core patches (ACE subscription)
 - 1 or more **Anycubic Color Engine Pro** units
 - **Filament Sensors** (required): 
   - Toolhead sensor (close to the hotend) - for runout detection
-  - Optional: RMS sensor (return module in Anycubic terms) - for jam detection and path validation
+  - Optional: RDM sensor (return module in Anycubic terms) - for path validation and unload verification
 - **Hotend**: Recommended: Having a filament cutter
 - **ACE Adapter**: Adapter which converts the Ace-Pro conector to standard USB
 
@@ -370,7 +383,7 @@ legacy `*.backup_*` files out of the config root.
 For scripted/headless use there is a non-interactive mode:
 
 ```bash
-./installer.sh --printer K3 --all              # everything, no questions
+./installer.sh --printer K3 --all              # everything, no questions (also replaces printer.cfg, backed up)
 ./installer.sh --printer K3 --components driver,ace-config
 ./installer.sh --help                          # all options
 ```
@@ -411,6 +424,12 @@ cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_gene
 cp ~/ACEPRO/config/ace_K3.cfg ~/printer_data/config/ace_K3.cfg
 cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
 
+# For Kobra K3M (BETA):
+cp ~/ACEPRO/config/printer_K3M.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_K3M.cfg ~/printer_data/config/ace_K3M.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+
 # For Kobra S1:
 cp ~/ACEPRO/config/printer_KS1.cfg ~/printer_data/config/printer.cfg
 cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
@@ -440,7 +459,7 @@ G9111 bedTemp=[first_layer_bed_temperature] extruderTemp=[first_layer_temperatur
 - `bedTemp` - Bed temperature
 - `extruderTemp` - Nozzle temperature for the initial tool
 - `tool` - Initial tool index (from `[initial_tool]` Orca variable)
-- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL` - (Optional) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts. Set to `0` to always purge.
+- `SKIP_PURGE_FOR_ALREADY_LOADED_TOOL` - (Optional, K3/K3M configs) Skip purge if the same tool is already loaded and detected at nozzle. This saves time on print restarts. Set to `0` to always purge. The KS1/KS1M configs always skip in that case; the KX config never skips.
 
 2. **Update End G-code**
 
@@ -486,6 +505,8 @@ sudo systemctl restart KlipperScreen
 ```
 
 
+Also apply the matching core patch from `patches/` (`ace_global_subscription*.patch`, the one that applies cleanly to your KlipperScreen checkout) so KlipperScreen subscribes to the ACE objects, and set `font_size = small` in the `[main]` section of `KlipperScreen.conf`.
+
 #### Add KlipperScreen Panel to menus (required)
 Add the panel to your KlipperScreen configuration so it shows both while idle and while printing:
 ```
@@ -499,7 +520,7 @@ name: ACE Pro
 icon: settings
 panel: acepro
 ```
-Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry makes the panel visible during an active print.
+Add these to `~/printer_data/config/KlipperScreen.conf`. The `__print` entry makes the panel visible during an active print.
 
 ## ⚙️ Configuration
 
@@ -513,12 +534,14 @@ config/
 ├── ace_K3M.cfg                 # Kobra K3M ACE configuration (BETA)
 ├── ace_KS1.cfg                 # Kobra S1 ACE configuration
 ├── ace_KS1M.cfg                # Kobra S1 Max ACE configuration (ALPHA - UNTESTED)
+├── ace_KX.cfg                  # Kobra X ACE configuration (ALPHA)
 ├── ace_macros_generic.cfg      # Shared ACE macros for all printers
 ├── printer_generic_macros.cfg  # Shared printer macros (pause/resume/velocity/purge)
 ├── printer_K3.cfg              # Kobra 3 printer macros & settings
 ├── printer_K3M.cfg             # Kobra K3M printer macros & settings (BETA)
 ├── printer_KS1.cfg             # Kobra S1 printer macros & settings
 ├── printer_KS1M.cfg            # Kobra S1 Max printer macros & settings (ALPHA - UNTESTED)
+├── printer_KX.cfg              # Kobra X printer macros & settings (ALPHA)
 └── spoolman_logic.cfg          # Optional Spoolman ID mapping and tool hooks
 ```
 
@@ -531,11 +554,12 @@ config/
 
 ### Include Hierarchy
 
-The configuration uses a modular include structure. The `printer_KS1.cfg`, `printer_KS1M.cfg`, `printer_K3.cfg` or `printer_K3M.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
+The configuration uses a modular include structure. The `printer_KS1.cfg`, `printer_KS1M.cfg`, `printer_K3.cfg`, `printer_K3M.cfg` or `printer_KX.cfg` files **are your main printer configuration** - simply copy the appropriate file to `printer.cfg`:
 
 **For Anycubic Kobra S1:**
 ```
 printer.cfg (copy from printer_KS1.cfg)
+  ├─ [include mainsail.cfg]
   ├─ [include printer_generic_macros.cfg]
   │   └─ PAUSE/RESUME, velocity stack, purge helpers, wipe/throw moves
   └─ [include ace_KS1.cfg]
@@ -548,6 +572,7 @@ printer.cfg (copy from printer_KS1.cfg)
 **For Anycubic Kobra 3:**
 ```
 printer.cfg (copy from printer_K3.cfg)
+  ├─ [include mainsail.cfg]
   ├─ [include printer_generic_macros.cfg]
   │   └─ PAUSE/RESUME, velocity stack, purge helpers, wipe/throw moves
   └─ [include ace_K3.cfg]
@@ -565,6 +590,7 @@ printer.cfg (copy from printer_K3.cfg)
 | `printer_K3M.cfg` | Kobra K3M printer macros & settings (BETA) | - | Anycubic Kobra K3M |
 | `printer_KS1.cfg` | Kobra S1 printer macros & settings | - | Anycubic Kobra S1 |
 | `printer_KS1M.cfg` | Kobra S1 Max printer macros & settings (**ALPHA - UNTESTED**) | - | Anycubic Kobra S1 Max |
+| `printer_KX.cfg` | Kobra X printer macros & settings (**ALPHA**, needs the Kobra Klipper fork) | - | Anycubic Kobra X |
 | `printer_generic_macros.cfg` | Shared printer macros (pause/resume, velocity stack, purge helpers) | - | All printers |
 
 ### Kobra S1 Max (KS1M) - alpha status
@@ -600,6 +626,74 @@ in `printer_KS1M.cfg` instead - it is strictly more robust.
 Fixes, measurements and corrections from anyone with the actual machine are very
 welcome - please open an issue or PR with the values you found.
 
+### Kobra X (KX) - alpha status
+
+> [!CAUTION]
+> `printer_KX.cfg` has run on one Kobra X; ACE support on the KX is untested.
+
+The Kobra X is not a plain ACE printer: its toolhead has a four-inlet turret,
+and the turret, the inlet sensors and the tool changer are printer hardware
+driven by the Kobra Klipper fork, not by this driver.
+
+- **Klipper fork required.** `printer_KX.cfg` uses sections that only the
+  fork's Kobra X modules provide (`[motor_link]`, `[probe_ks1]`, `[cs1237]`,
+  and the `kx_*` sections through `[include kx_multimaterial.cfg]`), and the
+  MCUs must run the fork's KX firmware. These
+  modules are not on a public branch of the fork yet. The installer refuses
+  the KX `printer.cfg` when `klippy/extras/kx_toolchanger.py` is missing.
+- **`kx_multimaterial.cfg` comes from the fork** (`config/` of the fork's
+  checkout), because it changes with the fork's modules. The installer copies
+  it only when it is not there yet; an existing one holds this machine's
+  measured `sensor_to_nozzle` and is never overwritten. Compare it against the
+  fork's copy after updating the fork.
+- **`[kx_toolchanger]` owns `T0..Tn`.** It maps each tool to a turret inlet
+  and calls `ACE_CHANGE_TOOL` with the ACE's own tool number for the inlets
+  `kx_multimaterial.cfg` marks `ace` (with one ACE on inlet 4, printer `T3` is
+  ACE `T0`). `ace_KX.cfg` therefore sets `register_tool_macros: False`;
+  without it Klipper stops at startup with `gcode command T0 already
+  registered`. `PRINT_END` and `CANCEL_PRINT` unload through
+  `KX_CHANGE_TOOL TOOL=-1` for the same reason.
+- **One ACE, a tube per inlet.** Set `topology: combo` in
+  `kx_multimaterial.cfg`; printer `T0`-`T3` are ACE slots 0-3, and a second
+  ACE unit is refused. No RDM in that path: the tool changer tells this
+  driver so at its sensor setup, and a configured RDM sensor is left out
+  of use. Every tool change retracts the old filament all the way back to
+  the ACE, as on a single-inlet toolhead.
+  `KX_UNLOAD_ALL` recovers an ACE filament left in an inlet after a restart.
+- **The turret follows this driver.** `kx_multimaterial.cfg` defines
+  `_ACE_ROUTE_TOOL`, which the driver calls before it moves a tool's
+  filament (tool change, panel, `ACE_SMART_UNLOAD`, endless spool); the
+  turret turns to that tool's inlet, or the operation stops. While the ACE
+  alone pushes a filament to the inlet switch the turret stays home
+  (`FEEDER=ACE`), and engages once the switch has it. Raw `ACE_FEED` and
+  `ACE_RETRACT` do not turn it.
+- **ACE tools use printer tool numbers.** With direct-fed inlets before the
+  ACE, ACEPRO numbers the ACE slots after them (`ace_tool_offset` of
+  `[kx_toolchanger]`): behind three direct inlets slot 0 of the first unit
+  is `T3`, not `T0`, in the panel, in `ACE_QUERY_SLOTS`, in `T=`/`TOOL=` of
+  every ACE command and in its messages; a second unit follows at `T7`.
+- **Shared tube with the RDM.** With every ACE slot through inlet 4
+  (`topology: shared` in `kx_multimaterial.cfg`), the mainboard's RDM connector
+  gives filament presence and movement at the merge point: uncomment
+  `[filament_tracker filament_runout_rdm]` in `printer_KX.cfg` and
+  `filament_runout_sensor_name_rdm` in `ace_KX.cfg`, and measure
+  `parkposition_to_rdm_length`. ADC mode of `[filament_tracker]` needs the
+  fork's ADC API fix. Its polarity and `length_per_pulse` are Kobra S1
+  values, not checked on a Kobra X.
+- **ACE lengths.** `toolchange_load_length` (2000), `extruder_feeding_length`
+  (80) and `toolhead_full_purge_length` (63) in `ace_KX.cfg` are Kobra X
+  values; `parkposition_to_toolhead_length` (900) and `rdm_overshoot_length`
+  (200) are measured for the shared setup with the 4-in-1 and RDM.
+- **Orca lanes come from the fork's `[kx_filament]`**, numbered as printer
+  tools, ACE-fed ones included. `ace_KX.cfg` therefore sets
+  `moonraker_lane_sync_enabled: False`; with it on there would be two writers
+  deleting each other's lanes, so `[kx_filament]` then refuses to start.
+- **Endless spool on the KX is untested.** With the ACE slots on one shared
+  inlet the swap stays in that tube, as on other printers. With a tube per
+  inlet the empty spool's tail is left in its own inlet when the turret
+  turns to the next one; leave endless spool off there until that is tried
+  on a printer.
+
 ### Configuration Setup by Printer Model
 
 #### For Anycubic Kobra 3
@@ -611,7 +705,7 @@ Copy the configuration files:
 cp ~/ACEPRO/config/printer_K3.cfg ~/printer_data/config/printer.cfg
 cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
 cp ~/ACEPRO/config/ace_K3.cfg ~/printer_data/config/ace_K3.cfg
-ln -sf ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
 ```
 
 If you build your own `printer.cfg`, include the shared files in this order:
@@ -621,13 +715,29 @@ If you build your own `printer.cfg`, include the shared files in this order:
 # ace_K3.cfg includes ace_macros_generic.cfg for you
 ```
 
+#### For Anycubic Kobra K3M (BETA)
+
+```bash
+cp ~/ACEPRO/config/printer_K3M.cfg ~/printer_data/config/printer.cfg
+cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
+cp ~/ACEPRO/config/ace_K3M.cfg ~/printer_data/config/ace_K3M.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+```
+
+If you build your own `printer.cfg`, include the shared files in this order:
+```ini
+[include printer_generic_macros.cfg]
+[include ace_K3M.cfg]
+# ace_K3M.cfg includes ace_macros_generic.cfg for you
+```
+
 #### For Anycubic Kobra S1 / S1 Pro
 
 ```bash
 cp ~/ACEPRO/config/printer_KS1.cfg ~/printer_data/config/printer.cfg
 cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
 cp ~/ACEPRO/config/ace_KS1.cfg ~/printer_data/config/ace_KS1.cfg
-ln -sf ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
 ```
 
 If you build your own `printer.cfg`, include the shared files in this order:
@@ -648,7 +758,7 @@ If you build your own `printer.cfg`, include the shared files in this order:
 cp ~/ACEPRO/config/printer_KS1M.cfg ~/printer_data/config/printer.cfg
 cp ~/ACEPRO/config/printer_generic_macros.cfg ~/printer_data/config/printer_generic_macros.cfg
 cp ~/ACEPRO/config/ace_KS1M.cfg ~/printer_data/config/ace_KS1M.cfg
-ln -sf ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
+cp ~/ACEPRO/config/ace_macros_generic.cfg ~/printer_data/config/ace_macros_generic.cfg
 ```
 
 If you build your own `printer.cfg`, include the shared files in this order:
@@ -656,6 +766,27 @@ If you build your own `printer.cfg`, include the shared files in this order:
 [include printer_generic_macros.cfg]
 [include ace_KS1M.cfg]
 # ace_KS1M.cfg includes ace_macros_generic.cfg for you
+```
+
+#### For Anycubic Kobra X (ALPHA)
+
+> [!CAUTION]
+> Read [Kobra X (KX) - alpha status](#kobra-x-kx---alpha-status) first. Needs
+> the Kobra Klipper fork with its Kobra X modules in `~/klipper`.
+
+```bash
+./installer.sh --printer KX --components driver,generic,printer-config,ace-config
+```
+
+Then set `sensor_to_nozzle` and `topology` in
+`~/printer_data/config/kx_multimaterial.cfg`. If you build your own
+`printer.cfg`, include the files in this order:
+```ini
+[include printer_generic_macros.cfg]
+[include kx_multimaterial.cfg]
+[save_variables]
+filename: ~/printer_data/config/saved_variables.cfg
+[include ace_KX.cfg]
 ```
 
 ### Multi-Unit Configuration
@@ -675,6 +806,9 @@ Each unit is automatically detected by USB topology and assigned:
 - **Instance 1**: T4-T7 (second ACE connected)
 - **Instance 2**: T8-T11 (third ACE connected)
 - **Instance 3**: T12-T15 (fourth ACE connected)
+
+Behind a printer-side tool changer with tools of its own (Kobra X direct
+inlets) the numbering starts after those, see the Kobra X section.
 
 **Multiple Instance Example:**
 ```ini
@@ -724,8 +858,7 @@ protocol: auto
 ```
 
 **Baud rate** is protocol-aware and normally does not need to be set explicitly:
-- `protocol: auto` or `protocol: ace1` → default baud 115200
-- `protocol: ace2` → default baud 230400
+- `baud: auto` (default) uses the baud of the protocol each instance resolves to: 115200 for ACE1, 230400 for ACE2 (also under `protocol: auto`)
 
 You can still override baud explicitly (including per-instance) if needed:
 ```ini
@@ -769,10 +902,10 @@ protocol: ace2
 ACE supports both `filament_switch_sensor <name>` and `filament_tracker <name>` sections; the manager wraps trackers so they behave like standard runout helpers.
 
 **Filament Runout Sensors:**
-`filament_runout_sensor_name_nozzle` is required.
+`filament_runout_sensor_name_nozzle` names the toolhead sensor (default `filament_runout_nozzle`).
 `filament_runout_sensor_name_rdm` is optional and helps verify the filament has fully retracted to the hub.
 
-`rdm_overshoot_length` is optional unload tuning (default 50mm): after RDM clears during callback-driven retract, ACE continues retracting by this extra distance before stop.
+`rdm_overshoot_length` is optional unload tuning (default 50mm): after RDM clears during callback-driven retract, ACE continues retracting by this extra distance before stop. It runs within the same retract command, timed at `retract_speed` (the ACE reports no position), so the ACE does not stop and re-engage its gears; only when that retract ends before the overshoot has run does the whole overshoot follow as a retract of its own.
 
 ```ini
 [ace]
@@ -849,7 +982,8 @@ Link `extras/temperature_ace.py` into Klipper extras (see installation) and rest
   Toggle live during a print with `ACE_TANGLE_DETECTION ENABLE=0/1` or the `TANGLE_DETECTION` slider — when the slider is configured it is the source of truth, the command keeps it in sync. To disable entirely: set `tangle_detection: False` and comment out the `[output_pin TANGLE_DETECTION]` block.
 - `disconnect_pause_timeout`: Seconds the ACE feeding the **active tool** may be continuously disconnected mid-print before the print is paused (default -1 = auto: 30 s for ACE 1, 5 s for ACE 2). ACE 2 clamps the filament whenever it is not actively feeding, so a dead ACE 2 starves the extruder within seconds; ACE 1 lets the extruder drag filament through and usually recovers from brief connection blips on its own. Set 0 to disable the fast path (the reconnect-count instability supervision still applies). Per-instance overridable, e.g. `30,1:5`. Requires `ace_connection_supervision` (default on).
 - `persistence_mode`: `deferred` (default) makes `set_and_save` defer disk writes until a safe `flush`; `immediate` writes to disk right away.
-- `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings).
+- `moonraker_lane_sync_unknown_material_*`: Control how placeholder/unknown materials are published to Orca’s lane data (`passthrough`/`empty`/`map` with marker and map-to settings; default `empty`).
+- `rfid_temp_mode`: Which print temperature an RFID tag's extruder range gives a slot: `average` (default), `min` or `max`.
 
 ### OrcaSlicer Filament Sync (Moonraker Lane Data)
 
@@ -867,8 +1001,8 @@ The sync is enabled by default and requires no extra configuration. To control h
 ```ini
 [ace]
 # How to publish slots whose material is unknown/unset:
-#   passthrough  → publish the raw value as-is (default)
-#   empty        → publish as empty slot (Orca treats it as unassigned)
+#   passthrough  → publish the raw value as-is
+#   empty        → publish as empty slot (Orca treats it as unassigned, default)
 #   map          → replace with a configured fallback material name
 moonraker_lane_sync_unknown_material_mode: empty
 
@@ -880,13 +1014,13 @@ moonraker_lane_sync_unknown_material_map_to: PLA
 ```
 
 **Typical setup (recommended):**
-1. Enable RFID or manually label your spools with `ACE_SET_SLOT T=0 MATERIAL="PLA" COLOR=RED`
+1. Enable RFID or manually label your spools with `ACE_SET_SLOT T=0 MATERIAL="PLA" COLOR=RED TEMP=210`
 2. Open OrcaSlicer (latest Beta), connect to your printer via Moonraker
 3. Filament type and color will auto-populate in the tool list
 
 ### Smart Bed Mesh Management
 
-The provided printer configurations (`printer_K3.cfg` `printer_K3M.cfg` `printer_KS1.cfg`) include an optional option in the start macro (`G9111`) that features selective bed mesh handling to save time before every print.
+The provided printer configurations (`printer_K3.cfg` `printer_K3M.cfg` `printer_KS1.cfg` `printer_KS1M.cfg` `printer_KX.cfg`) include an optional option in the start macro (`G9111`) that features selective bed mesh handling to save time before every print.
 
 
 **How it works:**
@@ -913,6 +1047,9 @@ The following parameters can be set globally (applies to all instances) or overr
 - `incremental_feeding_speed` - Retry feed speed (mm/s)
 - `heartbeat_interval` - Status check interval (seconds)
 - `max_dryer_temperature` - Maximum dryer temp (°C)
+- `disconnect_pause_timeout` - Disconnect time before a print pauses (seconds)
+- `protocol` - `auto`, `ace1` or `ace2`
+- `baud` - Serial baud (`auto` follows each instance's protocol)
 
 **Configuration Syntax:**
 
@@ -1005,7 +1142,7 @@ For detailed command examples with config parameters, see [example_cmds.txt](exa
 
 **For complete command documentation with examples, see [example_cmds.txt](example_cmds.txt)**
 
-This driver provides **37 GCode commands** organized by category:
+This driver registers **49 GCode commands** (plus the `T<n>` tool macros) organized by category:
 
 ### Tool Selection
 
@@ -1013,7 +1150,7 @@ This driver provides **37 GCode commands** organized by category:
 |---------|-------------|
 | `T0` - `Tn` | Change to tool (auto-registered based on `ace_count`) |
 | `ACE_GET_CURRENT_INDEX` | Query currently loaded tool index, plus in-flight/unconfirmed toolchange target |
-| `ACE_CHANGE_TOOL` | Execute tool change with validation |
+| `ACE_CHANGE_TOOL` | Execute tool change with validation: `TOOL=<n>`, or `TOOL=-1` to unload (`PARK=1`: only out of the hotend, parked at the toolhead intake) |
 
 **Custom Tool Macro Support:**
 
@@ -1037,9 +1174,10 @@ See commented examples in `ace_K3.cfg` and `ace_KS1.cfg` for reference.
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_SMART_UNLOAD` | Intelligent unload with coordinated retract + RDM-aware validation; turns heater off after success when idle | `[TOOL=<index>]` |
-| `ACE_SMART_LOAD` | Load all non-empty slots to RMS sensor | - |
-| `ACE_FULL_UNLOAD` | Complete unload until slot sensor reports empty (active/non-active aware flow) | `TOOL=<index>` or `TOOL=ALL` |
+| `ACE_SMART_UNLOAD` | Intelligent unload with coordinated retract + RDM-aware validation; when idle, puts the heater back to its previous target after success | `[TOOL=<index>]` (default: current tool) |
+| `ACE_SMART_LOAD` | Load all non-empty slots to the verification sensor (RDM if configured, else toolhead) | - |
+| `ACE_CHECK_TOOL` | One tool's spool to the toolhead sensor and back to its park; an error if it fails | `TOOL=` |
+| `ACE_FULL_UNLOAD` | Complete unload until slot sensor reports empty (active/non-active aware flow) | `[TOOL=<index>\|ALL]` (default: current tool) |
 | `_ACE_HANDLE_PRINT_END` | End-of-print cleanup (disable runout, optionally unload) | `[CUT_TIP=1]` (1=unload+cut, 0=keep loaded) |
 
 Behavior notes:
@@ -1067,15 +1205,15 @@ Behavior notes:
 | `ACE_ENABLE_FEED_ASSIST` | Enable auto-push on spool detection | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
 | `ACE_DISABLE_FEED_ASSIST` | Disable auto-push | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
 
-### Inventory Management (5 commands)
+### Inventory Management (4 commands)
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `ACE_SET_SLOT` | Set slot metadata | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `COLOR=R,G,B MATERIAL=<name> TEMP=<°C>` |
 | `ACE_SET_SLOT` | Mark slot empty | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>`, `EMPTY=1` |
-| `ACE_QUERY_SLOTS` | Query all slots across instances | `[INSTANCE=<0-3>]` omit for all |
-| `ACE_SAVE_INVENTORY` | Persist inventory to saved_variables.cfg | `[INSTANCE=<0-3>]` |
-| `ACE_RESET_PERSISTENT_INVENTORY` | Clear all slot metadata | `INSTANCE=<0-3>` |
+| `ACE_QUERY_SLOTS` | Query all slots across instances | `[INSTANCE=<0-3>\|TOOL=<n>] [VERBOSE=1]` omit INSTANCE/TOOL for all |
+| `ACE_SAVE_INVENTORY` | Persist inventory to saved_variables.cfg | `[INSTANCE=<0-3>]` (default 0) |
+| `ACE_RESET_PERSISTENT_INVENTORY` | Clear all slot metadata | `[INSTANCE=<0-3>]` omit for all |
 
 ## 🧵 Spoolman Integration
 
@@ -1130,34 +1268,60 @@ The integration handles three ways of identifying spools:
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_SET_PURGE_AMOUNT` | Override purge for next tool change | `PURGELENGTH=<mm> PURGESPEED=<mm/min> [INSTANCE=<0-3>]` |
-| `ACE_RESET_ACTIVE_TOOLHEAD` | Reset active tool to -1 | `INSTANCE=<0-3>` |
+| `ACE_SET_PURGE_AMOUNT` | Override purge for next tool change | `PURGELENGTH=<mm> [PURGESPEED=<mm/min>] [INSTANCE=<0-3>]` |
+| `ACE_RESET_ACTIVE_TOOLHEAD` | Reset feed assist on all instances, clear current and target tool (-1), filament position to bowden | - |
+| `ACE_TANGLE_DETECTION` | Toggle tangle detection live | `[ENABLE=0\|1]` omit to query |
+| `_ACE_TANGLE_DISABLE_AND_RESUME` | Internal: tangle prompt button, disables tangle detection and resumes | - |
 
-### System & Diagnostics (8 commands)
+### System & Diagnostics (12 commands)
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `ACE_GET_STATUS` | Query ACE hardware status | `[INSTANCE=<0-3>] [VERBOSE=1]` - omit INSTANCE for all, VERBOSE=1 for detailed output |
 | `ACE_GET_CONNECTION_STATUS` | Query connection stability for all instances | - |
 | `ACE_RECONNECT` | Manually reconnect serial | `[INSTANCE=<0-3>] [DELAY=5]` - omit INSTANCE for all, DELAY=reconnect delay in seconds |
+| `ACE_REDETECT` | Re-detect an instance mis-typed at startup (e.g. ACE2 adapter enumerated late) | - |
+| `ACE_RESET_SHARED_BUS_BINDINGS` | Clear persisted ACE2 shared-bus bindings | `[RECONNECT=1\|0] [DELAY=2.0]` |
+| `ACE_CLEANUP_STALE_VARS` | List stale ACE saved variables; delete them with `CONFIRM=1` | `[CONFIRM=1]` |
+| `ACE_FLUSH` | Write pending saved-variable changes to disk now | - |
 | `ACE_DEBUG_SENSORS` | Print all sensor states | - |
 | `ACE_DEBUG_STATE` | Print manager and instance state | - |
-| `ACE_DEBUG` | Send raw debug request to hardware | `INSTANCE=<0-3> METHOD=<name> [PARAMS=<json>]` |
-| `ACE_DEBUG_CHECK_SPOOL_READY` | Test spool ready check with timeout | `TOOL=<0-15> [TIMEOUT=<sec>]` |
+| `ACE_DEBUG` | Send raw debug request to hardware | `[INSTANCE=<0-3>] [METHOD=<name>] [PARAMS=<json>]` (defaults: instance 0, `get_status`) |
 | `ACE_SHOW_INSTANCE_CONFIG` | Display resolved configuration | `[INSTANCE=<0-3>]` |
+| `ACE_FIRMWARE_UPDATE` | Flash an ACE 2 box's firmware (dry run without `CONFIRM=1`) | `INSTANCE=<n> FILE=ACE2_V<x.y.z>_<YYYYMMDD>.bin [CONFIRM=1]` - see below |
+
+#### ACE 2 firmware update
+
+1. Upload the firmware image (for example `ACE2_V1.1.34_20260430.bin`) into
+   the config directory with Mainsail's file manager. The name must keep
+   Anycubic's pattern: the version sent to the box is read from it. Update
+   packages (`.swu`) are not accepted; use the `.bin` inside.
+2. Stop the box first: no print running or paused, feed assist off
+   (`ACE_DISABLE_FEED_ASSIST`), box status `ready`.
+3. `ACE_FIRMWARE_UPDATE INSTANCE=0 FILE=ACE2_V1.1.34_20260430.bin` checks the
+   file and prints current and new version: nothing is sent.
+4. Repeat with `CONFIRM=1`. Progress is printed in 10 % steps; about 1100
+   chunks take a few minutes. Do not power off the box until the result line.
+
+Results: `verified` (the box reports the new version), `unverified` (the image
+was committed but the box did not report the new version; run `ACE_RECONNECT
+INSTANCE=<n>` and check `ACE_GET_STATUS`), `failed` (aborted before the
+commit; the box keeps its current firmware). Only ACE 2 boxes can be updated,
+one at a time.
 
 ### Testing & Advanced
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `ACE_DEBUG_INJECT_SENSOR_STATE` | Inject sensor state for testing | `TOOLHEAD=0\|1 RMS=0\|1` or `RESET=1` |
+| `ACE_DEBUG_INJECT_SENSOR_STATE` | Inject sensor state for testing (1 = filament present) | `TOOLHEAD=0\|1 RDM=0\|1` or `RESET=1` |
 | `ACE_DEBUG_SET_CURRENT_INDEX` | Override saved current tool index (also clears the in-flight target) | `[TOOL=<n>]` omit/-1 for none |
 | `ACE_DEBUG_SET_TARGET_INDEX` | Override saved in-flight toolchange target | `[TOOL=<n>]` omit/-1 for none |
+| `ACE_DEBUG_SET_FILAMENT_STATE` | Override saved filament position (no motion) | `[STATE=bowden\|splitter\|toolhead\|nozzle]` omit to query |
 
-**Command Parameter Resolution:**
-- **Priority 1**: `INSTANCE=<n> INDEX=<n>` (explicit slot)
-- **Priority 2**: `T=<tool>` or `TOOL=<tool>` (mapped to instance/slot)
-- **Priority 3**: Fallback to instance 0 if neither specified
+**Command Parameter Resolution (slot commands):**
+- **Priority 1**: `T=<tool>` (mapped to instance/slot)
+- **Priority 2**: `INSTANCE=<n> INDEX=<n>` (both required)
+- Neither given: the command fails with an error
 
 
 ### System Control
@@ -1174,12 +1338,12 @@ When a slot transitions to `ready` state and the ACE reports RFID tag data, the 
 
 1. **Reads RFID Data**: Material name, RGB color (0-255), temperature, diameter, brand, SKU, etc.
 2. **Updates Inventory**: Copies RFID data to slot inventory
-3. **Auto-Temperature**: Sets temperature based on material type:
-   - PLA → 210°C
+3. **Auto-Temperature**: Takes the tag's extruder temperature range, picked by `rfid_temp_mode` (`average` of min and max by default, or `min`/`max`). Only a tag without a range falls back to a per-material default, for example:
+   - PLA → 200°C
    - PLA High Speed → 215°C
-   - PETG → 240°C
+   - PETG → 235°C
    - ABS → 240°C
-   - TPU → 220°C
+   - TPU → 210°C
 4. **Persists State**: Saves to `saved_variables.cfg`
 5. **UI Notification**: Emits `// {"instance":..., "slots":...}` for instant KlipperScreen refresh
 
@@ -1190,7 +1354,7 @@ ACE_DISABLE_RFID_SYNC [INSTANCE=0]  # Disable auto-sync
 ACE_RFID_SYNC_STATUS [INSTANCE=0]   # Check sync status
 ```
 
-**Black Color Handling**: RFID tags reporting RGB(0,0,0) are accepted as valid black and overwrite manual values.
+**Black Color Handling**: RGB(0,0,0) from a tag's color list is accepted as valid black and overwrites manual values; an all-zero single `color` field is ignored.
 
 **UI Behavior**: When RFID sync is enabled and a slot has an RFID spool, the KlipperScreen config dialog locks manual material/color changes to prevent conflicts.
 
@@ -1200,7 +1364,7 @@ When a spool **without an RFID tag** is inserted into an empty slot, the driver 
 
 - **Material**: `Unknown` - Clearly indicates unconfigured spool, won't match in endless spool "exact" or "material" modes
 - **Color**: Black RGB(0, 0, 0) - Default empty slot color
-- **Temperature**: 225°C - Safe middle-ground for most materials
+- **Temperature**: 0°C - Not set; configure it before use
 
 ⚠️ **Important**: It's your responsibility to configure the correct material and temperature for non-RFID spools before use!
 
@@ -1213,9 +1377,9 @@ ACE_SET_SLOT T=0 MATERIAL=PLA COLOR=255,0,0 TEMP=210
 ACE_SET_SLOT T=0 MATERIAL=PETG COLOR=BLUE TEMP=240
 ```
 
-**Named Colors**: RED, GREEN, BLUE, YELLOW, ORANGE, PURPLE, WHITE, BLACK, GRAY
+**Named Colors**: BLACK, BLUE, BLUEISH, CYAN, DARK_GRAY, DARK_YELLOW, GRAY, GREEN, GREENISH, LIGHT_GRAY, MAGENTA, ORANGE, RED, REDISH, YELLOW, WHITE, ORCA
 
-**Metadata Restoration**: If you remove and reinsert the same spool, saved metadata (color, material, temp) is automatically restored instead of applying defaults.
+**Metadata Restoration**: If a spool runs out or is removed while printing or paused and is reinserted, its saved metadata (color, material, temp) is restored instead of applying defaults.
 
 For detailed inventory examples, see [example_cmds.txt](example_cmds.txt#inventory-management).
 
@@ -1249,31 +1413,21 @@ ACE_QUERY_SLOTS VERBOSE=1
 **Display Format:**
 ```
 === ACE Instance 0 Slots ===
-[#] T# | Status | RFID     | SKU          | Brand        | Material        | RGB              |   Temp | Extruder     | Bed
+[#] T# | Status | RFID     | SKU          | Brand        | Material        | Color            |   Temp | Extruder     | Bed
 -------+--------+----------+--------------+--------------+-----------------+------------------+--------+--------------+------------
 [0] T0 | -----  | ----     | ---          | ---          | Empty           | RGB(0,0,0)       |    0°C | ---          | ---
 [1] T1 | ready  | RFID     | AHPLBK-101   | Anycubic     | PLA             | RGB(255,255,255) |  210°C | 190-230°C    | 50-60°C
 [2] T2 | ready  | ----     | ---          | ---          | PETG            | RGB(0,0,255)     |  240°C | ---          | ---
 [3] T3 | ready  | RFID     | AHPLBK-101   | Anycubic     | PLA             | RGB(255,0,0)     |  210°C | 190-230°C    | 50-60°C
-
-ACE[1] Slots:
-  0: [T4] ready, [----], PLA, RGB(255,255,0), 210°C
-  1: [T5] -----, [----], -----, RGB(128,128,128), 0°C
 ```
 
-**Field Descriptions:**
-- `[Tn]` - Tool number (Instance 0: T0-T3, Instance 1: T4-T7, etc.)
-- Status - `ready` or `-----` (empty)
-- `[RFID]` or `[----]` - RFID tag present indicator
-- Material - Material name or `-----` (empty)
-- `RGB(r,g,b)` - Color as RGB values (0-255 range)
-- Temperature - Print temperature in °C (0°C when empty)
+A loaded slot without a material shows `???`.
 
 
 
 ### Empty Slot Data Retention & Auto-Restore
 
-When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver intelligently preserves core metadata:
+When a slot becomes empty during a print (runout, spool removed while printing or paused), the driver preserves core metadata. `ACE_SET_SLOT ... EMPTY=1`, or a spool removed while not printing, resets the slot to empty defaults instead.
 
 **Preserved Data:**
 - ✅ **RGB Color** - Full RGB(r,g,b) values retained
@@ -1290,16 +1444,11 @@ When a slot becomes empty (runout, manual `EMPTY=1`, spool removed), the driver 
 
 2. **Endless Spool Matching**: Preserved metadata enables endless spool to match based on the previous spool's material/color, even after it runs out.
 
-3. **Visual Feedback**: Empty slots display as:
-   ```
-   0: [T0] -----, [----], -----, RGB(255,0,0), 0°C
-   ```
-   The RGB color is visible even when empty, helping you remember what was loaded.
 
 **Example Workflow:**
 ```
 1. Load red PLA spool → Slot 0: status=ready, material=PLA, color=RGB(255,0,0), temp=210°C
-2. Runout detected → Slot 0: status=empty (color/material/temp preserved)
+2. Runout detected while printing → Slot 0: status=empty (color/material/temp preserved)
 3. Insert new spool:
    a) IF RFID present → All fields updated from RFID tag
    b) IF NO RFID → Restores to ready with RGB(255,0,0), PLA, 210°C
@@ -1322,8 +1471,9 @@ Monitors ACE connection stability and automatically pauses prints if connection 
 ### Retry Backoff
 
 Failed connection attempts use exponential backoff to avoid log spam:
-- **Pattern**: 5s → 8s → 11s → 17s → 25s → 30s → 5s (cyclic)
-- Backoff resets to 5s after successful connection
+- **Pattern**: 5s → 8s → 11s → 17s → 25s → 5s (factor 1.5, cyclic; it starts over instead of reaching 30s)
+- Once the ACE's USB location is known the floor is 1s instead of 5s
+- Backoff resets to the floor after a successful connection
 
 ### Configuration
 
@@ -1345,6 +1495,8 @@ When ACE reconnects (after power cycle or USB disconnect), feed assist is automa
 # ACE[0]: Feed assist restored on slot 2
 ```
 
+Feed assist also pauses while the printer is idle. When Klipper's `[idle_timeout]` fires, the loaded tool's assist is stopped, so the ACE motor does not keep pushing a standing filament. The next toolhead activity (`idle_timeout` back to Printing) re-enables it, provided the same tool is still loaded; a tool change in between arms the new tool's assist itself.
+
 To disable automatic feed assist restoration:
 
 ```ini
@@ -1357,10 +1509,12 @@ feed_assist_active_after_ace_connect: False
 ```gcode
 ACE_GET_CONNECTION_STATUS
 
-# Example output:
+# Example output (per instance: state, port, then three supervision layers):
 # === ACE Connection Status ===
-# ACE[0]: Connected (stable)
-# ACE[1]: Disconnected, 3/4 reconnects in 180s, next retry: 17s
+# ACE[0]: Connected (stable) (port=/dev/ttyACM0, usb=1-1.2)
+#   ├─ Layer 1 - Serial Health: healthy (enabled) - 0/15 timeouts, 0/15 unsolicited (last 30s)
+#   ├─ Layer 2 - Backoff: current=1.0s (reset on next failure), 0 failures (last 180s)
+#   └─ Layer 3 - Manager: stable
 ```
 ### Troubleshooting Connection Issues
 
@@ -1382,10 +1536,11 @@ If you see the connection issue dialog during a print, follow these steps:
    ACE_GET_CONNECTION_STATUS
    
    # Look for "Connected (stable)" - this means good to continue:
-   # ACE[0]: Connected (stable)
+   # ACE[0]: Connected (stable) (port=..., usb=...)
    
    # If you see "stabilizing" or reconnects, wait 30 seconds and check again:
-   # ACE[0]: Connected (stabilizing, 23s), 4/4 reconnects in 180s  ← WAIT
+   # ACE[0]: Connected (stabilizing, 23s) (port=..., usb=...)  ← WAIT
+   #   └─ Layer 3 - Manager: stabilizing (23s/30s)
    ```
 
 4. **When to Resume**
@@ -1432,21 +1587,12 @@ Automatically switches to a matching spool when filament runs out, enabling cont
 ### How It Works
 
 1. **Runout Detected** → Toolhead sensor detects filament absence
-2. **Jam Detection** → RMS sensor distinguishes true runout from jam
-3. **Material Matching** → Searches all slots for a compatible replacement
+2. **Material Matching** → Searches all slots for a compatible replacement
   - **Match Mode "exact"**: Material **and** color must match
   - **Match Mode "material"**: Material must match, color is ignored
   - **Match Mode "next"**: First **ready** spool in round-robin order, ignoring material/color
-4. **Automatic Swap** → Marks old slot empty, changes to matching tool
-5. **Resume Print** → Continues printing without user intervention (or pauses if no match)
-
-### Detection Logic
-
-| Toolhead Sensor | RMS Sensor | Diagnosis |
-|----------------|------------|-----------|
-| CLEAR | CLEAR | **True Runout** → Find match & swap |
-| CLEAR | TRIGGERED | **Jam/Break** → Pause & notify |
-| TRIGGERED | TRIGGERED | Normal (filament present) |
+3. **Automatic Swap** → Marks old slot empty, changes to matching tool
+4. **Resume Print** → Continues printing without user intervention (or pauses if no match)
 
 ### Enable/Disable
 
@@ -1495,9 +1641,8 @@ ACE_GET_ENDLESS_SPOOL_MODE
 
 - **Match Found**: Automatic tool change, print continues
 - **No Match**: Print pauses, user notification with RESUME/CANCEL buttons
-- **Jam Detected**: Immediate pause, notify user of jam location
 - **Search Order**: Starts at the next tool index and wraps around; `next` mode still requires slot status `ready`.
-- **Timeout Protection**: 5-minute safety timeout for swap operations
+- **Swap Attempts**: Up to 3 candidates; a failed load is unloaded and the next match is tried
 
 ### Requirements
 
@@ -1561,6 +1706,10 @@ When a tool change fails (e.g., filament loading issue, sensor timeout, path blo
    - **Cancel Print** (during print) - Abort the print job
    - **Continue** (not printing) - Dismiss dialog and continue
 
+Behind a printer-side tool changer that owns `T<n>` (`register_tool_macros:
+False`, Kobra X) the failure is reported to it as an error instead; it holds
+the print and offers its own retry.
+
 **If not printing:** Extruder heater is automatically turned off for safety.
 If printing, the idle time of the printer in PAUSE mode (before shutting down) is extended to a couple of hours to survive overnight pauses.
 Heatbed is left ON, but nozzle temp is reduced in PAUSE mode, so resuming / retry toolchange can take few minutes until the nozzle reaches print temperature again.
@@ -1571,7 +1720,7 @@ When a toolchange fails:
 1. **Check the filament path is clear:**
    - Use `ACE_DEBUG_SENSORS` to verify sensor states
    - Ensure toolhead sensor shows CLEAR (no filament blocking)
-   - Check RMS sensor is also CLEAR (if available)
+   - Check RDM sensor is also CLEAR (if available)
    - Look for physical obstructions (tangled filament, jam at splitter, etc.)
 
 2. **Clear any obstructions:**
@@ -1612,7 +1761,7 @@ When a toolchange fails:
 ### Debug Commands
 
 ```gcode
-ACE_DEBUG_SENSORS                   # Print all sensor states (toolhead, RMS, path-free)
+ACE_DEBUG_SENSORS                   # Print all sensor states (toolhead, RDM, path-free)
 ACE_DEBUG_STATE                     # Print manager state (tool mapping, filament position)
 ACE_GET_STATUS INSTANCE=0           # Query ACE hardware status (compact JSON)
 ACE_GET_STATUS INSTANCE=0 VERBOSE=1 # Query ACE hardware (detailed, all fields)
@@ -1627,8 +1776,8 @@ For testing sensor functionality — do not use if you don't know what you are d
 
 ```gcode
 # Manual sensor state injection (for testing)
-ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=1 RMS=0   # Simulate runout
-ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0 RMS=1   # Simulate jam
+ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0         # Toolhead sensor reads empty (runout)
+ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=1 RDM=1   # Both sensors read filament present
 ACE_DEBUG_INJECT_SENSOR_STATE RESET=1             # Use real sensors again
 ```
 
@@ -1712,7 +1861,8 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
    icon: settings
    panel: acepro
    ```
-   Add these to your KlipperScreen config (e.g., `main_menu.conf`). The `__print` entry keeps the panel visible during a job.
+   Add these to `~/printer_data/config/KlipperScreen.conf`. The `__print` entry keeps the panel visible during a job.
+   Also set `font_size = small` in its `[main]` section, and apply the matching `patches/ace_global_subscription*.patch` to `~/KlipperScreen` (`patch -p1`) so KlipperScreen subscribes to the ACE objects.
 
 4. **Restart KlipperScreen service:**
    ```bash
@@ -1743,7 +1893,7 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
 
 **Endless Spool:**
 - Toggle endless spool on/off
-- Set match mode (exact material+color or material only)
+- Set match mode (exact material+color, material only, or next ready)
 - View current endless spool status
 
 **Dryer Control:**
@@ -1755,7 +1905,7 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
 ### Sensor Installation (Required)
 
 1. **Toolhead Sensor**: Before hotend entry (runout detection)
-2. **RMS Sensor**: At splitter/return module (jam detection, path validation)
+2. **RDM Sensor** (optional): At splitter/return module (path validation, unload verification)
 3. **Wiring**: Connect to configured pins with proper pullup/pulldown
 
 ### USB Connection

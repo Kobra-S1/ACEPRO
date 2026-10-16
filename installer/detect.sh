@@ -37,6 +37,7 @@ printer_display_name() {
         KS1) echo "Kobra S1" ;;
         K3M) echo "Kobra K3M (BETA)" ;;
         KS1M) echo "Kobra S1 Max (ALPHA - UNTESTED)" ;;
+        KX)  echo "Kobra X (ALPHA)" ;;
         *)   echo "$1" ;;
     esac
 }
@@ -56,6 +57,9 @@ printer_maturity_warning() {
             echo "Expect crashes into the frame, false filament runouts and failed loads."
             echo "Review every section against your machine, and keep a hand on the power"
             echo "switch during the first homing, first cut and first purge."
+            ;;
+        KX)
+            echo "The Kobra X (KX) config is ALPHA, dont use it!"
             ;;
     esac
 }
