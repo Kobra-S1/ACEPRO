@@ -9,6 +9,11 @@ from typing import Any, Dict, Mapping, Tuple
 
 from .protocol import AceCommandSpec, AceProtocolAdapter, AceTransportSpec
 
+# The ACE cannot take frames over 1024 bytes (PROTOCOL.md) and its largest
+# real reply, a 4-slot status, stays well below that. A longer length field
+# is corruption: waiting for its payload would stall every reply behind it.
+MAX_PAYLOAD_LEN = 2048
+
 
 class AceJsonProtocolAdapter(AceProtocolAdapter):
     """ACE Gen1 adapter using the current JSON method/params format."""
@@ -59,6 +64,18 @@ class AceJsonProtocolAdapter(AceProtocolAdapter):
             return bytearray(b"\xFF"), len(working) - 1
         return bytearray(), len(working)
 
+    @classmethod
+    def _skip_to_next_header(cls, working: bytearray) -> tuple[bytearray, int]:
+        """Drop a frame that starts at offset 0 but cannot be parsed.
+
+        Returns the buffer from the next header on and how many bytes were
+        dropped.
+        """
+        next_header = working.find(bytes([0xFF, 0xAA]), 1)
+        if next_header == -1:
+            return cls._keep_split_header(working)
+        return working[next_header:], next_header
+
     def extract_responses(
         self,
         buffer: bytearray,
@@ -85,18 +102,21 @@ class AceJsonProtocolAdapter(AceProtocolAdapter):
                     break
 
             payload_len = struct.unpack("<H", working[2:4])[0]
+            if payload_len > MAX_PAYLOAD_LEN:
+                working, dropped = self._skip_to_next_header(working)
+                notices.append(
+                    f"Implausible payload length {payload_len}, resyncing "
+                    f"(dropped {dropped} bytes)"
+                )
+                continue
+
             frame_len = 2 + 2 + payload_len + 2 + 1
             if len(working) < frame_len:
                 break
 
             terminator_idx = 4 + payload_len + 2
             if working[terminator_idx] != 0xFE:
-                next_header = working.find(bytes([0xFF, 0xAA]), 1)
-                if next_header == -1:
-                    working, dropped = self._keep_split_header(working)
-                else:
-                    dropped = next_header
-                    working = working[next_header:]
+                working, dropped = self._skip_to_next_header(working)
                 notices.append(
                     f"Invalid frame tail, resyncing (dropped {dropped} bytes)"
                 )

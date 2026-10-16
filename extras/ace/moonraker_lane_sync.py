@@ -302,8 +302,6 @@ class MoonrakerLaneSyncAdapter:
         if not value:
             return ""
         mode = self.unknown_material_mode
-        if mode not in ("passthrough", "empty", "map"):
-            mode = "empty"
         if value.upper() not in self.unknown_material_markers:
             return value
         if mode == "empty":

@@ -8,7 +8,13 @@ import pytest
 from ace.ace2_bus import Ace2BusSession
 from ace.protocol import resolve_protocol_name, transport_description_matches
 from ace.protocol_ace1 import AceJsonProtocolAdapter
-from ace.protocol_ace2 import ACE2_COMMAND_CATALOG, AceProtoProtocolAdapter
+from ace.protocol_ace2 import (
+    ACE2_COMMAND_CATALOG,
+    AceProtoProtocolAdapter,
+    _pb_bytes as ace2_pb_bytes,
+    _pb_decode,
+    _pb_uint32 as ace2_pb_uint32,
+)
 
 
 def _calc_crc(buffer):
@@ -521,6 +527,19 @@ class TestAce2BusSession:
             (30, 30, 30),
         ]
 
+    def test_assignment_plan_skips_ids_already_held(self):
+        session = Ace2BusSession(port="/dev/ttyUSB0")
+        session.bind_logical_instance(0, 10, 10, 10)
+        session.assign_device_id(10, 10, 10, 1)
+        session.note_present_device(20, 20, 20)
+
+        plan = session.build_assignment_plan()
+
+        newcomer = session.record_discovered_device(20, 20, 20)
+        assert newcomer.device_id is not None
+        assert newcomer.device_id != 1
+        assert sorted(device.device_id for device in plan) == [1, newcomer.device_id]
+
     def test_reset_clears_runtime_state(self):
         session = Ace2BusSession(port="/dev/ttyUSB0")
         session.bind_logical_instance(1, 10, 20, 30)
@@ -750,3 +769,223 @@ class TestAceJsonResyncPreservesFrameBoundaries:
         )
         assert [response["id"] for response in responses] == [13]
         assert any("resync" in notice.lower() for notice in notices)
+
+
+class TestAceJsonExtractResponses:
+    """Parser kit for the ACE1 JSON frame reader."""
+
+    def setup_method(self):
+        self.adapter = AceJsonProtocolAdapter()
+
+    @staticmethod
+    def _json_frame(request_id):
+        """Build a valid ACE1 JSON response frame."""
+        payload = json.dumps({"id": request_id, "result": {}}).encode("utf-8")
+        return (
+            b"\xFF\xAA"
+            + struct.pack("<H", len(payload))
+            + payload
+            + struct.pack("<H", _calc_crc(payload))
+            + b"\xFE"
+        )
+
+    def test_an_implausible_length_does_not_stall_the_following_frame(self):
+        """A corrupted u16 length must not make the reader wait for 64 KiB
+        that will never come: the valid frame behind it is decoded now."""
+        corrupt_header = b"\xFF\xAA" + struct.pack("<H", 0xFFFF) + b"\x00\x00\x00"
+        good = self._json_frame(request_id=21)
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(corrupt_header + good), _calc_crc
+        )
+
+        assert [response["id"] for response in responses] == [21]
+        assert remaining == bytearray()
+        assert any("65535" in notice for notice in notices)
+
+    def test_a_frame_split_across_two_reads_is_decoded_once_complete(self):
+        good = self._json_frame(request_id=31)
+        first_read, second_read = good[:10], good[10:]
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(first_read), _calc_crc
+        )
+        assert (responses, notices) == ([], [])
+        assert remaining == bytearray(first_read)
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            remaining + bytearray(second_read), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [31]
+        assert remaining == bytearray()
+        assert notices == []
+
+    def test_junk_without_a_header_is_dropped(self):
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(b"\x01" * 10), _calc_crc
+        )
+
+        assert responses == []
+        assert remaining == bytearray()
+        assert any("junk" in notice.lower() for notice in notices)
+
+    def test_a_short_header_is_kept_for_the_next_read(self):
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(b"\xFF\xAA\x05"), _calc_crc
+        )
+
+        assert (responses, notices) == ([], [])
+        assert remaining == bytearray(b"\xFF\xAA\x05")
+
+
+def _ace2_frame(command_code, payload, request_id=1, flags=0x80):
+    """Build a valid ACE2 response frame around a protobuf payload."""
+    inner = bytes(
+        [flags, request_id & 0xFF, (request_id >> 8) & 0xFF, command_code, len(payload)]
+    ) + payload
+    return b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+
+
+class TestAceProtoExtractResponses:
+    """Parser kit for the ACE2 frame reader."""
+
+    GET_STATUS = 6
+    GET_FILAMENT_INFO = 13
+
+    def setup_method(self):
+        self.adapter = AceProtoProtocolAdapter()
+
+    def test_a_frame_split_across_two_reads_is_decoded_once_complete(self):
+        payload = _pb_uint(1, 1) + _pb_uint(3, 31) + _pb_uint(4, 40)
+        good = _ace2_frame(self.GET_STATUS, payload, request_id=41)
+        # Past the 10-byte minimum, so the reader knows the frame length.
+        first_read, second_read = good[:12], good[12:]
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(first_read), _calc_crc
+        )
+        assert (responses, notices) == ([], [])
+        assert remaining == bytearray(first_read)
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            remaining + bytearray(second_read), _calc_crc
+        )
+        assert [response["id"] for response in responses] == [41]
+        assert remaining == bytearray()
+        assert notices == []
+
+    def test_junk_before_a_header_is_skipped(self):
+        good = _ace2_frame(self.GET_STATUS, b"", request_id=42)
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(b"\x01\x02\x03" + good), _calc_crc
+        )
+
+        assert [response["id"] for response in responses] == [42]
+        assert remaining == bytearray()
+        assert any("3 bytes" in notice for notice in notices)
+
+    def test_a_short_header_is_kept_for_the_next_read(self):
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(b"\xFF\xAA\x80\x01"), _calc_crc
+        )
+
+        assert (responses, notices) == ([], [])
+        assert remaining == bytearray(b"\xFF\xAA\x80\x01")
+
+    def test_a_crc_mismatch_drops_the_frame_with_a_notice(self):
+        corrupt = bytearray(_ace2_frame(self.GET_STATUS, b"", request_id=43))
+        corrupt[-2] ^= 0xFF
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            corrupt, _calc_crc
+        )
+
+        assert responses == []
+        assert remaining == bytearray()
+        assert any("crc" in notice.lower() for notice in notices)
+
+    def test_a_status_slot_without_filament_is_empty(self):
+        slot_empty = _pb_uint(1, 0) + _pb_uint(2, 0)
+        payload = _pb_uint(1, 1) + _pb_bytes(9, slot_empty)
+
+        responses, _, _ = self.adapter.extract_responses(
+            bytearray(_ace2_frame(self.GET_STATUS, payload)), _calc_crc
+        )
+
+        slot = responses[0]["result"]["slots"][0]
+        assert (slot["status"], slot["status_detail"], slot["rfid"]) == (
+            "empty", "empty", 0)
+
+    def test_a_filament_info_colour_decodes_to_rgba(self):
+        # PROTOCOL.md: colors are [[R, G, B, A]]; the ACE2 packs one colour
+        # as a uint32 with red in the most significant byte.
+        colour = ace2_pb_uint32(1, 0x11223344)
+        payload = ace2_pb_uint32(1, 0) + ace2_pb_bytes(5, colour)
+
+        responses, _, _ = self.adapter.extract_responses(
+            bytearray(_ace2_frame(self.GET_FILAMENT_INFO, payload)), _calc_crc
+        )
+
+        assert responses[0]["result"]["colors"] == [[0x11, 0x22, 0x33, 0x44]]
+
+
+class TestAceProtoRequestBuilders:
+    """Fields each ACE2 request builder emits."""
+
+    def setup_method(self):
+        self.adapter = AceProtoProtocolAdapter()
+
+    def test_feed_uses_mode_0_with_whole_numbers(self):
+        request = self.adapter.build_feed_filament_request(1, 50.7, 20.0)
+
+        assert request == {
+            "command": "FEED_OR_ROLLBACK",
+            "params": {"index": 1, "length": 50, "speed": 20, "mode": 0},
+        }
+
+    def test_stop_feed_and_stop_rollback_name_the_slot(self):
+        assert self.adapter.build_stop_feed_filament_request(3) == {
+            "command": "STOP_FEED_OR_ROLLBACK", "params": {"index": 3}}
+        assert self.adapter.build_stop_unwind_filament_request(2) == {
+            "command": "STOP_FEED_OR_ROLLBACK", "params": {"index": 2}}
+
+    def test_both_speed_updates_send_slot_and_whole_speed(self):
+        assert self.adapter.build_update_feeding_speed_request(1, 25.9) == {
+            "command": "UPDATE_SPEED", "params": {"index": 1, "speed": 25}}
+        assert self.adapter.build_update_unwinding_speed_request(2, 30.0) == {
+            "command": "UPDATE_SPEED", "params": {"index": 2, "speed": 30}}
+
+    def test_get_filament_info_names_the_slot(self):
+        assert self.adapter.build_get_filament_info_request(3) == {
+            "command": "GET_FILAMENT_INFO", "params": {"index": 3}}
+
+    def test_start_drying_sends_temperature_and_duration(self):
+        assert self.adapter.build_start_drying_request(55, 240) == {
+            "command": "DRYING",
+            "params": {"temp": 55, "duration": 240, "auto_roll": False},
+        }
+
+
+class TestAceProtoPbDecode:
+    """The minimal protobuf decoder never raises on malformed payloads."""
+
+    def test_a_truncated_varint_ends_the_decode(self):
+        fields = _pb_decode(b"\x08\x96")
+
+        assert list(fields) == [1]
+
+    def test_a_fixed32_field_decodes_as_float(self):
+        fields = _pb_decode(b"\x0d" + struct.pack("<f", 1.5))
+
+        assert fields == {1: [(5, 1.5)]}
+
+    def test_a_truncated_fixed32_field_decodes_as_zero(self):
+        fields = _pb_decode(b"\x0d\x00")
+
+        assert fields == {1: [(5, 0)]}
+
+    def test_an_unknown_wire_type_stops_but_keeps_earlier_fields(self):
+        fields = _pb_decode(b"\x08\x01" + b"\x13\x00\x00")
+
+        assert fields == {1: [(0, 1)]}

@@ -23,6 +23,7 @@ from ace.config import (
     ACE_INSTANCES,
     OVERRIDABLE_PARAMS,
 )
+from ace.protocol import normalize_protocol_name
 
 
 class TestGetToolOffset:
@@ -506,6 +507,20 @@ class TestParseInstanceChoiceConfig:
             parse_instance_choice_config("0:auto,1:ace1_json", 2, "protocol")
 
 
+    @pytest.mark.parametrize("config_value", ["", "a:x", "1:"])
+    def test_malformed_choice_names_the_parameter(self, config_value):
+        with pytest.raises(ValueError, match="protocol"):
+            parse_instance_choice_config(config_value, 0, "protocol")
+
+    def test_two_global_defaults_without_override_are_refused(self):
+        with pytest.raises(ValueError, match="Multiple global defaults for protocol"):
+            parse_instance_choice_config("auto,ace1_json", 0, "protocol")
+
+    def test_two_global_defaults_are_refused(self):
+        with pytest.raises(ValueError, match="Multiple global defaults for protocol"):
+            parse_instance_choice_config("auto,ace1_json,1:ace2_proto", 0, "protocol")
+
+
 class TestParseInstanceBaudConfig:
     """Test per-instance baud resolution for mixed protocol setups."""
 
@@ -523,6 +538,18 @@ class TestParseInstanceBaudConfig:
         config = "auto,1:230400"
         assert parse_instance_baud_config(config, 0, "ace1_json") == 115200
         assert parse_instance_baud_config(config, 1, "ace2_proto") == 230400
+
+    def test_a_non_numeric_baud_names_the_parameter(self):
+        with pytest.raises(ValueError, match="baud: 'fast'"):
+            parse_instance_baud_config("fast", 0, "ace1_json")
+
+
+class TestNormalizeProtocolName:
+    """Protocol names are validated where they are normalized."""
+
+    def test_an_unknown_protocol_is_refused_by_name(self):
+        with pytest.raises(ValueError, match="'ace3'"):
+            normalize_protocol_name("ace3")
 
 
 class TestGetAceInstanceAndSlot:

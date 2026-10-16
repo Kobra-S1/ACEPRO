@@ -584,7 +584,7 @@ def parse_instance_choice_config(config_value, instance_num, param_name):
     """Parse string config values that support per-instance overrides."""
     value_str = str(config_value).strip()
 
-    if ':' not in value_str:
+    if ':' not in value_str and ',' not in value_str:
         if not value_str:
             raise ValueError(f"Invalid config value for {param_name}: '{value_str}'")
         return value_str
