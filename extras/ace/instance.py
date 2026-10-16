@@ -873,7 +873,9 @@ class AceInstance:
         for attempt in range(1, max_retries + 1):
             ace_status_before = self._info.get('status', 'unknown')
             retract_start_time = time.time()
-            early_stop_state = {"triggered": False, "elapsed": None}
+            # One stop per retract: "triggered" is the slot-empty stop,
+            # "reason" the early_stop_callback's.
+            early_stop_state = {"triggered": False, "elapsed": None, "reason": None}
 
             if attempt > 1:
                 self.gcode.respond_info(
@@ -889,7 +891,7 @@ class AceInstance:
             response_container = {"response": None, "done": False}
 
             def check_slot_empty():
-                if early_stop_state["triggered"]:
+                if early_stop_state["triggered"] or early_stop_state["reason"]:
                     return
                 if self._is_slot_empty(slot):
                     early_stop_state["triggered"] = True
@@ -974,15 +976,21 @@ class AceInstance:
                     if on_wait_for_ready is not None:
                         on_wait_for_ready()
                     check_slot_empty()
-                    if early_stop_callback is not None:
-                        stop_reason = early_stop_callback()
-                        if stop_reason:
-                            self._stop_retract(slot)
+                    if (early_stop_callback is None or early_stop_state["triggered"]
+                            or early_stop_state["reason"]):
+                        return
+                    stop_reason = early_stop_callback()
+                    if stop_reason:
+                        early_stop_state["reason"] = stop_reason
+                        self._stop_retract(slot)
 
                 self.wait_ready(on_wait_cycle=wait_cycle)
 
                 if early_stop_state["triggered"]:
                     return {"code": 0, "msg": "Retract stopped early: slot empty"}
+                if early_stop_state["reason"]:
+                    return {"code": 0,
+                            "msg": f"Retract stopped early: {early_stop_state['reason']}"}
 
                 return response
 
@@ -2246,12 +2254,16 @@ class AceInstance:
         if callable(disconnect):
             try:
                 disconnect()
+                return
             except Exception as exc:
                 logging.warning(
                     "ACE[%s]: disconnect() after status failures failed: %s",
                     self.instance_num,
                     exc,
                 )
+
+        # No recovery path ran: let the next failed poll try again.
+        self._status_recovery_in_progress = False
 
     def _reconcile_feed_assist_state(self):
         """Detect device-side feed assist loss and queue a restore (ACE2).
@@ -2554,6 +2566,11 @@ class AceInstance:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Feed assist restoration failed: {msg}"
             )
+            # Same retry budget as the busy-device path in
+            # _maybe_restore_pending_feed_assist: retry on the next heartbeat.
+            if (self._feed_assist_restore_attempts
+                    < self.FEED_ASSIST_RESTORE_MAX_ATTEMPTS):
+                self._pending_feed_assist_restore = slot
 
     def get_status(self, eventtime=None):
         """Return status dict for Klipper/Moonraker queries."""
