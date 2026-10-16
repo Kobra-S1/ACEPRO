@@ -663,7 +663,7 @@ def cmd_ACE_FEED(gcmd):
         validate_feed_and_retract_arguments(gcmd, ace, slot, length, speed)
         ace._feed(slot, length, speed)
     except Exception as e:
-        gcmd.respond_info(f"ACE_FEED error: {e}")
+        raise gcmd.error(f"ACE_FEED error: {e}") from e
 
 
 def cmd_ACE_STOP_FEED(gcmd):
@@ -676,7 +676,7 @@ def cmd_ACE_STOP_FEED(gcmd):
 
         ace._stop_feed(slot)
     except Exception as e:
-        gcmd.respond_info(f"ACE_STOP_FEED error: {e}")
+        raise gcmd.error(f"ACE_STOP_FEED error: {e}") from e
 
 
 def cmd_ACE_RETRACT(gcmd):
@@ -689,7 +689,7 @@ def cmd_ACE_RETRACT(gcmd):
         validate_feed_and_retract_arguments(gcmd, ace, slot, length, speed)
         ace._retract(slot, length, speed)
     except Exception as e:
-        gcmd.respond_info(f"ACE_RETRACT error: {e}")
+        raise gcmd.error(f"ACE_RETRACT error: {e}") from e
 
 
 def cmd_ACE_STOP_RETRACT(gcmd):
@@ -702,7 +702,7 @@ def cmd_ACE_STOP_RETRACT(gcmd):
 
         ace._stop_retract(slot)
     except Exception as e:
-        gcmd.respond_info(f"ACE_STOP_RETRACT error: {e}")
+        raise gcmd.error(f"ACE_STOP_RETRACT error: {e}") from e
 
 
 # Predefined color names mapping (0.0-1.0 float range converted to 0-255 RGB)
@@ -770,7 +770,7 @@ def cmd_ACE_SET_SLOT(gcmd):
         manager._sync_inventory_to_persistent(ace.instance_num)
         gcmd.respond_info(f"Slot {idx}: color={color}, material={material}, temp={temp}")
     except Exception as e:
-        gcmd.respond_info(f"ACE_SET_SLOT error: {e}")
+        raise gcmd.error(f"ACE_SET_SLOT error: {e}") from e
 
 
 def cmd_ACE_SAVE_INVENTORY(gcmd):
@@ -779,6 +779,21 @@ def cmd_ACE_SAVE_INVENTORY(gcmd):
     manager = ace_get_manager(ace.instance_num)
     manager._sync_inventory_to_persistent(ace.instance_num)
     gcmd.respond_info("Inventory saved")
+
+
+def _dryer_start_callback(gcmd, inst_num, ace, temperature, duration):
+    """Response handler for a dryer start: reports the start once until a
+    confirmed stop (_dryer_stop_callback) re-arms it."""
+    def callback(response):
+        if response and response.get("code") == 0:
+            if not getattr(ace, "_dryer_start_logged", False):
+                gcmd.respond_info(f"ACE[{inst_num}]: Dryer started: {temperature}°C for {duration}min")
+                ace._dryer_start_logged = True
+        else:
+            msg = response.get("msg", "Unknown error") if response else ""
+            gcmd.respond_info(f"ACE[{inst_num}]: Dryer start failed: {msg}")
+
+    return callback
 
 
 def cmd_ACE_START_DRYING(gcmd):
@@ -801,16 +816,8 @@ def cmd_ACE_START_DRYING(gcmd):
             if temperature <= 0 or temperature > ace.max_dryer_temperature:
                 raise gcmd.error(f"TEMP must be between 1 and {ace.max_dryer_temperature}°C")
 
-            def callback(response):
-                if response and response.get("code") == 0:
-                    if not getattr(ace, "_dryer_start_logged", False):
-                        gcmd.respond_info(f"ACE[{instance_num}]: Dryer started: {temperature}°C for {duration}min")
-                        ace._dryer_start_logged = True
-                else:
-                    msg = response.get("msg", "Unknown error") if response else ""
-                    gcmd.respond_info(f"ACE[{instance_num}]: Dryer start failed: {msg}")
-
-            ace.start_drying(temperature, duration, callback)
+            ace.start_drying(temperature, duration,
+                             _dryer_start_callback(gcmd, instance_num, ace, temperature, duration))
         else:
             if len(ACE_INSTANCES) > 1:
                 gcmd.respond_info(
@@ -822,21 +829,27 @@ def cmd_ACE_START_DRYING(gcmd):
                     gcmd.respond_info(f"ACE[{inst_num}]: Temp {temperature}°C out of range, skipping")
                     return
 
-                def callback(response):
-                    if response and response.get("code") == 0:
-                        if not getattr(ace, "_dryer_start_logged", False):
-                            gcmd.respond_info(f"ACE[{inst_num}]: Dryer started: {temperature}°C for {duration}min")
-                            ace._dryer_start_logged = True
-                    else:
-                        msg = response.get("msg", "Unknown error") if response else ""
-                        gcmd.respond_info(f"ACE[{inst_num}]: Dryer start failed: {msg}")
-
-                ace.start_drying(temperature, duration, callback)
+                ace.start_drying(temperature, duration,
+                                 _dryer_start_callback(gcmd, inst_num, ace, temperature, duration))
 
             for_each_instance(start_dryer)
 
     except Exception as e:
         gcmd.respond_info(f"ACE_START_DRYING error: {e}")
+
+
+def _dryer_stop_callback(gcmd, inst_num, ace):
+    """Response handler for a dryer stop: a confirmed stop lets the next
+    start report itself again."""
+    def callback(response):
+        if response and response.get("code") == 0:
+            gcmd.respond_info(f"ACE[{inst_num}]: Dryer stopped")
+            ace._dryer_start_logged = False
+        else:
+            msg = response.get("msg", "Unknown error") if response else ""
+            gcmd.respond_info(f"ACE[{inst_num}]: Dryer stop failed: {msg}")
+
+    return callback
 
 
 def cmd_ACE_STOP_DRYING(gcmd):
@@ -846,16 +859,7 @@ def cmd_ACE_STOP_DRYING(gcmd):
 
         if instance_num is not None:
             ace = ace_get_instance(gcmd)
-
-            def callback(response):
-                if response and response.get("code") == 0:
-                    gcmd.respond_info(f"ACE[{instance_num}]: Dryer stopped")
-                    ace._dryer_start_logged = False
-                else:
-                    msg = response.get("msg", "Unknown error") if response else ""
-                    gcmd.respond_info(f"ACE[{instance_num}]: Dryer stop failed: {msg}")
-
-            ace.stop_drying(callback)
+            ace.stop_drying(_dryer_stop_callback(gcmd, instance_num, ace))
         else:
             if len(ACE_INSTANCES) > 1:
                 gcmd.respond_info(
@@ -863,14 +867,7 @@ def cmd_ACE_STOP_DRYING(gcmd):
                 )
 
             def stop_dryer(inst_num, manager, ace):
-                def callback(response):
-                    if response and response.get("code") == 0:
-                        gcmd.respond_info(f"ACE[{inst_num}]: Dryer stopped")
-                    else:
-                        msg = response.get("msg", "Unknown error") if response else ""
-                        gcmd.respond_info(f"ACE[{inst_num}]: Dryer stop failed: {msg}")
-
-                ace.stop_drying(callback)
+                ace.stop_drying(_dryer_stop_callback(gcmd, inst_num, ace))
 
             for_each_instance(stop_dryer)
 

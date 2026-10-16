@@ -126,3 +126,65 @@ def test_an_unexpected_exception_is_still_caught_by_the_registered_command():
             _registered("ACE_QUERY_SLOTS")(gcmd)   # no raise
     finally:
         INSTANCE_MANAGERS.clear()
+
+
+# Which tool stays current after a failed change. ace_filament_pos at
+# "nozzle"/"splitter" means the previous tool never left the path; only a
+# load that perform_tool_change itself confirmed may pin the requested tool.
+
+def _manager_with_state(previous_tool, filament_pos, confirm_load_of=None):
+    manager = _manager(owned_by_tool_changer=False)
+    state = {"ace_current_index": previous_tool, "ace_filament_pos": filament_pos}
+
+    def fail_change(current, target):
+        if confirm_load_of is not None:
+            state["ace_current_index"] = confirm_load_of
+        raise RuntimeError("Purge failed")
+
+    manager.perform_tool_change = Mock(side_effect=fail_change)
+    manager.state.get = Mock(side_effect=lambda key, default=None: state.get(key, default))
+    manager.state.set = Mock(side_effect=lambda key, value: state.__setitem__(key, value))
+    return manager, state
+
+
+def _active_macro_value(gcode):
+    values = [s.rsplit("VALUE=", 1)[1] for s in _scripts(gcode)
+              if "MACRO=_ACE_STATE VARIABLE=active" in s]
+    assert len(values) == 1
+    return int(values[0])
+
+
+@pytest.mark.parametrize("filament_pos", ["nozzle", "splitter"])
+def test_a_mid_print_failure_before_the_unload_keeps_the_previous_tool(filament_pos):
+    manager, state = _manager_with_state(previous_tool=1, filament_pos=filament_pos)
+    printer, gcode = _printer("printing")
+
+    with patch("ace.commands.get_printer", return_value=printer):
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, _gcmd(), 4)
+
+    assert state["ace_current_index"] == 1
+    assert _active_macro_value(gcode) == 1
+
+
+def test_a_mid_print_failure_after_a_confirmed_load_pins_the_requested_tool():
+    manager, state = _manager_with_state(
+        previous_tool=1, filament_pos="nozzle", confirm_load_of=4)
+    printer, gcode = _printer("printing")
+
+    with patch("ace.commands.get_printer", return_value=printer):
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, _gcmd(), 4)
+
+    assert state["ace_current_index"] == 4
+    assert _active_macro_value(gcode) == 4
+
+
+def test_an_idle_failure_before_the_unload_keeps_the_previous_tool():
+    manager, state = _manager_with_state(previous_tool=1, filament_pos="nozzle")
+    printer, gcode = _printer("standby")
+
+    with patch("ace.commands.get_printer", return_value=printer):
+        with pytest.raises(CommandError, match="T4"):
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, _gcmd(), 4)
+
+    assert state["ace_current_index"] == 1
+    assert _active_macro_value(gcode) == 1

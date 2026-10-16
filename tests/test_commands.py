@@ -926,19 +926,10 @@ class TestCommandSmoke:
         # "PURPLE" is not a valid named color and will fail R,G,B parsing too
         mock_gcmd.get = Mock(side_effect=["PURPLE", "PLA"])
         
-        # Mock error to raise exception (will be caught and converted to respond_info)
-        def error_func(msg):
-            raise Exception(msg)
-        mock_gcmd.error = error_func
-        
-        # The function catches all exceptions and calls respond_info with error message
-        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
-        
-        # Verify respond_info was called with error message
-        assert mock_gcmd.respond_info.called
-        call_args = str(mock_gcmd.respond_info.call_args)
-        # Check that error message mentions color format
-        assert "COLOR" in call_args or "named color" in call_args.lower()
+        mock_gcmd.error = Exception
+
+        with pytest.raises(Exception, match="COLOR"):
+            ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
 
     def test_cmd_ACE_SET_SLOT_rgb_values_clamped_to_valid_range(self, mock_gcmd, setup_mocks):
         """Test ACE_SET_SLOT clamps out-of-range RGB values to 0-255."""
@@ -969,16 +960,10 @@ class TestCommandSmoke:
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
         mock_gcmd.get = Mock(side_effect=["128,64", "PLA"])  # Only 2 values
         
-        def error_func(msg):
-            raise Exception(msg)
-        mock_gcmd.error = error_func
-        
-        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
-        
-        # Should have reported an error
-        assert mock_gcmd.respond_info.called
-        call_args = str(mock_gcmd.respond_info.call_args)
-        assert "COLOR" in call_args or "error" in call_args.lower()
+        mock_gcmd.error = Exception
+
+        with pytest.raises(Exception, match="COLOR"):
+            ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
 
     def test_cmd_ACE_SAVE_INVENTORY(self, mock_gcmd, setup_mocks):
         """Test ACE_SAVE_INVENTORY."""
