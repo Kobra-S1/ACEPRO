@@ -1465,8 +1465,8 @@ Monitors ACE connection stability and automatically pauses prints if connection 
 1. **Reconnect Tracking** → Each connection loss and each failed connection attempt is timestamped
 2. **Health Monitoring** → Connection status checked every 2 seconds (low overhead)
 3. **Instability Detection** → If 4+ reconnects occur within 3 minutes, connection is flagged as unstable
-4. **During Print** → Print is paused, dialog shown informing user to fix the issue
-5. **When Idle** → Informational dialog shown (no pause)
+4. **During Print** → If the unstable ACE feeds the loaded tool, the print is paused and a dialog asks the user to fix the issue. The pause is queued behind the G-code command running at the time and dropped if the print is no longer printing by then (a cancel in progress finishes first). A paused print only gets the dialog
+5. **Otherwise** → Informational dialog shown (no pause): when idle, or when the print runs on another unit's tool or a printer tool changer's own tool
 6. **Recovery** → Dialog auto-closes when connection stabilizes (connected for 30+ seconds)
 
 ### Retry Backoff

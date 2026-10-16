@@ -115,11 +115,16 @@ line whenever it is non-zero:
 **Trigger condition**: 4+ reconnection events (connection losses or failed attempts) within 3 minutes
 
 **What happens when triggered**:
-- **During printing**: 
-  1. Pauses print
-  2. Shows dialog: `"ACE X: unstable (N reconnects in 60s)"`
+- **During printing, the unstable unit feeding the loaded tool**:
+  1. Queues the pause (`_ACE_CONNECTION_PAUSE`, `connection_pause.py`): it
+     runs after the G-code command executing at the time, and only if the
+     print is still printing then. Run inline from the monitor timer, PAUSE
+     skipped the G-code lock and interleaved with a running CANCEL_PRINT,
+     whose motor-off then shut the MCU down ("Timer too close").
+  2. Shows dialog: `"ACE X: unstable (N reconnects in 180s)"`
   3. User can resume (after fixing) or cancel print
-- **When idle**:
+- **Paused**: the dialog, no second pause
+- **Idle, or printing on another unit's tool or a tool changer's own tool**:
   1. Shows informational dialog
   2. No print interruption
 

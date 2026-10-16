@@ -44,7 +44,7 @@ from .endless_spool import EndlessSpool
 from .runout_monitor import RunoutMonitor
 from .idle_assist import IdleFeedAssist
 from .moonraker_lane_sync import MoonrakerLaneSyncAdapter
-from . import commands
+from . import commands, connection_pause
 from .config import read_ace_config
 from .protocol import (
     create_protocol_adapter,
@@ -344,6 +344,8 @@ class AceManager:
             "ace_connection_supervision", True
         )
         self._connection_issue_shown = False  # Track if dialog is currently shown
+        # The issue a queued connection pause shows (connection_pause).
+        self._pending_connection_issue = None
         self._last_connection_status = {}     # Track per-instance connection state
         # Instance num of the outage already paused for (one pause per outage)
         self._fast_disconnect_pause_fired = None
@@ -3009,16 +3011,19 @@ class AceManager:
             unstable_instances: List of dicts with instance connection info
             eventtime: Current event time
         """
-        # Check if we're printing
         print_stats = self.printer.lookup_object("print_stats", None)
-        is_printing = False
+        state = ""
         if print_stats:
             try:
                 stats = print_stats.get_status(eventtime)
                 state = (stats.get("state") or "").lower()
-                is_printing = state in ["printing", "paused"]
             except Exception:
                 pass
+        # Only the unit feeding the loaded tool stops the print; a tool
+        # changer's own tool, or another unit's, prints on.
+        feeding = connection_pause.active_instance(self)
+        affects_print = any(info["instance"] == feeding
+                            for info in unstable_instances)
 
         # Build message
         instance_details = []
@@ -3036,12 +3041,16 @@ class AceManager:
 
         details_str = ", ".join(instance_details)
 
-        if is_printing:
-            # Pause print and show dialog with resume/cancel
+        if state == "printing" and affects_print:
             self.gcode.respond_info(
                 f"ACE: Connection issue detected during print - {details_str}"
             )
             self._pause_for_connection_issue(unstable_instances)
+        elif state == "paused":
+            self.gcode.respond_info(
+                f"ACE: Connection issue detected - {details_str}"
+            )
+            self._show_connection_issue_dialog(unstable_instances, is_printing=True)
         else:
             # Just show informational dialog
             self.gcode.respond_info(
@@ -3052,14 +3061,9 @@ class AceManager:
         self._connection_issue_shown = True
 
     def _pause_for_connection_issue(self, unstable_instances):
-        """Pause print due to ACE connection issue."""
-        try:
-            self.gcode.respond_info("ACE: Pausing print due to connection issue")
-            self.gcode.run_script_from_command("PAUSE")
-        except Exception as e:
-            self.gcode.respond_info(f"ACE: Error pausing print: {e}")
-
-        self._show_connection_issue_dialog(unstable_instances, is_printing=True)
+        """Pause print due to ACE connection issue. Called from the monitor
+        timer: queued behind the running G-code command (connection_pause)."""
+        connection_pause.queue(self, unstable_instances)
 
     def _show_connection_issue_dialog(self, unstable_instances, is_printing):
         """

@@ -5407,8 +5407,10 @@ class TestHandleConnectionIssue(unittest.TestCase):
         self.manager._show_connection_issue_dialog = Mock()
 
     def test_pauses_and_dialog_when_printing(self):
+        # Only the unit feeding the loaded tool pauses a print: T0 is unit 0's.
         unstable = [{"instance": 0, "connected": False, "recent_reconnects": 5, "time_connected": 0}]
         self.mock_print_stats.get_status.return_value = {"state": "printing"}
+        self.manager.state.set("ace_current_index", 0)
 
         self.manager._handle_connection_issue(unstable, eventtime=0.0)
 
