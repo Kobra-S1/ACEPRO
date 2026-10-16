@@ -26,6 +26,8 @@ extras/ace/
 │                           #   window request queue, heartbeat, CRC, timeout tracking
 ├── endless_spool.py        # Automatic filament switching on runout
 ├── runout_monitor.py       # Filament runout & tangle detection during printing
+├── monitor_events.py       # Runout/tangle/dry-resume handling queued as a G-code command
+├── connection_pause.py     # Connection-issue pause queued as a G-code command
 ├── commands.py             # G-code command handlers (transport-agnostic)
 ├── config.py               # Configuration constants, tool mapping, per-instance overrides
 ├── persistent_state.py     # Deferred-flush saved_variables wrapper
