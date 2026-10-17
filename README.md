@@ -68,6 +68,7 @@ In case your printer has two sensors (one at toolhead, one before that/outside t
 - ✅ **Connection Supervision**: Monitors ACE connection stability, pauses print and shows dialog if unstable
 - ✅ **Klipper Screen ACE-Pro panel enhancements**: Multiple-ACE support, RFID state, extra utilities commands, etc
 - ✅ **Standalone ACE Dashboard (ValgACE-inspired)**: Browser-based control/status panel served by Moonraker (`/ace.html`)
+- ✅ **Fluidd Dashboard Panel**: Native ACE card on the Fluidd dashboard — slot grid, live filament path with per-sensor auto-detection, jam indicator, feed assist and dryer controls (see [fluidd/](fluidd/))
 - ✅ **Spoolman Integration**: Automatic spool selection via RFID-to-ID mapping or manual slot assignment
 - 🟠 **OrcaSlicer Filament Sync** *(requires recent Orca version)*: Filament type and color can be synced automatically from the ACE inventory into OrcaSlicer via the Moonraker `lane_data` integration — no manual spool selection needed. Manufacturer name sync is not yet supported by Orca.
 
@@ -80,6 +81,26 @@ The browser-based dashboard (adapted from ValgACE) gives you a full ACE view wit
 - Served by Moonraker at `http://<moonraker-host>:7125/ace.html` (or `https://...` if using TLS) after symlinking the assets in `ace_status_integration/web` as described in `ace_status_integration/README.md`.
 
 ![ACE Dashboard](img/ace-dashboard.png)
+
+### Fluidd Dashboard Panel
+
+For Fluidd users there is a native dashboard card (no KlipperScreen needed):
+
+- Slot grid with per-slot color/material editing (RFID or `ACE_SET_SLOT`); click a spool to load it (`T<n>`).
+- Live filament path `ACE -> [SPLITTER] -> [Encoder] -> [Nozzle]` driven by your filament sensors - nodes appear only when the matching sensor exists in the printer config.
+- Segment flow animation while ACE is loading/unloading and a jam indicator on the encoder (filament at the nozzle but not at the encoder).
+- Feed assist toggle and a dryer dialog (50-65 °C, 30-240 min) with live remaining time.
+- Shows up automatically on the Fluidd dashboard when the ACE driver is present; hides itself when the ACE is disconnected.
+
+One command on the Klipper host - it checks Moonraker and the ACE driver objects, installs Node.js/pnpm if missing, builds a fresh Fluidd with the card patched in and deploys it over the detected webroot (backup + verify + rollback):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Kobra-S1/ACEPRO/dev/fluidd/install.sh | bash
+```
+
+See [fluidd/README.md](fluidd/README.md) for details (custom webroot, options, more screenshots).
+
+![ACE Fluidd Panel](fluidd/docs/panel.png)
 
 ## 📖 Documentation
 
@@ -137,6 +158,7 @@ installer/                # Installer modules (ui, detect, backup, steps)
 ace_status_integration/   # Moonraker ACE status component + web dashboard
 KlipperScreen/            # ACE Pro KlipperScreen panel (acepro.py)
 patches/                  # KlipperScreen core patches (ACE subscription)
+fluidd/                   # ACE Pro Fluidd dashboard card + installer
 
 ├── ARCHITECTURE.md       # System design, components, data flow
 ├── PROTOCOL.md           # ACE serial protocol documentation
