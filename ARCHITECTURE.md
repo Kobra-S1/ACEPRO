@@ -1118,6 +1118,8 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
+| `stop_ace_on_shutdown` | True | On `klippy:shutdown` (M112 / fatal error) stop feed assist and any running feed/retract on every connected ACE, and do not restore feed assist after the restart |
+| `stop_dryer_on_shutdown` | False | Also stop a running dryer on `klippy:shutdown` (needs `stop_ace_on_shutdown`) |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
 | `tangle_detection` | False | Enable ACE-side tangle detection via `cont_assist_time` (ACE1 + ACE2; requires active feed assist). Shipped printer configs set it to True and enable the `[output_pin TANGLE_DETECTION]` dashboard slider (authoritative when present) |
 | `tangle_pump_time` | 5.0 | Seconds of continuous ACE pumping before suspecting a tangle (clamped to 3.0 minimum — ACE2's starved-runout assist retry cycles up to ~3.9 s) |
@@ -1728,6 +1730,8 @@ pre_cut_retract_length: 2
 heartbeat_interval: 1.0
 max_dryer_temperature: 55
 feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect (deferred until first successful heartbeat)
+stop_ace_on_shutdown: True                   # Stop feed assist / running feed+retract on M112 or fatal shutdown
+stop_dryer_on_shutdown: False                # Also stop the dryer on M112 or fatal shutdown
 runout_debounce_count: 3                     # Consecutive absent sensor readings before confirming runout (default 1 = no debounce)
 ```
 ### Debug Commands
