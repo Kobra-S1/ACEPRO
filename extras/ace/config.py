@@ -134,6 +134,15 @@ def read_ace_config(config):
     ace_config["feed_assist_active_after_ace_connect"] = config.getboolean(
         "feed_assist_active_after_ace_connect", True
     )
+    # Klipper shutdown (M112 / emergency stop, fatal MCU error): the ACE is
+    # not a Klipper MCU, so it keeps doing what it was told unless the driver
+    # tells it to stop.
+    ace_config["stop_ace_on_shutdown"] = config.getboolean(
+        "stop_ace_on_shutdown", True
+    )
+    ace_config["stop_dryer_on_shutdown"] = config.getboolean(
+        "stop_dryer_on_shutdown", False
+    )
     ace_config["rfid_inventory_sync_enabled"] = config.getboolean(
         "rfid_inventory_sync_enabled", True
     )

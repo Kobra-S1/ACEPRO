@@ -527,10 +527,29 @@ class AceManager:
     def _handle_shutdown(self):
         """Called on Klipper emergency stop or fatal shutdown.
 
-        Uses ``flush_direct()`` to write directly to ``saved_variables.cfg``
+        First asks every connected ACE to stop what it is doing (feed assist,
+        running feed/retract, optionally the dryer - see
+        ``AceInstance.stop_activity_on_shutdown``), since a Klipper shutdown
+        does not reach the ACE.
+
+        Then uses ``flush_direct()`` to write directly to ``saved_variables.cfg``
         without going through the GCode queue, which is unavailable (or
         rejected with "Printer is shutdown") at this point.
         """
+        for instance in self.instances:
+            try:
+                stopped = instance.stop_activity_on_shutdown()
+                if stopped:
+                    self.gcode.respond_info(
+                        f"ACE[{instance.instance_num}]: Shutdown - stopping "
+                        f"{', '.join(stopped)}"
+                    )
+            except Exception:
+                logging.exception(
+                    "ACE: Failed to stop ACE[%s] activity on shutdown",
+                    getattr(instance, "instance_num", "?"),
+                )
+
         pending = list(self.state._dirty)
         logging.info(
             "ACE: klippy:shutdown received — flushing %d dirty variable(s) directly: %s",
