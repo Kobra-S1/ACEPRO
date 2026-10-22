@@ -196,6 +196,57 @@ class TestValidateStartupToolState(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
+    # Late sensor reports: wait for the sensors instead of a fixed pause
+    # ------------------------------------------------------------------
+
+    def test_sensor_reporting_late_still_confirms_state(self):
+        """Sensor that reports filament only after ~1 s must not cause a reset."""
+        from ace.manager import STARTUP_SENSOR_POLL_INTERVAL
+        self.variables["ace_current_index"] = 1
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+        manager = self._build_manager()
+        toolhead = Mock(filament_present=False)
+        manager.sensors[SENSOR_TOOLHEAD] = toolhead
+
+        late_after = int(1.0 / STARTUP_SENSOR_POLL_INTERVAL)
+        pauses = []
+
+        def pause(waketime):
+            pauses.append(waketime)
+            if len(pauses) >= late_after:
+                toolhead.filament_present = True
+        self.mock_reactor.pause.side_effect = pause
+
+        manager._validate_startup_tool_state()
+
+        self.assertEqual(self.variables["ace_current_index"], 1)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_NOZZLE)
+        self.assertEqual(len(pauses), late_after)
+
+    def test_all_clear_resets_only_after_settle_window(self):
+        """All sensors clear: reset happens after polling the whole window."""
+        from ace.manager import STARTUP_SENSOR_SETTLE_TIME, STARTUP_SENSOR_POLL_INTERVAL
+        self.variables["ace_current_index"] = 2
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+        manager = self._build_manager()
+        manager.sensors[SENSOR_TOOLHEAD] = Mock(filament_present=False)
+
+        # count only the sensor polls, i.e. pauses before the state is reset
+        polls_before_reset = []
+
+        def pause(waketime):
+            if self.variables["ace_current_index"] == 2:
+                polls_before_reset.append(waketime)
+        self.mock_reactor.pause.side_effect = pause
+
+        manager._validate_startup_tool_state()
+
+        expected_polls = int(round(STARTUP_SENSOR_SETTLE_TIME / STARTUP_SENSOR_POLL_INTERVAL))
+        self.assertEqual(len(polls_before_reset), expected_polls)
+        self.assertEqual(self.variables["ace_current_index"], -1)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_BOWDEN)
+
+    # ------------------------------------------------------------------
     # Sensor confirms filament → state is plausible, no reset
     # ------------------------------------------------------------------
 
