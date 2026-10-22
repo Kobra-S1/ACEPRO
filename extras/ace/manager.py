@@ -1047,15 +1047,27 @@ class AceManager:
             current_tool: Tool currently recorded as loaded (-1 if unknown).
             target_temp:  Target tool temperature already resolved by the caller
                           (0 when unavailable, e.g. unload-only changes).
+
+        Returns:
+            The heater target from *before* the recovery heat-up when this
+            method raised it (so the caller can restore it), otherwise None.
+            Without restoring, the PRE macro would read the recovery
+            temperature as "slicer temp (printing)" and POST would keep the
+            nozzle hot after a manual toolchange.
         """
         extruder = self.printer.lookup_object("extruder", None)
         if extruder is None:
-            return
+            return None
         heater = extruder.get_heater()
-        cur_temp = heater.get_temp(self.reactor.monotonic())[0]
+        now = self.reactor.monotonic()
+        cur_temp = heater.get_temp(now)[0]
         min_temp = heater.min_extrude_temp
         if cur_temp >= min_temp:
-            return  # already hot enough to move the extruder
+            return None  # already hot enough to move the extruder
+        try:
+            prev_target = float(heater.get_status(now)["target"])
+        except (TypeError, ValueError, KeyError, AttributeError):
+            prev_target = None
 
         # The filament physically stuck in the path belongs to the current
         # tool, so prefer its material temperature.
@@ -1076,6 +1088,7 @@ class AceManager:
             f"recovery unload — heating to {heat_temp:.0f}°C before clearing path"
         )
         self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
+        return prev_target
 
     def execute_coordinated_retraction(self, retract_length, retract_speed, retract_speed_mmmin, current_tool):
         """
@@ -2745,11 +2758,15 @@ class AceManager:
             # nozzle first regardless of the current sensor read.  This runs
             # before the PRE macro; the guard returns immediately when the
             # nozzle is already above min_extrude_temp.
-            self._ensure_hot_for_recovery_unload(current_tool, target_temp)
+            recovery_prev_target = self._ensure_hot_for_recovery_unload(current_tool, target_temp)
 
             success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1, keep_heater=True)
             if not success:
                 raise Exception("Failed to clear filament path - plausibility check failed")
+            # Hand the nozzle target back as it was before the recovery heat-up:
+            # the PRE macro decides "printing vs. manual" from the current target.
+            if recovery_prev_target is not None:
+                self.gcode.run_script_from_command(f"M104 S{recovery_prev_target:.0f}")
             # Reset extruder state after emergency unload — the cycling path
             # (Case 2/3) has no G92 E0 cleanup unlike the normal unload path.
             # Stale E position or queued moves can cause "Extrude below
