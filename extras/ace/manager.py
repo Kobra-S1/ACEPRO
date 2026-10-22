@@ -1175,6 +1175,13 @@ class AceManager:
         new_pos[3] += length
 
         toolhead.move(new_pos, speed)
+        # The move bypasses the G-code layer: re-sync gcode_move right away so that
+        # print_stats.filament_used (which follows gcode_move's position) counts it now,
+        # while the tool it belongs to is still the current one - not later, when the
+        # next reset_last_position() happens after the toolchange.
+        gcode_move = self.printer.lookup_object('gcode_move', None)
+        if gcode_move is not None:
+            gcode_move.reset_last_position()
         if wait_for_move_end:
             toolhead.wait_moves()
 

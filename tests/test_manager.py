@@ -6345,6 +6345,24 @@ class TestExtruderMove(unittest.TestCase):
         self.mock_toolhead.move.assert_called_once_with([10, 20, 30, 43], 15)
         self.mock_toolhead.wait_moves.assert_called_once()
 
+    def test_move_resyncs_gcode_position_for_filament_accounting(self):
+        """Direct toolhead moves must be re-synced into gcode_move at once, so that
+        print_stats.filament_used counts them while their tool is still current."""
+        manager = self._build_manager()
+        gcode_move = Mock()
+        order = []
+        self.mock_toolhead.get_position.return_value = [0, 0, 0, 100]
+        self.mock_toolhead.move = Mock(side_effect=lambda *a: order.append("move"))
+        gcode_move.reset_last_position = Mock(side_effect=lambda: order.append("reset"))
+        base = self.mock_printer.lookup_object.side_effect
+        self.mock_printer.lookup_object.side_effect = (
+            lambda name, default=None: gcode_move if name == "gcode_move" else base(name, default))
+
+        manager._extruder_move(-40, 10)
+
+        self.mock_toolhead.move.assert_called_once_with([0, 0, 0, 60], 10)
+        self.assertEqual(order, ["move", "reset"])
+
 class _ManagerCycleFixture(unittest.TestCase):
     """Shared manager + mock-instance fixture for cycling/smart-unload tests."""
 
