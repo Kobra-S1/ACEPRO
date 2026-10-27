@@ -111,7 +111,10 @@ class TestValidateStartupToolState(unittest.TestCase):
         with patch("ace.manager.AceInstance", side_effect=self._instance_factory), \
              patch("ace.manager.EndlessSpool"), \
              patch("ace.manager.RunoutMonitor"):
-            return AceManager(self.mock_config, dummy_ace_count=1)
+            manager = AceManager(self.mock_config, dummy_ace_count=1)
+        # Only count reactor pauses made by the code under test.
+        self.mock_reactor.pause.reset_mock()
+        return manager
 
     # ------------------------------------------------------------------
     # No-op early returns
@@ -512,6 +515,114 @@ class TestValidateStartupToolState(unittest.TestCase):
         deferred_callback = self.mock_reactor.register_callback.call_args[0][0]
         deferred_callback(0.0)
         manager._validate_startup_tool_state.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # Settle window: late MCU sensor reports after klippy:ready
+    # ------------------------------------------------------------------
+
+    def _report_present_after(self, sensor, polls):
+        """Flip sensor.filament_present to True after `polls` reactor pauses.
+
+        Mimics Klipper's buttons module, which only reports a present switch
+        once the first MCU scan (up to ~1.5 s after config) has run.
+        """
+        pauses = {"count": 0}
+
+        def pause(_waketime):
+            pauses["count"] += 1
+            if pauses["count"] >= polls:
+                sensor.filament_present = True
+
+        self.mock_reactor.pause.side_effect = pause
+        return pauses
+
+    def test_no_reset_when_toolhead_sensor_reports_late(self):
+        """Toolhead sensor reporting 'present' after 0.5 s must not reset state."""
+        self.variables["ace_current_index"] = 0
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+        manager = self._build_manager()
+        toolhead = Mock(filament_present=False)
+        manager.sensors[SENSOR_TOOLHEAD] = toolhead
+        manager.sensors[SENSOR_RDM] = Mock(filament_present=False)
+        # Present only after ~1.6 s (16 polls at 0.1 s) - past the old 0.5 s wait.
+        pauses = self._report_present_after(toolhead, 16)
+
+        manager._validate_startup_tool_state()
+
+        self.assertEqual(self.variables["ace_current_index"], 0)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_NOZZLE)
+        # Stops polling as soon as the sensor confirms filament.
+        self.assertEqual(pauses["count"], 16)
+
+    def test_no_reset_when_rdm_sensor_reports_late(self):
+        """Late RDM report alone is enough to confirm the saved state."""
+        self.variables["ace_current_index"] = 2
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_SPLITTER
+        manager = self._build_manager()
+        manager.sensors[SENSOR_TOOLHEAD] = Mock(filament_present=False)
+        rdm = Mock(filament_present=False)
+        manager.sensors[SENSOR_RDM] = rdm
+        self._report_present_after(rdm, 10)
+
+        manager._validate_startup_tool_state()
+
+        self.assertEqual(self.variables["ace_current_index"], 2)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_SPLITTER)
+
+    def test_reset_only_after_full_settle_window(self):
+        """'All clear' is only accepted after the whole settle window."""
+        from ace.config import STARTUP_SENSOR_SETTLE_TIME, STARTUP_SENSOR_POLL_INTERVAL
+
+        self.variables["ace_current_index"] = 1
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+        manager = self._build_manager()
+        manager.sensors[SENSOR_TOOLHEAD] = Mock(filament_present=False)
+        manager.sensors[SENSOR_RDM] = Mock(filament_present=False)
+
+        manager._validate_startup_tool_state()
+
+        expected_polls = int(round(STARTUP_SENSOR_SETTLE_TIME / STARTUP_SENSOR_POLL_INTERVAL))
+        self.assertEqual(self.mock_reactor.pause.call_count, expected_polls)
+        self.assertGreaterEqual(STARTUP_SENSOR_SETTLE_TIME, 2.0)
+        self.assertEqual(self.variables["ace_current_index"], -1)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_BOWDEN)
+
+    def test_aborts_when_toolchange_starts_during_window(self):
+        """A toolchange starting inside the settle window blocks the reset."""
+        self.variables["ace_current_index"] = 3
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+        manager = self._build_manager()
+        manager.sensors[SENSOR_TOOLHEAD] = Mock(filament_present=False)
+
+        def pause(_waketime):
+            if self.mock_reactor.pause.call_count >= 5:
+                manager.toolchange_in_progress = True
+
+        self.mock_reactor.pause.side_effect = pause
+
+        manager._validate_startup_tool_state()
+
+        self.assertEqual(self.variables["ace_current_index"], 3)
+        self.assertEqual(self.variables["ace_filament_pos"], FILAMENT_STATE_NOZZLE)
+
+    def test_no_reset_when_state_changes_during_window(self):
+        """State changed by someone else while waiting is left untouched."""
+        self.variables["ace_current_index"] = 3
+        self.variables["ace_filament_pos"] = FILAMENT_STATE_NOZZLE
+        manager = self._build_manager()
+        manager.sensors[SENSOR_TOOLHEAD] = Mock(filament_present=False)
+
+        def pause(_waketime):
+            if self.mock_reactor.pause.call_count == 5:
+                # e.g. a toolchange to T4 started and finished in the window
+                manager.state.set("ace_current_index", 4)
+
+        self.mock_reactor.pause.side_effect = pause
+
+        manager._validate_startup_tool_state()
+
+        self.assertEqual(manager.state.get("ace_current_index"), 4)
+        self.assertEqual(manager.state.get("ace_filament_pos"), FILAMENT_STATE_NOZZLE)
 
 
 if __name__ == "__main__":
