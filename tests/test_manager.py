@@ -532,7 +532,7 @@ class TestHandleReady(unittest.TestCase):
 
         self.assertIs(manager.instances[0].toolhead, self.mock_toolhead)
         self.mock_gcode.run_script_from_command.assert_any_call("SET_PIN PIN=ACE_Pro VALUE=1.0")
-        manager.instances[0].serial_mgr.connect_to_ace.assert_called_once_with(115200, 2)
+        manager.instances[0].serial_mgr.connect_to_ace.assert_called_once_with(115200)
         manager._setup_sensors.assert_called_once()
         manager._start_monitoring.assert_called_once()
 
@@ -544,7 +544,7 @@ class TestHandleReady(unittest.TestCase):
 
         manager._handle_ready()
 
-        manager.instances[0].serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
+        manager.instances[0].serial_mgr.connect_to_ace.assert_called_once_with(230400)
 
     def test_disabled_path_skips_connections(self):
         self.variables["ace_global_enabled"] = False
@@ -749,7 +749,7 @@ class TestSharedAce2Transport(unittest.TestCase):
         manager._handle_ready()
 
         shared_serial_mgr = manager.instances[0].serial_mgr
-        shared_serial_mgr.connect_to_ace.assert_called_once_with(230400, 2)
+        shared_serial_mgr.connect_to_ace.assert_called_once_with(230400)
         self.assertEqual(manager.instances[0].bus_session.port, "/dev/ttyUSB0")
         manager._initialize_shared_bus_transport.assert_not_called()
         manager._queue_shared_bus_instance_setup.assert_not_called()

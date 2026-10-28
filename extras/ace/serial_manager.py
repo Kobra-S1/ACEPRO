@@ -211,7 +211,7 @@ class AceSerialManager:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Using baud rate: {baud}"
             )
-            self.connect_to_ace(baud, delay=0.5)
+            self.connect_to_ace(baud)
 
     def disable_ace_pro(self):
         """Disable ACE Pro and disconnect immediately."""
@@ -460,8 +460,12 @@ class AceSerialManager:
 
     # ========== Serial Connection Management ==========
 
-    def connect_to_ace(self, baud, delay=2):
-        """Start connection attempts (only if ACE enabled)."""
+    def connect_to_ace(self, baud):
+        """Start a fresh run of connection attempts (only if ACE enabled).
+
+        The first attempt comes after the backoff floor: a backoff grown by
+        an earlier run (e.g. before ACE was switched off and on) is dropped.
+        """
         if not self._ace_pro_enabled:
             self.gcode.respond_info(
                 f'ACE[{self.instance_num}]: ACE Pro disabled - '
@@ -508,6 +512,7 @@ class AceSerialManager:
                 )
                 return eventtime + current_backoff
 
+        self._reconnect_backoff = self._reconnect_backoff_floor()
         initial_delay = self._reconnect_backoff
         logging.info(
             f'ACE[{self.instance_num}]: Starting connection (first attempt in {initial_delay:.0f}s)'

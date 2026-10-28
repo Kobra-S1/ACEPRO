@@ -452,7 +452,7 @@ class AceManager:
 
         if self._ace_pro_enabled:
             for instance in self._iter_unique_transport_instances():
-                instance.serial_mgr.connect_to_ace(instance.baud, 2)
+                instance.serial_mgr.connect_to_ace(instance.baud)
                 if instance.bus_session is not None and instance.serial_mgr._port:
                     instance.bus_session.port = instance.serial_mgr._port
             self._setup_sensors()
@@ -4752,7 +4752,7 @@ class AceManager:
         if old_serial_mgr is not instance.serial_mgr:
             self._teardown_orphaned_serial_mgr(old_serial_mgr)
         try:
-            instance.serial_mgr.connect_to_ace(instance.baud, 2)
+            instance.serial_mgr.connect_to_ace(instance.baud)
         except Exception as exc:
             logging.warning(
                 "ACE[%s]: connect after ace1 demote failed: %s", instance.instance_num, exc

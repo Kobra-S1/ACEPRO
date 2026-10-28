@@ -852,6 +852,24 @@ class TestConnectionLifecycle:
         assert self.manager._reconnect_backoff > 5.0
         assert len(self.manager._reconnect_timestamps) == 1
 
+    def test_connect_to_ace_starts_at_backoff_floor_after_failures(self):
+        # Switching ACE off and on after a run of failed attempts once
+        # waited out the stale 25 s backoff before the first new attempt.
+        captured = {}
+        def register_timer(cb, when):
+            captured["when"] = when
+            return "timer"
+        self.mock_reactor.register_timer.side_effect = register_timer
+        self.mock_reactor.monotonic.return_value = 10.0
+        self.manager._target_usb_location = "1-1.3"  # known location: 1 s floor
+        self.manager._reconnect_backoff = 25.0
+
+        self.manager.connect_to_ace(115200)
+
+        floor = self.manager.LOCATION_KNOWN_RECONNECT_BACKOFF_MIN
+        assert captured["when"] == 10.0 + floor
+        assert self.manager._reconnect_backoff == floor
+
     def test_find_com_port_requires_enough_devices(self):
         # Only one device but instance 1 requested -> returns None
         ports = [SimpleNamespace(device="/dev/ttyACM0", description="ACE", hwid="LOCATION=2-2.3")]
