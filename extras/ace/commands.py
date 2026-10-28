@@ -278,7 +278,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                     dryer_parts.append(f"duration={dryer['duration']}min")
                     dryer_handled.add('duration')
                 if 'remain_time' in dryer:
-                    dryer_parts.append(f"remain_time={dryer['remain_time']}min")
+                    dryer_parts.append(f"remain_time={dryer['remain_time']}s")
                     dryer_handled.add('remain_time')
 
                 # Any unknown dryer fields
