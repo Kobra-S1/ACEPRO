@@ -17,11 +17,17 @@
 #   3. install pnpm if missing
 #   4. add a temporary swap file if the host has little memory (the build
 #      needs it on <2 GB hosts; removed afterwards)
-#   5. clone a fresh Fluidd, copy the panel, patch Fluidd, build
-#   6. back up the current webroot, deploy, verify, roll back on failure
+#   5. clone Fluidd $FLUIDD_REF, copy the panel, patch Fluidd, build
+#   6. deploy into a fresh webroot (keeping config.json), keep the old one
+#      as backup, verify, roll back on failure
+# Root (sudo) is only asked for when a step needs it: installing Node.js
+# or pnpm, a temporary swap file, or a webroot the user cannot write.
 #
 # Optional environment variables:
-#   FLUIDD_DIR    where to build (default: fresh clone into ./fluidd)
+#   FLUIDD_REF    Fluidd release tag to build (default below; the patcher's
+#                 anchors are checked against it)
+#   FLUIDD_DIR    existing Fluidd checkout to build in (default: fresh clone
+#                 into ./fluidd, removed afterwards; a given one is kept)
 #   WEBROOT       where to deploy (default: auto-detect, see below)
 #   KEEP_REPO=1   keep the cloned/built repository after deploy
 #   MOONRAKER_URL Moonraker API URL for the checks
@@ -32,7 +38,13 @@
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FLUIDD_DIR="${FLUIDD_DIR:-$PKG_DIR/fluidd}"
+FLUIDD_REF="${FLUIDD_REF:-v1.37.7}"
+# A user-supplied FLUIDD_DIR is never deleted; only our own clone is.
+OWN_FLUIDD_DIR=0
+if [ -z "${FLUIDD_DIR:-}" ]; then
+  FLUIDD_DIR="$PKG_DIR/fluidd"
+  OWN_FLUIDD_DIR=1
+fi
 WEBROOT="${WEBROOT:-}"
 KEEP_REPO="${KEEP_REPO:-0}"
 MOONRAKER_URL="${MOONRAKER_URL:-http://localhost:7125}"
@@ -51,7 +63,9 @@ if [ ! -f "$PKG_DIR/src/components/widgets/ace/AceCard.vue" ]; then
   TMP_CLONE="$(mktemp -d "${HOME:-/var/tmp}/ACEPRO.XXXXXX")"
   git clone --depth 50 --branch dev https://github.com/Kobra-S1/ACEPRO.git "$TMP_CLONE/ACEPRO"
   PKG_DIR="$TMP_CLONE/ACEPRO/fluidd"
-  FLUIDD_DIR="$PKG_DIR/fluidd"
+  if [ "$OWN_FLUIDD_DIR" = 1 ]; then
+    FLUIDD_DIR="$PKG_DIR/fluidd"
+  fi
 fi
 
 echo "------------------------------------------------------------"
@@ -61,18 +75,17 @@ echo "------------------------------------------------------------"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-SUDO=""
-if [ "$(id -u)" -ne 0 ]; then
-  if sudo -n true 2>/dev/null; then
-    SUDO="sudo"
+# Run a command as root, only for the steps that need it.
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
   elif have sudo; then
-    echo "!!! sudo requires a password - re-run as root or enable passwordless sudo."
-    exit 1
+    sudo "$@"
   else
-    echo "!!! root rights are required to install Node.js into /usr/local."
+    echo "!!! Root rights needed for: $* - re-run as root or install sudo."
     exit 1
   fi
-fi
+}
 
 # ------------------------------------------------------------- preflight ----
 echo "==> Checking Moonraker at $MOONRAKER_URL ..."
@@ -98,7 +111,7 @@ fi
 
 # ------------------------------------------------------------ webroot -------
 if [ -z "$WEBROOT" ]; then
-  for candidate in /usr/share/fluidd /var/www/fluidd /opt/fluidd /home/pi/fluidd; do
+  for candidate in "$HOME/fluidd" /usr/share/fluidd /var/www/fluidd /opt/fluidd /home/pi/fluidd; do
     if [ -d "$candidate" ]; then
       WEBROOT="$candidate"
       break
@@ -114,6 +127,9 @@ if [ ! -d "$WEBROOT" ]; then
   echo "!!! Webroot $WEBROOT does not exist."
   exit 1
 fi
+# Deploy swaps the directory itself: work on a symlink's target, so the link
+# the web server follows stays in place.
+WEBROOT="$(readlink -f "$WEBROOT")"
 echo "==> Webroot: $WEBROOT"
 
 # ------------------------------------------------------- Node.js >= 18 ------
@@ -130,7 +146,7 @@ if [ "${NODE_M:-0}" -lt 18 ]; then
   curl -fsSL "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-$NODE_ARCH.tar.xz" \
     -o "$TMP_NODE/node.tar.xz" || { echo "!!! Failed to download Node.js."; exit 1; }
   tar -xJf "$TMP_NODE/node.tar.xz" -C "$TMP_NODE"
-  $SUDO cp -r "$TMP_NODE/node-$NODE_VERSION-linux-$NODE_ARCH"/{bin,include,lib,share} /usr/local/ \
+  as_root cp -r "$TMP_NODE/node-$NODE_VERSION-linux-$NODE_ARCH"/{bin,include,lib,share} /usr/local/ \
     || { echo "!!! Failed to install Node.js into /usr/local."; exit 1; }
   rm -rf "$TMP_NODE"
   hash -r
@@ -142,10 +158,10 @@ have npm || { echo "!!! npm not found after Node.js install."; exit 1; }
 if ! have pnpm; then
   echo "==> pnpm not found, installing..."
   if have corepack; then
-    $SUDO corepack enable >/dev/null 2>&1 || true
+    as_root corepack enable >/dev/null 2>&1 || true
   fi
   if ! have pnpm; then
-    $SUDO npm i -g pnpm || { echo "!!! Failed to install pnpm."; exit 1; }
+    as_root npm i -g pnpm || { echo "!!! Failed to install pnpm."; exit 1; }
   fi
 fi
 echo "==> pnpm $(pnpm -v)"
@@ -158,8 +174,8 @@ cleanup() {
   fi
   if [ -n "$SWAP_TMP" ] && [ -f "$SWAP_TMP" ]; then
     echo "==> Removing temporary swap..."
-    $SUDO /usr/sbin/swapoff "$SWAP_TMP" 2>/dev/null || true
-    $SUDO rm -f "$SWAP_TMP"
+    as_root /usr/sbin/swapoff "$SWAP_TMP" 2>/dev/null || true
+    as_root rm -f "$SWAP_TMP"
   fi
 }
 trap cleanup EXIT
@@ -172,11 +188,11 @@ if [ "$NO_SWAP" != 1 ]; then
     if [ "$DISK_FREE_MB" -gt $((SWAP_FILE_MB + 1000)) ]; then
       echo "==> Low memory (${TOTAL_MEM_MB} MB) - adding temporary ${SWAP_FILE_MB} MB swap for the build..."
       SWAP_TMP="/var/tmp/fluidd-ace-build.swap"
-      $SUDO fallocate -l "${SWAP_FILE_MB}M" "$SWAP_TMP" \
-        || $SUDO dd if=/dev/zero of="$SWAP_TMP" bs=1M count="$SWAP_FILE_MB"
-      $SUDO chmod 600 "$SWAP_TMP"
-      $SUDO /usr/sbin/mkswap "$SWAP_TMP" >/dev/null
-      $SUDO /usr/sbin/swapon "$SWAP_TMP"
+      as_root fallocate -l "${SWAP_FILE_MB}M" "$SWAP_TMP" \
+        || as_root dd if=/dev/zero of="$SWAP_TMP" bs=1M count="$SWAP_FILE_MB"
+      as_root chmod 600 "$SWAP_TMP"
+      as_root /usr/sbin/mkswap "$SWAP_TMP" >/dev/null
+      as_root /usr/sbin/swapon "$SWAP_TMP"
     else
       echo "!!! Low memory and not enough disk for a temporary swap - the build may fail."
     fi
@@ -195,9 +211,13 @@ fi
 
 # --- 1. Fluidd sources ---
 if [ ! -d "$FLUIDD_DIR/.git" ]; then
-  echo "==> Cloning Fluidd..."
+  if [ "$OWN_FLUIDD_DIR" != 1 ]; then
+    echo "!!! FLUIDD_DIR=$FLUIDD_DIR is not a Fluidd git checkout."
+    exit 1
+  fi
+  echo "==> Cloning Fluidd $FLUIDD_REF..."
   rm -rf "$FLUIDD_DIR"
-  git clone --depth 50 https://github.com/fluidd-core/fluidd.git "$FLUIDD_DIR"
+  git clone --depth 1 --branch "$FLUIDD_REF" https://github.com/fluidd-core/fluidd.git "$FLUIDD_DIR"
 fi
 
 # --- 2. ACE panel sources ---
@@ -223,24 +243,35 @@ echo "==> Building (this takes 15-40 min on a Pi)..."
 (cd "$FLUIDD_DIR" && pnpm run build)
 
 # --- 6. Deploy (with rollback on failure) ---
+# The new build goes into a fresh directory that then replaces the webroot,
+# so no stale assets of the old build remain; the old webroot becomes the
+# backup. Fluidd's config.json (instance settings) is carried over.
 BACKUP="$WEBROOT.bak-ace-$(date +%Y-%m-%d-%H%M%S)"
+STAGE="$WEBROOT.ace-new"
+WEBROOT_PARENT="$(dirname "$WEBROOT")"
+if [ -w "$WEBROOT_PARENT" ] && [ -w "$WEBROOT" ]; then
+  as_owner() { "$@"; }
+else
+  as_owner() { as_root "$@"; }
+fi
 echo "==> Deploying to $WEBROOT (backup: $BACKUP)..."
-cp -r "$WEBROOT" "$BACKUP"
+as_owner rm -rf "$STAGE"
+as_owner cp -r "$FLUIDD_DIR/dist" "$STAGE"
+if [ -f "$WEBROOT/config.json" ]; then
+  as_owner cp "$WEBROOT/config.json" "$STAGE/config.json"
+fi
+as_owner chown -R --reference="$WEBROOT" "$STAGE" || true
 
 rollback() {
   echo "!!! Deployment failed - rolling back from $BACKUP ..."
-  rm -rf "$WEBROOT"
-  cp -r "$BACKUP" "$WEBROOT"
+  as_owner rm -rf "$WEBROOT"
+  as_owner mv "$BACKUP" "$WEBROOT"
   echo "!!! Rolled back. Check the build log above for the failure reason."
   exit 1
 }
 
-cp -r "$FLUIDD_DIR/dist/." "$WEBROOT/" || rollback
-
-# Restore ownership when run through sudo
-if [ -n "${SUDO_USER:-}" ]; then
-  chown -R "$SUDO_USER":"$(id -gn "$SUDO_USER")" "$WEBROOT" || true
-fi
+as_owner mv "$WEBROOT" "$BACKUP"
+as_owner mv "$STAGE" "$WEBROOT" || rollback
 
 # --- 7. Verify ---
 echo "==> Verifying deployment..."
@@ -250,10 +281,11 @@ if ! grep -rql "ACE_SET_SLOT" "$WEBROOT" --include='*.js' 2>/dev/null; then
 fi
 echo "    ACE panel code is present in $WEBROOT."
 
-if [ "$KEEP_REPO" != "1" ]; then
+if [ "$KEEP_REPO" != "1" ] && [ "$OWN_FLUIDD_DIR" = 1 ]; then
   echo "==> Removing build tree ($FLUIDD_DIR)..."
   rm -rf "$FLUIDD_DIR"
 fi
+echo "    Previous webroot kept as $BACKUP (delete it once Fluidd works)."
 
 echo ""
 echo "Done! Hard-reload Fluidd in your browser: Ctrl+Shift+R"

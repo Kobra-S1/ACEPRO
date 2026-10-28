@@ -89,7 +89,7 @@ For Fluidd users there is a native dashboard card (no KlipperScreen needed):
 - Slot grid with per-slot color/material editing (RFID or `ACE_SET_SLOT`); click a spool to load it (`T<n>`).
 - Live filament path `ACE -> [SPLITTER] -> [Encoder] -> [Nozzle]` driven by your filament sensors - nodes appear only when the matching sensor exists in the printer config.
 - Segment flow animation while ACE is loading/unloading and a jam indicator on the encoder (filament at the nozzle but not at the encoder).
-- Feed assist toggle and a dryer dialog (50-65 °C, 30-240 min) with live remaining time.
+- Feed assist toggle and a per-unit dryer dialog (up to the unit's `max_dryer_temperature`, 30-240 min) with live remaining time.
 - Shows up automatically on the Fluidd dashboard when the ACE driver is present; hides itself when the ACE is disconnected.
 
 One command on the Klipper host - it checks Moonraker and the ACE driver objects, installs Node.js/pnpm if missing, builds a fresh Fluidd with the card patched in and deploys it over the detected webroot (backup + verify + rollback):

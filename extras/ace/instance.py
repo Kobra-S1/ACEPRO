@@ -2522,6 +2522,7 @@ class AceInstance:
         status["protocol"] = self.protocol_name
         status["rfid_sync_enabled"] = bool(self.rfid_inventory_sync_enabled)
         status["feed_assist_slot"] = self._get_current_feed_assist_index()
+        status["max_dryer_temperature"] = self.max_dryer_temperature
 
         # Attach device info from last get_info response, if available
         device_info = getattr(self.serial_mgr, "device_info", {})
