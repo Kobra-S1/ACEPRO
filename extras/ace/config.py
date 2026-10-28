@@ -35,6 +35,15 @@ SLOT_PARK_STATES = (
 SENSOR_TOOLHEAD = 'toolhead_sensor'
 SENSOR_RDM = 'return_module'
 
+# Startup tool-state validation: how long to wait for filament sensors to
+# report their real state before trusting an "all clear" reading.
+# Klipper's buttons module schedules the first MCU pin scan up to ~1.5 s
+# (+ oid * 10 ms) after MCU config, and only reports a pin if it differs from
+# the "not triggered" default - so "present" arrives as an event, while
+# "clear" can only be inferred once this window has passed.
+STARTUP_SENSOR_SETTLE_TIME = 3.0       # Seconds to wait before accepting "all clear"
+STARTUP_SENSOR_POLL_INTERVAL = 0.1     # Seconds between sensor reads during the wait
+
 # Slots per ACE unit (fixed)
 SLOTS_PER_ACE = 4
 
