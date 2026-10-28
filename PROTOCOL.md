@@ -186,7 +186,7 @@ Dryer status dictionary:
 - status: "stop", "drying"
 - target_temp: 60
 - duration: 300 (Minutes)
-- remain_time: 50 (Minutes)
+- remain_time: 3000 (Seconds; observed on fw V1.3.863)
 
 Slot status dictionary:
 - index: Filament slot number

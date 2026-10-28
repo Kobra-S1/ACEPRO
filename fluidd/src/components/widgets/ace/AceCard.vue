@@ -827,7 +827,6 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
     this.dryerDialog = true
   }
 
-  // Duration is not prefilled: ACE and ACE 2 report it in different units.
   selectDryerInstance (instanceIndex: number) {
     this.dryerInstance = instanceIndex
     const target = this.dryerOf(instanceIndex).target_temp

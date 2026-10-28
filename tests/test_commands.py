@@ -445,7 +445,7 @@ class TestCommandSmoke:
         assert "status=drying" in verbose_output
         assert "target_temp=45°C" in verbose_output
         assert "duration=240min" in verbose_output
-        assert "remain_time=14000min" in verbose_output
+        assert "remain_time=14000s" in verbose_output
 
     def test_cmd_ACE_GET_STATUS_verbose_all_instances(self, mock_gcmd, setup_mocks):
         """Test that ACE_GET_STATUS VERBOSE=1 queries all instances correctly."""

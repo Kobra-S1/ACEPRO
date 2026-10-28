@@ -282,6 +282,21 @@ class TestAceProtoProtocolAdapter:
             }
         ]
 
+    def test_dryer_duration_is_reported_in_minutes_like_ace1(self):
+        # Captured from an ACE 2 (fw V1.1.31) after ACE_START_DRYING
+        # DURATION=30: it echoes the duration in seconds, remain_time in
+        # seconds as well.
+        dry_status = _pb_uint(1, 2) + _pb_uint(2, 40) + _pb_uint(3, 1800) + _pb_uint(4, 1793)
+        payload = _pb_uint(1, 1) + _pb_bytes(2, dry_status)
+        inner = b"\x80\x09\x00\x06" + bytes([len(payload)]) + payload
+        frame = b"\xFF\xAA" + inner + struct.pack("<H", _calc_crc(inner)) + b"\xFE"
+
+        responses, _, _ = self.adapter.extract_responses(bytearray(frame), _calc_crc)
+
+        dryer = responses[0]["result"]["dryer_status"]
+        assert dryer["duration"] == 30
+        assert dryer["remain_time"] == 1793
+
     def test_extract_responses_status_uses_unknown_fallbacks(self):
         dry_status = _pb_uint(1, 99) + _pb_uint(2, 40)
         slot_unknown = _pb_uint(1, 140) + _pb_uint(2, 1)
