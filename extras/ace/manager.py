@@ -7,6 +7,8 @@ from .config import (
     SENSOR_RUNOUT,
     FEEDER_ACE,
     FEEDER_EXTRUDER,
+    STARTUP_SENSOR_SETTLE_TIME,
+    STARTUP_SENSOR_POLL_INTERVAL,
     FILAMENT_STATE_SPLITTER,
     FILAMENT_STATE_BOWDEN,
     FILAMENT_STATE_NOZZLE,
@@ -330,6 +332,9 @@ class AceManager:
 
         self.toolchange_in_progress = False
         self.idle_feed_assist = IdleFeedAssist(self.printer, self)
+        # True from klippy:ready until startup validation has confirmed or
+        # reset the persisted tool; feed-assist restores wait for it.
+        self.startup_validation_in_progress = False
 
         # Expose manager state for Moonraker/KlipperScreen JSON-RPC queries
         # (distinct from per-instance printer objects).
@@ -461,7 +466,10 @@ class AceManager:
         # _validate_startup_tool_state() must not run inline here or it
         # would stall every other module's klippy:ready handler. Running it
         # in its own greenlet keeps the wait but only blocks this task.
-        self.reactor.register_callback(lambda et: self._validate_startup_tool_state())
+        # The ACE can connect and restore feed assist inside that wait, so
+        # restores are held until validation ends (startup_validation_in_progress).
+        self.startup_validation_in_progress = True
+        self.reactor.register_callback(lambda et: self._run_startup_validation())
 
         # Publish initial lane_data snapshot for Orca pull-mode sync.
         self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
@@ -578,10 +586,29 @@ class AceManager:
     def _handle_shutdown(self):
         """Called on Klipper emergency stop or fatal shutdown.
 
-        Uses ``flush_direct()`` to write directly to ``saved_variables.cfg``
+        First asks every connected ACE to stop what it is doing (feed assist,
+        running feed/retract, optionally the dryer - see
+        ``AceInstance.stop_activity_on_shutdown``), since a Klipper shutdown
+        does not reach the ACE.
+
+        Then uses ``flush_direct()`` to write directly to ``saved_variables.cfg``
         without going through the GCode queue, which is unavailable (or
         rejected with "Printer is shutdown") at this point.
         """
+        for instance in self.instances:
+            try:
+                stopped = instance.stop_activity_on_shutdown()
+                if stopped:
+                    self.gcode.respond_info(
+                        f"ACE[{instance.instance_num}]: Shutdown - stopping "
+                        f"{', '.join(stopped)}"
+                    )
+            except Exception:
+                logging.exception(
+                    "ACE: Failed to stop ACE[%s] activity on shutdown",
+                    getattr(instance, "instance_num", "?"),
+                )
+
         pending = list(self.state._dirty)
         logging.info(
             "ACE: klippy:shutdown received — flushing %d dirty variable(s) directly: %s",
@@ -624,6 +651,12 @@ class AceManager:
             except Exception as e:
                 logging.warning("ACE: Moonraker lane sync shutdown failed: %s", e)
 
+    def _run_startup_validation(self):
+        try:
+            self._validate_startup_tool_state()
+        finally:
+            self.startup_validation_in_progress = False
+
     def _validate_startup_tool_state(self):
         """Validate persisted tool state against live sensor readings at startup.
 
@@ -637,15 +670,16 @@ class AceManager:
         physically loaded.
 
         .. note:: Klipper's ``RunoutHelper`` initialises ``filament_present``
-            to ``False`` and only updates it once the MCU button-state
-            callbacks have completed — two asynchronous reactor hops after
-            the MCU reports the initial pin state.  Reading the sensors
-            *without* first yielding to the reactor can therefore produce a
-            false "all-clear" result even when filament is physically present.
-            ``reactor.pause()`` is called below specifically to drain those
-            pending callbacks before the sensor values are read. This method
-            runs from its own deferred greenlet (see ``_handle_ready``), so
-            the pause only blocks this task, not other klippy:ready handlers.
+            to ``False``. The MCU only starts scanning the switch pin at the
+            ``buttons_query`` slot (up to ~1.5 s + oid * 10 ms after MCU
+            config, i.e. often *after* klippy:ready) and only reports a pin
+            that differs from its "not triggered" default. "Present" therefore
+            arrives as a late event, while "clear" is never reported at all.
+            The sensors are polled for up to ``STARTUP_SENSOR_SETTLE_TIME``
+            and the state is only reset if they stay clear for the whole
+            window. This method runs from its own deferred greenlet (see
+            ``_handle_ready``), so the wait only blocks this task, not other
+            klippy:ready handlers.
 
         .. note:: ``ace_target_index`` (unlike ``print_stats``/``pause_resume``)
             survives a klippy restart. A non-`-1` value here means a print-time
@@ -699,28 +733,39 @@ class AceManager:
         if SENSOR_TOOLHEAD not in self.sensors:
             return
 
-        # Klipper's RunoutHelper initialises filament_present=False and updates
-        # it through two layers of reactor async callbacks:
+        # Klipper's RunoutHelper initialises filament_present=False. The MCU
+        # scans the pin for the first time at the buttons_query slot
+        #   int(estimated_print_time + 1.5) + oid * 10 ms
+        # after MCU config (klippy/mcu.py get_query_slot), then reports it
+        # through two reactor hops:
         #   MCU → register_async_callback → DebounceButton.button_handler
         #       → register_callback(_debounce_event) → note_filament_present
-        # Both hops must complete before we read the sensors.  At klippy:ready
-        # time those callbacks may still be queued.  reactor.pause() yields
-        # back to the reactor loop for 0.5 s, which is more than enough for
-        # any pending MCU button-state callbacks to drain and update
-        # filament_present before we read it.
-        self.reactor.pause(self.reactor.monotonic() + 0.5)
-
-        # A toolchange may have started while we were paused above (e.g. a
-        # PLR recovery macro run concurrently) — don't race with it.
-        if self.toolchange_in_progress:
-            return
-
-        toolhead_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
-        rdm_has_filament = (
-            self.get_switch_state(SENSOR_RDM)
-            if self.has_rdm_sensor()
-            else False
+        # A present sensor can therefore still read False well after
+        # klippy:ready. Poll until one confirms filament, and only accept
+        # "all clear" once the whole settle window has passed.
+        poll_count = max(
+            1, int(round(STARTUP_SENSOR_SETTLE_TIME / STARTUP_SENSOR_POLL_INTERVAL))
         )
+        toolhead_has_filament = False
+        rdm_has_filament = False
+        for _ in range(poll_count):
+            self.reactor.pause(
+                self.reactor.monotonic() + STARTUP_SENSOR_POLL_INTERVAL
+            )
+
+            # A toolchange may have started while we were paused (e.g. a PLR
+            # recovery macro run concurrently) — don't race with it.
+            if self.toolchange_in_progress:
+                return
+
+            toolhead_has_filament = self.get_switch_state(SENSOR_TOOLHEAD)
+            rdm_has_filament = (
+                self.get_switch_state(SENSOR_RDM)
+                if self.has_rdm_sensor()
+                else False
+            )
+            if toolhead_has_filament or rdm_has_filament:
+                break
 
         if toolhead_has_filament or rdm_has_filament:
             # At least one sensor confirms filament — state looks plausible.
@@ -732,11 +777,22 @@ class AceManager:
             )
             return
 
-        # All sensors are clear while state claims a tool is loaded.
+        # The persisted state may have changed while we waited (e.g. a
+        # toolchange started and finished inside the window) — only reset
+        # the exact state that was found stale.
+        if (
+            self.state.get("ace_current_index", -1) != current_index
+            or self.state.get("ace_filament_pos", FILAMENT_STATE_BOWDEN) != filament_pos
+        ):
+            return
+
+        # All sensors stayed clear for the whole settle window while state
+        # claims a tool is loaded.
         self.gcode.respond_info(
             f"ACE: \u26a0 STARTUP VALIDATION — Saved state indicated "
             f"T{current_index} was loaded (filament_pos='{filament_pos}'), "
-            f"but ALL filament sensors report CLEAR and printer is idle. "
+            f"but ALL filament sensors stayed CLEAR for "
+            f"{STARTUP_SENSOR_SETTLE_TIME:.1f}s and printer is idle. "
             f"Resetting ace_current_index to -1 and ace_filament_pos to "
             f"'bowden'. (Likely cause: filament was manually removed "
             f"while printer was off)"
@@ -1202,15 +1258,27 @@ class AceManager:
             current_tool: Tool currently recorded as loaded (-1 if unknown).
             target_temp:  Target tool temperature already resolved by the caller
                           (0 when unavailable, e.g. unload-only changes).
+
+        Returns:
+            The heater target from *before* the recovery heat-up when this
+            method raised it (so the caller can restore it), otherwise None.
+            Without restoring, the PRE macro would read the recovery
+            temperature as "slicer temp (printing)" and POST would keep the
+            nozzle hot after a manual toolchange.
         """
         extruder = self.printer.lookup_object("extruder", None)
         if extruder is None:
-            return
+            return None
         heater = extruder.get_heater()
-        cur_temp = heater.get_temp(self.reactor.monotonic())[0]
+        now = self.reactor.monotonic()
+        cur_temp = heater.get_temp(now)[0]
         min_temp = heater.min_extrude_temp
         if cur_temp >= min_temp:
-            return  # already hot enough to move the extruder
+            return None  # already hot enough to move the extruder
+        try:
+            prev_target = float(heater.get_status(now)["target"])
+        except (TypeError, ValueError, KeyError, AttributeError):
+            prev_target = None
 
         # The filament physically stuck in the path belongs to the current
         # tool, so prefer its material temperature.
@@ -1231,6 +1299,7 @@ class AceManager:
             f"recovery unload — heating to {heat_temp:.0f}°C before clearing path"
         )
         self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
+        return prev_target
 
     def execute_coordinated_retraction(self, retract_length, retract_speed, retract_speed_mmmin, current_tool):
         """
@@ -3194,11 +3263,15 @@ class AceManager:
             # nozzle first regardless of the current sensor read.  This runs
             # before the PRE macro; the guard returns immediately when the
             # nozzle is already above min_extrude_temp.
-            self._ensure_hot_for_recovery_unload(current_tool, target_temp)
+            recovery_prev_target = self._ensure_hot_for_recovery_unload(current_tool, target_temp)
 
             success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1, keep_heater=True)
             if not success:
                 raise Exception("Failed to clear filament path - plausibility check failed")
+            # Hand the nozzle target back as it was before the recovery heat-up:
+            # the PRE macro decides "printing vs. manual" from the current target.
+            if recovery_prev_target is not None:
+                self.gcode.run_script_from_command(f"M104 S{recovery_prev_target:.0f}")
             # Reset extruder state after emergency unload — the cycling path
             # (Case 2/3) has no G92 E0 cleanup unlike the normal unload path.
             # Stale E position or queued moves can cause "Extrude below

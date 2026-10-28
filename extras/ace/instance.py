@@ -150,6 +150,8 @@ class AceInstance:
         self.feed_assist_active_after_ace_connect = ace_config.get(
             "feed_assist_active_after_ace_connect", True
         )
+        self.stop_ace_on_shutdown = ace_config.get("stop_ace_on_shutdown", True)
+        self.stop_dryer_on_shutdown = ace_config.get("stop_dryer_on_shutdown", False)
 
         # Not overridable per instance
         self.toolhead_full_purge_length = float(ace_config["toolhead_full_purge_length"])
@@ -723,6 +725,89 @@ class AceInstance:
         # giving up
         if not self.protocol.feed_assist_causes_busy():
             self.wait_ready()
+
+    def stop_activity_on_shutdown(self):
+        """Best-effort stop of ACE-side activity after a Klipper shutdown.
+
+        Called from the klippy:shutdown handler (M112 / emergency stop, fatal
+        MCU error). A shutdown halts every Klipper MCU, but the ACE is not one
+        of them: an active feed assist keeps pushing filament into a toolhead
+        that no longer extrudes, and a feed/retract already sent keeps running
+        to its full length.
+
+        Runs in shutdown state, so it only queues high-priority requests (the
+        serial writer timer keeps running): no wait_ready(), no dwell(), no
+        G-code. Never raises.
+
+        Returns:
+            list: Short descriptions of what was asked to stop.
+        """
+        if not self.stop_ace_on_shutdown:
+            return []
+        try:
+            if not self.serial_mgr.is_connected():
+                return []
+        except Exception:
+            return []
+
+        actions = []
+
+        fa_slot = self._feed_assist_index
+        if fa_slot >= 0:
+            actions.append((
+                f"feed assist on slot {fa_slot}",
+                lambda: self.protocol.build_stop_feed_assist_request(fa_slot),
+            ))
+            self._feed_assist_index = -1
+            self._feed_assist_topology_position = None
+            # The print is over after a shutdown: do not restore feed assist on
+            # the reconnect that follows FIRMWARE_RESTART. The next tool
+            # selection re-enables it as usual.
+            self.state.set(f"ace_feed_assist_index_{self.instance_num}", -1)
+
+        for slot in self._info.get("slots", []):
+            idx = slot.get("index")
+            if not isinstance(idx, int) or idx == fa_slot:
+                continue
+            status = normalize_ace_slot_state(slot.get("status"))
+            if status == AceSlotStateMachineState.FEEDING.value:
+                actions.append((
+                    f"feed on slot {idx}",
+                    lambda i=idx: self.protocol.build_stop_feed_filament_request(i),
+                ))
+            elif status == AceSlotStateMachineState.UNWINDING.value:
+                actions.append((
+                    f"retract on slot {idx}",
+                    lambda i=idx: self.protocol.build_stop_unwind_filament_request(i),
+                ))
+
+        if self.stop_dryer_on_shutdown:
+            dryer = self._info.get("dryer_status") or self._info.get("dryer") or {}
+            if self._dryer_active or dryer.get("status") == "drying":
+                self._dryer_active = False
+                actions.append(("dryer", self.protocol.build_stop_drying_request))
+
+        stopped = []
+        for what, build_request in actions:
+            def callback(response, what=what):
+                if response and response.get("code") == 0:
+                    logging.info(
+                        f"ACE[{self.instance_num}]: Shutdown - {what} stopped"
+                    )
+                else:
+                    msg = response.get("msg", "Unknown") if response else "no response"
+                    logging.warning(
+                        f"ACE[{self.instance_num}]: Shutdown - stopping {what} failed: {msg}"
+                    )
+            try:
+                self.send_high_prio_request(build_request(), callback)
+                stopped.append(what)
+            except Exception:
+                logging.exception(
+                    f"ACE[{self.instance_num}]: Shutdown - could not queue stop of {what}"
+                )
+
+        return stopped
 
     def _ensure_feed_assist_off_for_motion(self, slot, action):
         """Disable any active feed assist before a FEED/RETRACT command.
@@ -1628,6 +1713,18 @@ class AceInstance:
             return False
         return getattr(mgr, "toolchange_in_progress", False) is True
 
+    def _manager_owns_assist_state(self):
+        """True while the manager decides which tool's assist may run: a
+        toolchange is running, or startup validation may still reset the
+        persisted current tool (strict-bool, like the helper above)."""
+        if self._manager_toolchange_in_progress():
+            return True
+        try:
+            mgr = self.manager
+        except Exception:
+            return False
+        return getattr(mgr, "startup_validation_in_progress", False) is True
+
     def _smart_unload_slot(self, slot, length=100, on_retract_started=None):
         """
         Fixed-length retraction with optional sensor validation.
@@ -2332,10 +2429,12 @@ class AceInstance:
 
         # Defer while a toolchange runs - it owns assist state, and a
         # restore firing mid-toolchange re-arms an assist the toolchange
-        # deliberately disabled.  The pending restore stays queued and
-        # re-evaluates on the next heartbeat; the ownership check below
-        # then drops it if the toolchange made it stale.
-        if self._manager_toolchange_in_progress():
+        # deliberately disabled.  Likewise during startup validation, which
+        # may still reset the current tool the ownership check reads.  The
+        # pending restore stays queued and re-evaluates on the next
+        # heartbeat; the ownership check below then drops it if the
+        # toolchange or validation made it stale.
+        if self._manager_owns_assist_state():
             return
 
         slot = self._pending_feed_assist_restore

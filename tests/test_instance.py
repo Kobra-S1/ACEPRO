@@ -4090,6 +4090,21 @@ class TestExtruderMove(unittest.TestCase):
         self.mock_toolhead.move.assert_called_once_with([10, 20, 30, 43], 15)
         self.mock_toolhead.wait_moves.assert_called_once()
 
+    @patch('ace.instance.AceSerialManager')
+    def test_move_resyncs_gcode_position_for_filament_accounting(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        gcode_move = Mock()
+        self.mock_toolhead.get_position.return_value = [0, 0, 0, 0]
+        self.mock_toolhead.move = Mock()
+        base = self.mock_printer.lookup_object.side_effect
+        self.mock_printer.lookup_object.side_effect = (
+            lambda name, default=None: gcode_move if name == "gcode_move" else base(name, default))
+
+        instance._extruder_move(85, 5)
+
+        self.mock_toolhead.move.assert_called_once_with([0, 0, 0, 85], 5)
+        gcode_move.reset_last_position.assert_called_once()
+
 
 class TestSmartUnloadSlot(unittest.TestCase):
     """Branch coverage for _smart_unload_slot."""

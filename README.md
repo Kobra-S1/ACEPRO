@@ -1505,6 +1505,22 @@ To disable automatic feed assist restoration:
 feed_assist_active_after_ace_connect: False
 ```
 
+### Emergency Stop / Klipper Shutdown
+
+A Klipper shutdown (`M112`, the emergency stop button of Mainsail/Fluidd/KlipperScreen, or a fatal MCU error) halts every Klipper MCU, but the ACE is a separate USB device and is not halted by it. On `klippy:shutdown` the driver therefore asks every connected ACE to stop:
+
+- the active **feed assist** (and forgets it, so it is **not** restored on the reconnect that follows `FIRMWARE_RESTART` — the next tool selection re-enables it as usual);
+- any **feed or retract** the ACE reports as running;
+- the **dryer**, only if `stop_dryer_on_shutdown: True`.
+
+The stop requests are queued with high priority without waiting for the ACE (G-code is not available in shutdown state). The log shows e.g. `ACE[0]: Shutdown - stopping feed assist on slot 0`.
+
+```ini
+[ace]
+stop_ace_on_shutdown: True      # default; False = previous behaviour (ACE keeps running)
+stop_dryer_on_shutdown: False   # default; True = also stop a running dryer
+```
+
 ### Status Command
 
 ```gcode

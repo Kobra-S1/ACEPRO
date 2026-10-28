@@ -50,6 +50,15 @@ SENSOR_RUNOUT = 'runout_sensor'
 FEEDER_EXTRUDER = "EXTRUDER"
 FEEDER_ACE = "ACE"
 
+# Startup tool-state validation: how long to wait for filament sensors to
+# report their real state before trusting an "all clear" reading.
+# Klipper's buttons module schedules the first MCU pin scan up to ~1.5 s
+# (+ oid * 10 ms) after MCU config, and only reports a pin if it differs from
+# the "not triggered" default - so "present" arrives as an event, while
+# "clear" can only be inferred once this window has passed.
+STARTUP_SENSOR_SETTLE_TIME = 3.0       # Seconds to wait before accepting "all clear"
+STARTUP_SENSOR_POLL_INTERVAL = 0.1     # Seconds between sensor reads during the wait
+
 # Slots per ACE unit (fixed)
 SLOTS_PER_ACE = 4
 
@@ -164,6 +173,15 @@ def read_ace_config(config):
     # turret inlets; behind three direct ones T3 is the first ACE slot).
     ace_config["register_tool_macros"] = config.getboolean(
         "register_tool_macros", True
+    )
+    # Klipper shutdown (M112 / emergency stop, fatal MCU error): the ACE is
+    # not a Klipper MCU, so it keeps doing what it was told unless the driver
+    # tells it to stop.
+    ace_config["stop_ace_on_shutdown"] = config.getboolean(
+        "stop_ace_on_shutdown", True
+    )
+    ace_config["stop_dryer_on_shutdown"] = config.getboolean(
+        "stop_dryer_on_shutdown", False
     )
     ace_config["rfid_inventory_sync_enabled"] = config.getboolean(
         "rfid_inventory_sync_enabled", True
