@@ -516,6 +516,59 @@ class TestValidateStartupToolState(unittest.TestCase):
         deferred_callback(0.0)
         manager._validate_startup_tool_state.assert_called_once()
 
+    def _run_ready_with_validation(self, validate_side_effect):
+        """Run _handle_ready with a stub validation; return (manager, callback)."""
+        manager = self._build_manager()
+        manager._setup_sensors = Mock()
+        manager._start_monitoring = Mock()
+        manager._validate_startup_tool_state = Mock(side_effect=validate_side_effect)
+
+        def lookup(name, default=None):
+            if name == "gcode":
+                return self.mock_gcode
+            if name == "save_variables":
+                return self.mock_save_vars
+            if name == "output_pin ACE_Pro":
+                return Mock(get_status=Mock(return_value={"value": 0}))
+            if name == "toolhead":
+                return Mock()
+            if name == "print_stats":
+                return self.mock_print_stats
+            return default
+
+        self.mock_printer.lookup_object.side_effect = lookup
+        manager._handle_ready()
+        return manager, self.mock_reactor.register_callback.call_args[0][0]
+
+    def test_validation_in_progress_from_ready_until_validation_ends(self):
+        """Feed-assist restores wait on this flag: it must cover the gap
+        between klippy:ready and the deferred validation, and the poll window."""
+        seen_during = []
+        manager, callback = self._run_ready_with_validation(
+            lambda: seen_during.append(manager.startup_validation_in_progress))
+
+        self.assertIs(manager.startup_validation_in_progress, True)
+        callback(0.0)
+        self.assertEqual(seen_during, [True])
+        self.assertIs(manager.startup_validation_in_progress, False)
+
+    def test_validation_in_progress_cleared_when_validation_raises(self):
+        manager, callback = self._run_ready_with_validation(RuntimeError("boom"))
+
+        with self.assertRaises(RuntimeError):
+            callback(0.0)
+        self.assertIs(manager.startup_validation_in_progress, False)
+
+    def test_validation_in_progress_cleared_on_early_return(self):
+        """No tool recorded as loaded: validation returns at once."""
+        self.variables["ace_current_index"] = -1
+        manager = self._build_manager()
+        manager.startup_validation_in_progress = True
+
+        manager._run_startup_validation()
+
+        self.assertIs(manager.startup_validation_in_progress, False)
+
     # ------------------------------------------------------------------
     # Settle window: late MCU sensor reports after klippy:ready
     # ------------------------------------------------------------------

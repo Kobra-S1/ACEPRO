@@ -294,6 +294,9 @@ class AceManager:
         )
 
         self.toolchange_in_progress = False
+        # True from klippy:ready until startup validation has confirmed or
+        # reset the persisted tool; feed-assist restores wait for it.
+        self.startup_validation_in_progress = False
 
         # Expose manager state for Moonraker/KlipperScreen JSON-RPC queries
         # (distinct from per-instance printer objects).
@@ -412,7 +415,10 @@ class AceManager:
         # _validate_startup_tool_state() must not run inline here or it
         # would stall every other module's klippy:ready handler. Running it
         # in its own greenlet keeps the wait but only blocks this task.
-        self.reactor.register_callback(lambda et: self._validate_startup_tool_state())
+        # The ACE can connect and restore feed assist inside that wait, so
+        # restores are held until validation ends (startup_validation_in_progress).
+        self.startup_validation_in_progress = True
+        self.reactor.register_callback(lambda et: self._run_startup_validation())
 
         # Publish initial lane_data snapshot for Orca pull-mode sync.
         self._sync_moonraker_lane_data(force=True, reason="klippy_ready")
@@ -571,6 +577,12 @@ class AceManager:
                 adapter.shutdown()
             except Exception as e:
                 logging.warning("ACE: Moonraker lane sync shutdown failed: %s", e)
+
+    def _run_startup_validation(self):
+        try:
+            self._validate_startup_tool_state()
+        finally:
+            self.startup_validation_in_progress = False
 
     def _validate_startup_tool_state(self):
         """Validate persisted tool state against live sensor readings at startup.

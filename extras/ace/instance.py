@@ -1481,6 +1481,18 @@ class AceInstance:
             return False
         return getattr(mgr, "toolchange_in_progress", False) is True
 
+    def _manager_owns_assist_state(self):
+        """True while the manager decides which tool's assist may run: a
+        toolchange is running, or startup validation may still reset the
+        persisted current tool (strict-bool, like the helper above)."""
+        if self._manager_toolchange_in_progress():
+            return True
+        try:
+            mgr = self.manager
+        except Exception:
+            return False
+        return getattr(mgr, "startup_validation_in_progress", False) is True
+
     def _smart_unload_slot(self, slot, length=100, on_retract_started=None):
         """
         Fixed-length retraction with optional sensor validation.
@@ -2178,10 +2190,12 @@ class AceInstance:
 
         # Defer while a toolchange runs - it owns assist state, and a
         # restore firing mid-toolchange re-arms an assist the toolchange
-        # deliberately disabled.  The pending restore stays queued and
-        # re-evaluates on the next heartbeat; the ownership check below
-        # then drops it if the toolchange made it stale.
-        if self._manager_toolchange_in_progress():
+        # deliberately disabled.  Likewise during startup validation, which
+        # may still reset the current tool the ownership check reads.  The
+        # pending restore stays queued and re-evaluates on the next
+        # heartbeat; the ownership check below then drops it if the
+        # toolchange or validation made it stale.
+        if self._manager_owns_assist_state():
             return
 
         slot = self._pending_feed_assist_restore

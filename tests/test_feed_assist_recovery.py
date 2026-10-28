@@ -347,6 +347,38 @@ class TestRestoreOwnershipInvariant(unittest.TestCase):
         inst._maybe_restore_pending_feed_assist()
         assert inst.send_request.called
 
+    def test_restore_deferred_while_startup_validation_runs(self):
+        # Startup validation may still reset the current tool: the restore
+        # waits for its verdict instead of judging ownership from stale state
+        inst = self._bare(pending_slot=1, current_tool=5)
+        mgr = INSTANCE_MANAGERS[1]
+        mgr.startup_validation_in_progress = True  # literal True required
+        inst._maybe_restore_pending_feed_assist()
+        assert not inst.send_request.called
+        assert inst._pending_feed_assist_restore == 1
+        assert inst._feed_assist_restore_attempts == 0
+
+    def test_restore_proceeds_after_validation_confirms_tool(self):
+        inst = self._bare(pending_slot=1, current_tool=5)
+        mgr = INSTANCE_MANAGERS[1]
+        mgr.startup_validation_in_progress = True
+        inst._maybe_restore_pending_feed_assist()
+        mgr.startup_validation_in_progress = False
+        inst._maybe_restore_pending_feed_assist()
+        assert inst.send_request.called
+
+    def test_restore_dropped_after_validation_resets_tool(self):
+        inst = self._bare(pending_slot=1, current_tool=5)
+        mgr = INSTANCE_MANAGERS[1]
+        mgr.startup_validation_in_progress = True
+        inst._maybe_restore_pending_feed_assist()
+        # Validation found all sensors clear and reset the loaded tool
+        mgr.state.get = lambda k, d=None: -1 if k == "ace_current_index" else d
+        mgr.startup_validation_in_progress = False
+        inst._maybe_restore_pending_feed_assist()
+        assert not inst.send_request.called
+        mgr.state.set.assert_called_with("ace_feed_assist_index_1", -1)
+
     def test_restore_fail_open_when_state_unreadable(self):
         inst = self._bare(pending_slot=1, current_tool=5)
         INSTANCE_MANAGERS[1].state.get = Mock(
