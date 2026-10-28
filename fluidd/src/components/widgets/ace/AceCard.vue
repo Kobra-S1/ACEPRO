@@ -71,40 +71,34 @@
         fluid
         pa-2
       >
-        <!-- Header: model / firmware / connection -->
-        <v-row
-          dense
-          align="center"
-          class="ace-header smaller-font"
-        >
-          <v-col class="text--secondary text-truncate">
-            MODEL: {{ modelName }}
-          </v-col>
-          <v-col
-            cols="auto"
-            class="d-flex align-center"
-          >
-            <v-chip
-              v-if="connectionState"
-              x-small
-              :color="isConnected ? 'success' : 'error'"
-              outlined
-              class="me-2"
-            >
-              {{ isConnected ? 'Connected' : 'Disconnected' }}
-            </v-chip>
-            <span class="text--secondary">FIRMWARE: {{ firmwareVersion }}</span>
-          </v-col>
-        </v-row>
-
         <template v-for="i in aceInstanceCount">
-          <div
-            v-if="aceInstanceCount > 1"
+          <!-- Unit header: tools / model / firmware / connection -->
+          <v-row
             :key="'ace-hdr-' + i"
-            class="text--disabled subtitle-2 mt-2"
+            dense
+            align="center"
+            class="ace-header smaller-font mt-1"
           >
-            ACE #{{ i }} · T{{ (i - 1) * 4 }}–T{{ (i - 1) * 4 + 3 }}
-          </div>
+            <v-col class="text--secondary text-truncate">
+              <span class="subtitle-2">{{ unitTitle(i - 1) }}</span>
+              · {{ unitField(i - 1, 'model') }}
+            </v-col>
+            <v-col
+              cols="auto"
+              class="d-flex align-center"
+            >
+              <v-chip
+                v-if="unitField(i - 1, 'connection_state') !== '—'"
+                x-small
+                :color="unitConnected(i - 1) ? 'success' : 'error'"
+                outlined
+                class="me-2"
+              >
+                {{ unitConnected(i - 1) ? 'Connected' : 'Disconnected' }}
+              </v-chip>
+              <span class="text--secondary">FW {{ unitField(i - 1, 'firmware') }}</span>
+            </v-col>
+          </v-row>
 
           <!-- Slots: click on spool = load Tn, pencil = color/material -->
           <v-row
@@ -120,49 +114,49 @@
             >
               <div class="ace-slot-tile">
                 <div class="ace-slot-label text--disabled">
-                SLOT {{ slot.index }}
-              </div>
-              <div
-                class="ace-slot-status"
-                :class="statusClass(i - 1, slot)"
-              >
-                {{ slotStatusText(i - 1, slot) }}
-              </div>
-              <div class="ace-spool-wrap">
-                <button
-                  type="button"
-                  class="ace-spool"
-                  :class="spoolClasses(i - 1, slot)"
-                  :style="{ borderColor: spoolBorderCss(slot) }"
-                  :disabled="!canSelectTool"
-                  @click="selectTool(slotTool(slot))"
+                  SLOT {{ slot.index }}
+                </div>
+                <div
+                  class="ace-slot-status"
+                  :class="statusClass(slot)"
                 >
-                  <span class="ace-spool-inner" />
-                </button>
-                <button
-                  type="button"
-                  class="ace-spool-edit"
-                  :disabled="!canSend"
-                  @click.stop="openSlotDialog(i - 1, slot)"
-                >
-                  <v-icon x-small>
-                    $pencil
-                  </v-icon>
-                </button>
-              </div>
-              <div class="ace-slot-material text-center">
-                {{ slotEmpty(slot) ? '—' : (slot.material || '—') }}
-              </div>
-              <div class="ace-slot-sub text--disabled text-center">
-                <template v-if="slot.rfid">
-                  RFID · {{ slot.temp }}°C
-                </template>
-                <template v-else-if="slot.temp > 0">
-                  {{ slot.temp }}°C
-                </template>
-                <template v-else>
+                  {{ slotStatusText(slot) }}
+                </div>
+                <div class="ace-spool-wrap">
+                  <button
+                    type="button"
+                    class="ace-spool"
+                    :class="spoolClasses(slot)"
+                    :style="{ borderColor: spoolBorderCss(slot) }"
+                    :disabled="!canSelectTool || slot.tool < 0"
+                    @click="selectTool(slot.tool)"
+                  >
+                    <span class="ace-spool-inner" />
+                  </button>
+                  <button
+                    type="button"
+                    class="ace-spool-edit"
+                    :disabled="!canSend"
+                    @click.stop="openSlotDialog(i - 1, slot)"
+                  >
+                    <v-icon x-small>
+                      $pencil
+                    </v-icon>
+                  </button>
+                </div>
+                <div class="ace-slot-material text-center">
+                  {{ slotEmpty(slot) ? '—' : (slot.material || '—') }}
+                </div>
+                <div class="ace-slot-sub text--disabled text-center">
+                  <template v-if="slot.rfid">
+                    RFID · {{ slot.temp }}°C
+                  </template>
+                  <template v-else-if="slot.temp > 0">
+                    {{ slot.temp }}°C
+                  </template>
+                  <template v-else>
                   &nbsp;
-                </template>
+                  </template>
                 </div>
               </div>
             </v-col>
@@ -265,7 +259,7 @@
             <app-btn
               block
               small
-              :disabled="!canService || currentTool < 0"
+              :disabled="!canService || !currentToolLocation"
               @click="send('ACE_SMART_UNLOAD')"
             >
               Unload
@@ -277,7 +271,7 @@
           >
             <div
               class="ace-fa-switch"
-              :class="{ 'ace-fa-enabled': feedAssistOn, 'ace-fa-disabled': !canService || currentTool < 0 }"
+              :class="{ 'ace-fa-enabled': feedAssistOn, 'ace-fa-disabled': !canService || !currentToolLocation }"
               @click="toggleFeedAssist(!feedAssistOn)"
             >
               <div
@@ -327,13 +321,22 @@
           Slot {{ slotDialog.slotIndex }} · Filament
         </v-card-title>
         <v-card-text>
-          <v-select
+          <v-combobox
             v-model="slotDialog.material"
             :items="materialItems"
+            :rules="[materialRule]"
             label="Material type"
             dense
-            hide-details
-            class="mb-4"
+            class="mb-2"
+          />
+          <v-text-field
+            v-model.number="slotDialog.temp"
+            :rules="[tempRule]"
+            type="number"
+            label="Nozzle temperature"
+            suffix="°C"
+            dense
+            class="mb-2"
           />
           <div class="d-flex align-center mb-3">
             <div
@@ -365,7 +368,7 @@
           </app-btn>
           <app-btn
             color="primary"
-            :disabled="!canSend || busy"
+            :disabled="!canSend || busy || !slotDialogValid"
             @click="saveSlotDialog"
           >
             Save
@@ -384,6 +387,23 @@
           ACE Pro Dryer
         </v-card-title>
         <v-card-text>
+          <v-btn-toggle
+            v-if="aceInstanceCount > 1"
+            :value="dryerInstance"
+            mandatory
+            dense
+            class="mb-3"
+            @change="selectDryerInstance"
+          >
+            <v-btn
+              v-for="i in aceInstanceCount"
+              :key="'dry-unit-' + i"
+              :value="i - 1"
+              small
+            >
+              ACE #{{ i }}
+            </v-btn>
+          </v-btn-toggle>
           <v-row
             dense
             align="center"
@@ -417,8 +437,8 @@
             <span class="ace-dlg-slider-label">Temperature</span>
             <v-slider
               v-model="dryTemp"
-              min="50"
-              max="65"
+              :min="DRY_TEMP_MIN"
+              :max="maxDryerTemp(dryerInstance)"
               step="5"
               hide-details
               dense
@@ -475,30 +495,38 @@ interface SlotDialogState {
   open: boolean
   instance: number
   slotIndex: number
-  tool: number
   material: string
+  temp: number | string
   color: number[]
 }
 
+// ACE_SET_SLOT takes MATERIAL as one unquoted G-code parameter
+const MATERIAL_RE = /^[\w+.-]{1,32}$/
+// ACE_SET_SLOT's TEMP range
+const SLOT_TEMP_MIN = 1
+const SLOT_TEMP_MAX = 300
+
 @Component({})
 export default class AceCard extends Mixins(StateMixin, AceMixin) {
+  readonly DRY_TEMP_MIN = 35
+
   busy = false
   faLocal: boolean | null = null
   dryerDialog = false
   dryerInstance = 0
-  dryTemp = 55
+  dryTemp = 50
   dryDuration = 240
 
   slotDialog: SlotDialogState = {
     open: false,
     instance: 0,
     slotIndex: 0,
-    tool: 0,
     material: 'PLA',
+    temp: '',
     color: [0, 0, 0]
   }
 
-  readonly materials = ['PLA', 'PETG', 'ABS', 'ASA', 'PC', 'PA', 'TPU', 'Custom']
+  readonly materials = ['PLA', 'PETG', 'ABS', 'ASA', 'PC', 'PA', 'TPU']
 
   // Black + white first, then rainbow
   readonly swatches = [
@@ -514,49 +542,40 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
     return this.printState === 'printing'
   }
 
-  get canSelectTool (): boolean {
-    return this.klippyReady
-  }
-
   get canSend (): boolean {
     return this.klippyReady
   }
 
-  // Service operations (unload, assist, reconnect) are blocked while printing
+  // Service operations (tool change, unload, assist, reconnect) are blocked
+  // while printing or paused: the print owns the loaded tool.
   get canService (): boolean {
     return this.klippyReady && !['printing', 'paused'].includes(this.printState)
   }
 
-  get modelName (): string {
-    for (let i = 0; i < this.aceInstanceCount; i++) {
-      const m = this.aceInstance(i)?.model
-      if (m) return m
-    }
-    return '—'
+  get canSelectTool (): boolean {
+    return this.canService
   }
 
-  get firmwareVersion (): string {
-    for (let i = 0; i < this.aceInstanceCount; i++) {
-      const f = this.aceInstance(i)?.firmware
-      if (f) return f
-    }
-    return '—'
+  // "ACE #2 · T4–T7", tool range as the driver numbers this unit's slots
+  unitTitle (instanceIndex: number): string {
+    const tools = this.slotsOf(instanceIndex).map(s => s.tool).filter(t => t >= 0)
+    const title = `ACE #${instanceIndex + 1}`
+    if (!tools.length) return title
+    return `${title} · T${Math.min(...tools)}–T${Math.max(...tools)}`
   }
 
-  get connectionState (): string {
-    const inst: any = this.aceInstance(0)
-    return String(inst?.connection_state ?? '')
+  unitField (instanceIndex: number, field: 'model' | 'firmware' | 'connection_state'): string {
+    return String(this.aceInstance(instanceIndex)?.[field] || '—')
   }
 
-  get isConnected (): boolean {
-    return this.connectionState === 'connected'
+  unitConnected (instanceIndex: number): boolean {
+    return this.aceInstance(instanceIndex)?.connection_state === 'connected'
   }
 
   get currentToolColor (): string | undefined {
-    if (this.currentTool < 0) return undefined
-    const inst = Math.floor(this.currentTool / 4)
-    const slot = this.currentTool % 4
-    const s = this.slotsOf(inst)[slot]
+    const loc = this.currentToolLocation
+    if (!loc) return undefined
+    const s = this.slotsOf(loc.instance).find(x => x.index === loc.slot)
     return this.slotEmpty(s) ? undefined : this.slotColorCss(s)
   }
 
@@ -634,11 +653,14 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
     return false
   }
 
-  // Feed assist state: from the driver, local fallback until it reports
+  // Feed assist of the current tool's slot, as its own unit reports it;
+  // local fallback until the driver reports.
   get feedAssistOn (): boolean {
-    const s = this.feedAssistSlot
-    if (s == null) return this.faLocal ?? false
-    return s >= 0
+    const loc = this.currentToolLocation
+    if (!loc) return false
+    const s = this.aceInstance(loc.instance)?.feed_assist_slot
+    if (typeof s !== 'number') return this.faLocal ?? false
+    return s === loc.slot
   }
 
   get dryerRunning (): boolean {
@@ -668,20 +690,16 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
     return `${Math.round(s / 60)} min`
   }
 
-  slotTool (slot: AceSlot): number {
-    return typeof slot.tool === 'number' ? slot.tool : this.currentTool
-  }
-
-  slotStatusText (instanceIndex: number, slot: AceSlot): string {
+  slotStatusText (slot: AceSlot): string {
     if (this.slotEmpty(slot)) return 'EMPTY'
-    if (this.isCurrentTool(instanceIndex, slot.index) && this.printing) return 'PRINTING'
-    if (this.isCurrentTool(instanceIndex, slot.index)) return 'ACTIVE'
+    if (this.isCurrentTool(slot) && this.printing) return 'PRINTING'
+    if (this.isCurrentTool(slot)) return 'ACTIVE'
     return (slot.status || 'READY').toUpperCase()
   }
 
-  statusClass (instanceIndex: number, slot: AceSlot): string {
+  statusClass (slot: AceSlot): string {
     if (this.slotEmpty(slot)) return 'ace-status-empty'
-    if (this.isCurrentTool(instanceIndex, slot.index)) {
+    if (this.isCurrentTool(slot)) {
       return this.printing ? 'ace-status-printing' : 'ace-status-active'
     }
     return 'ace-status-ready'
@@ -712,17 +730,17 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
     return lum < 80 ? '#9E9E9E' : 'rgba(0, 0, 0, 0.35)'
   }
 
-  spoolClasses (instanceIndex: number, slot: AceSlot): Record<string, boolean> {
+  spoolClasses (slot: AceSlot): Record<string, boolean> {
     return {
       'ace-spool-empty': this.slotEmpty(slot),
       'ace-spool-dark': !this.slotEmpty(slot) && this.slotDark(slot),
-      'ace-spool-current': this.isCurrentTool(instanceIndex, slot.index),
-      'ace-spool-printing': this.isCurrentTool(instanceIndex, slot.index) && this.printing
+      'ace-spool-current': this.isCurrentTool(slot),
+      'ace-spool-printing': this.isCurrentTool(slot) && this.printing
     }
   }
 
-  isCurrentTool (instanceIndex: number, slotIndex: number): boolean {
-    return this.currentTool === this.toolIndex(instanceIndex, slotIndex)
+  isCurrentTool (slot: AceSlot): boolean {
+    return slot.tool >= 0 && slot.tool === this.currentTool
   }
 
   async send (cmd: string) {
@@ -739,12 +757,14 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
     this.send(`T${tool}`)
   }
 
+  // Addressed by unit and slot: a tool number a printer-side tool changer
+  // owns may not be an ACE tool at all.
   toggleFeedAssist (value: boolean) {
-    if (!this.canService || this.currentTool < 0) return
-    if (this.feedAssistSlot == null) this.faLocal = value
-    this.send(value
-      ? `ACE_ENABLE_FEED_ASSIST T=${this.currentTool}`
-      : `ACE_DISABLE_FEED_ASSIST T=${this.currentTool}`)
+    const loc = this.currentToolLocation
+    if (!this.canService || !loc) return
+    if (typeof this.aceInstance(loc.instance)?.feed_assist_slot !== 'number') this.faLocal = value
+    const cmd = value ? 'ACE_ENABLE_FEED_ASSIST' : 'ACE_DISABLE_FEED_ASSIST'
+    this.send(`${cmd} INSTANCE=${loc.instance} INDEX=${loc.slot}`)
   }
 
   // --- Slot dialog ---
@@ -755,10 +775,26 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
       open: true,
       instance: instanceIndex,
       slotIndex: slot.index,
-      tool: typeof slot.tool === 'number' ? slot.tool : this.toolIndex(instanceIndex, slot.index),
-      material: slot.material || 'PLA',
+      material: MATERIAL_RE.test(slot.material) ? slot.material : 'PLA',
+      temp: slot.temp > 0 ? slot.temp : '',
       color: [Number(c[0]) || 0, Number(c[1]) || 0, Number(c[2]) || 0]
     }
+  }
+
+  materialRule (value: unknown): boolean | string {
+    return MATERIAL_RE.test(String(value ?? '').trim()) ||
+      'Letters, digits and + . _ - only, no spaces'
+  }
+
+  tempRule (value: unknown): boolean | string {
+    const t = Number(value)
+    return (Number.isInteger(t) && t >= SLOT_TEMP_MIN && t <= SLOT_TEMP_MAX) ||
+      `${SLOT_TEMP_MIN}–${SLOT_TEMP_MAX} °C`
+  }
+
+  get slotDialogValid (): boolean {
+    return this.materialRule(this.slotDialog.material) === true &&
+      this.tempRule(this.slotDialog.temp) === true
   }
 
   pickSwatch (css: string) {
@@ -772,8 +808,13 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
   }
 
   saveSlotDialog () {
+    if (!this.slotDialogValid) return
     const [r, g, b] = this.slotDialog.color
-    const cmd = `ACE_SET_SLOT T=${this.slotDialog.tool} MATERIAL=${this.slotDialog.material} COLOR=${r},${g},${b}`
+    const material = String(this.slotDialog.material).trim()
+    const temp = Number(this.slotDialog.temp)
+    const { instance, slotIndex } = this.slotDialog
+    const cmd = `ACE_SET_SLOT INSTANCE=${instance} INDEX=${slotIndex} ` +
+      `MATERIAL=${material} COLOR=${r},${g},${b} TEMP=${temp}`
     this.slotDialog.open = false
     this.send(cmd)
   }
@@ -781,12 +822,17 @@ export default class AceCard extends Mixins(StateMixin, AceMixin) {
   // --- Dryer dialog ---
 
   openDryerDialog () {
-    const d = this.dryerOf(this.dryerInstance)
-    if (d.target_temp >= 50) this.dryTemp = d.target_temp
-    // Driver reports duration in seconds, slider works in minutes
-    const durMin = Math.round(d.duration / 60)
-    if (durMin >= 30) this.dryDuration = Math.min(240, durMin)
+    const loc = this.currentToolLocation
+    this.selectDryerInstance(loc ? loc.instance : this.dryerInstance)
     this.dryerDialog = true
+  }
+
+  // Duration is not prefilled: ACE and ACE 2 report it in different units.
+  selectDryerInstance (instanceIndex: number) {
+    this.dryerInstance = instanceIndex
+    const target = this.dryerOf(instanceIndex).target_temp
+    if (target >= this.DRY_TEMP_MIN) this.dryTemp = target
+    this.dryTemp = Math.min(this.dryTemp, this.maxDryerTemp(instanceIndex))
   }
 
   startDrying () {

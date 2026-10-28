@@ -3382,6 +3382,14 @@ class TestGetStatus(unittest.TestCase):
         # Check slots structure
         self.assertEqual(len(status['slots']), SLOTS_PER_ACE)
 
+    @patch('ace.instance.AceSerialManager')
+    def test_get_status_reports_dryer_limit(self, mock_serial_mgr_class):
+        """UIs bound their dryer temperature input by this instance's limit."""
+        self.ace_config['max_dryer_temperature'] = 45
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+
+        self.assertEqual(instance.get_status()['max_dryer_temperature'], 45)
+
 class TestInventoryJsonEmission(unittest.TestCase):
     """Test JSON emission of inventory data for UI/KlipperScreen."""
     
