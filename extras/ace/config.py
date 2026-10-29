@@ -176,6 +176,10 @@ def read_ace_config(config):
     # False when a printer-side tool changer owns T<n> and reaches the ACE
     # through ACE_CHANGE_TOOL (Kobra X: [kx_toolchanger] maps its tools onto
     # turret inlets; behind three direct ones T3 is the first ACE slot).
+    # The printer object of a printer-side tool changer that numbers the
+    # tools (tool_base.py), e.g. kx_toolchanger on the Kobra X. None: the
+    # ACE's tools start at T0.
+    ace_config["tool_changer"] = config.get("tool_changer", None) or None
     ace_config["register_tool_macros"] = config.getboolean(
         "register_tool_macros", True
     )

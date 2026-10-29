@@ -423,7 +423,7 @@ class AceManager:
     def _handle_connect(self):
         # Before any klippy:ready handler reads a tool number - the printer's
         # tool changer reads ace_current_index at ready.
-        moved_from = apply_tool_base(self.printer, self.state)
+        moved_from = apply_tool_base(self._tool_changer(), self.state)
         if moved_from is not None:
             self.gcode.respond_info(
                 f"ACE: Tools now start at T{get_tool_base()} "
@@ -917,7 +917,7 @@ class AceManager:
 
         # --- RDM sensor (optional) ---
         rdm_name = instance.filament_runout_sensor_name_rdm
-        if rdm_name is not None and not rdm_in_ace_path(self.printer):
+        if rdm_name is not None and not rdm_in_ace_path(self._tool_changer()):
             # The printer's tool changer routes the ACE past no RDM (Kobra X
             # combo mode): the sensor may exist, nothing ACE-fed passes it.
             self.gcode.respond_info(
@@ -1004,6 +1004,18 @@ class AceManager:
             self._runout_presence = presence
         self.gcode.respond_info(
             f"ACE: Intake-gated toolhead transfer, intake sensor '{name}'")
+
+    def _tool_changer(self):
+        """The printer object [ace] tool_changer names, or None without
+        the option; a name no object answers to is a config error."""
+        name = self.ace_config.get("tool_changer")
+        if not name:
+            return None
+        tool_changer = self.printer.lookup_object(name, None)
+        if tool_changer is None:
+            raise self.config.error(
+                f"tool_changer '{name}' is not a printer object")
+        return tool_changer
 
     def _resolve_toolhead_paths(self):
         """toolhead_paths: one of PATHS, or the name of a printer object
@@ -3659,6 +3671,10 @@ class AceManager:
                 "lane_sync_enabled": bool(self._moonraker_lane_sync.enabled),
                 "toolchange_in_progress": bool(self.toolchange_in_progress),
                 "box_tag_tools": self._box_tag_tools(),
+                # For the panel and the macros, which number the tools
+                # and ask the tool changer by this name.
+                "tool_changer": self.ace_config.get("tool_changer") or "",
+                "tool_base": get_tool_base(),
             }
         except Exception:
             return {

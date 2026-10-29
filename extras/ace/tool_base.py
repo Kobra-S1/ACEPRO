@@ -1,5 +1,6 @@
-"""What the printer's tool changer tells this driver, looked up by object
-name, never imported; every answer has a default for printers without one.
+"""What the printer's tool changer tells this driver. The manager looks
+it up by the [ace] tool_changer name, never imports it; every answer has a
+default for printers without one (tool_changer None).
 
 Where the ACE's tool numbering starts, set once at klippy:connect: a
 printer-side tool changer that puts its own tools first (Kobra X: the
@@ -16,35 +17,32 @@ import logging
 
 from .config import set_tool_base
 
-TOOL_CHANGER = "kx_toolchanger"
 BASE_KEY = "ace_tool_base"
 # Saved state holding global tool numbers; -1 means none.
 TOOL_KEYS = ("ace_current_index", "ace_target_index")
 TOOL_LIST_KEYS = ("ace_parked_tools",)
 
 
-def tool_base_of(printer):
-    tool_changer = printer.lookup_object(TOOL_CHANGER, None)
+def tool_base_of(tool_changer):
     if tool_changer is None:
         return 0
     return tool_changer.ace_tool_offset()
 
 
-def rdm_in_ace_path(printer):
+def rdm_in_ace_path(tool_changer):
     """Whether the configured RDM sensor is in the path the ACE feeds
     through. True without a tool changer, or with one that cannot say."""
-    tool_changer = printer.lookup_object(TOOL_CHANGER, None)
     answer = getattr(tool_changer, "ace_rdm_in_path", None)
     if answer is None:
         return True
     return answer() is not False
 
 
-def apply_tool_base(printer, state):
+def apply_tool_base(tool_changer, state):
     """Set the base from the printer's tool changer and move saved tool
     numbers onto it, in memory (flushed with the next state flush, the base
     with them). Returns the base they were moved from, or None."""
-    base = tool_base_of(printer)
+    base = tool_base_of(tool_changer)
     set_tool_base(base)
     saved_base = state.get(BASE_KEY, 0)
     shift = base - saved_base

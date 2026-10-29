@@ -2,8 +2,8 @@
 
 Behind a printer-side tool changer that puts other tools first (Kobra X:
 three direct inlets, then the ACE) the first ACE's slot 0 is printer T3, and
-ACEPRO's commands and status use that number too. The tool changer
-publishes the offset in its status; without that object it is 0. The panel
+ACEPRO's commands and status use that number too. The driver publishes
+that base in its ace_state status (0 without a tool changer). The panel
 numbers its slots from it and shows and sends those numbers unchanged.
 
 The panel is imported with GTK and KlipperScreen stubbed out: only its
@@ -57,7 +57,7 @@ def make_panel(acepro):
 
 def behind_three_direct_inlets(acepro):
     panel = make_panel(acepro)
-    panel._process_rpc_status({"kx_toolchanger": {"ace_tool_offset": 3}})
+    panel._process_rpc_status({"ace_state": {"tool_base": 3}})
     return panel
 
 
@@ -97,9 +97,7 @@ def test_the_loaded_tool_is_named_by_its_printer_tool(acepro):
     panel.status_label.set_text.assert_called_with("ACE: Tool T4 Loaded")
 
 
-# What Klipper answers when the queried object does not exist: every asked
-# field, as None (klippy/webhooks.py, QueryStatusHelper._do_query).
-NO_TOOL_CHANGER = {"kx_toolchanger": {"ace_tool_offset": None}}
+NO_TOOL_CHANGER = {"ace_state": {"tool_base": 0}}
 
 
 def test_without_a_printer_tool_changer_the_numbers_are_the_aces(acepro):
@@ -113,14 +111,13 @@ def test_without_a_printer_tool_changer_the_numbers_are_the_aces(acepro):
     assert panel.sent == ["T2"]
 
 
-def test_a_missing_tool_changer_does_not_stop_the_status_update(acepro):
+def test_the_base_and_the_loaded_tool_come_in_one_reply(acepro):
     panel = make_panel(acepro)
 
-    panel._process_rpc_status(
-        dict(NO_TOOL_CHANGER, ace_state={"current_index": 2})
-    )
+    panel._process_rpc_status({"ace_state": {"tool_base": 3, "current_index": 5}})
 
-    assert panel.current_loaded_slot == 2
+    assert panel.instance_data[0]["tool_offset"] == 3
+    assert panel.current_loaded_slot == 5
 
 
 def tap_slot(panel, local_slot=0):
@@ -141,15 +138,15 @@ def test_a_slot_tap_waits_for_the_first_status_reply(acepro):
 
 def test_a_slot_tap_works_after_the_first_status_reply(acepro):
     for reply, tool in ((NO_TOOL_CHANGER, 1),
-                        ({"kx_toolchanger": {"ace_tool_offset": 3}}, 4)):
+                        ({"ace_state": {"tool_base": 3}}, 4)):
         panel = make_panel(acepro)
         panel._process_rpc_status(reply)
 
         tap_slot(panel, local_slot=1).assert_called_once_with(0, tool)
 
 
-def test_a_reply_without_the_tool_changer_keeps_the_offset(acepro):
-    # Cached printer data carries ace_state only.
+def test_a_reply_without_the_base_keeps_the_offset(acepro):
+    # A status update carries only the fields that changed.
     panel = behind_three_direct_inlets(acepro)
 
     panel._process_rpc_status({"ace_state": {"current_index": 1}})
@@ -161,7 +158,7 @@ def test_a_changed_offset_redraws_the_slot_labels(acepro):
     panel = make_panel(acepro)
     panel.update_slot_loaded_states = MagicMock()
 
-    panel._process_rpc_status({"kx_toolchanger": {"ace_tool_offset": 3}})
-    panel._process_rpc_status({"kx_toolchanger": {"ace_tool_offset": 3}})
+    panel._process_rpc_status({"ace_state": {"tool_base": 3}})
+    panel._process_rpc_status({"ace_state": {"tool_base": 3}})
 
     panel.update_slot_loaded_states.assert_called_once_with()

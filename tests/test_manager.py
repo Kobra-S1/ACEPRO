@@ -2227,8 +2227,12 @@ class TestConfigResolution(unittest.TestCase):
         self.extra_objects = {
             'filament_switch_sensor toolhead_sensor': Mock(),
             'filament_switch_sensor return_module': Mock(),
-            'kx_toolchanger': tool_changer,
+            'changer': tool_changer,
         }
+        config_get = self.mock_config.get.side_effect
+        self.mock_config.get.side_effect = (
+            lambda key, default=None: 'changer'
+            if key == 'tool_changer' else config_get(key, default))
         with patch('ace.manager.AceInstance'), patch('ace.manager.EndlessSpool'):
             manager = AceManager(self.mock_config)
         for instance in manager.instances:

@@ -1284,6 +1284,7 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
 | `feed_assist_off_when_idle` | True | Klipper's idle timeout stops the loaded tool's feed assist; the next toolhead activity restores it (`idle_assist.py`) |
+| `tool_changer` | (none) | Printer object of a printer-side tool changer that numbers the tools (Kobra X: `kx_toolchanger`); see "Tool numbering behind a printer-side tool changer" |
 | `register_tool_macros` | True | Register `T<n>` for every ACE slot. False when a printer-side tool changer owns `T<n>` and calls `ACE_CHANGE_TOOL` with printer tool numbers (Kobra X `[kx_toolchanger]`); it also owns the recovery of a failed change, see "Failure reported to a printer-side tool changer" |
 | `stop_ace_on_shutdown` | True | On `klippy:shutdown` (M112 / fatal error) stop feed assist and any running feed/retract on every connected ACE, and do not restore feed assist after the restart |
 | `stop_dryer_on_shutdown` | False | Also stop a running dryer on `klippy:shutdown` (needs `stop_ace_on_shutdown`) |
@@ -1642,8 +1643,8 @@ from `printer_K3.cfg` / `printer_K3M.cfg` / `printer_KS1.cfg` /
 # - Reheat to the stored temperature
 # - Reload T{active} whenever ACE is enabled and a tool is recorded (no
 #   filament-position check); active = _ACE_STATE.active, or
-#   kx_toolchanger.tool when present, or ace_target_index when it names an
-#   unconfirmed different tool (not with kx_toolchanger)
+#   the [ace] tool_changer's .tool when one is set, or ace_target_index when
+#   it names an unconfirmed different tool (not with a tool changer)
 # - Purge PURGE=<mm> (default 40, 0 skips): _RESUME_PURGE if defined, else
 #   generic purge + wipe
 # - BASE_RESUME, then _RESUME_REPRIME if defined
@@ -2224,7 +2225,10 @@ The ACE's tools are numbered as the printer numbers them. A printer-side tool
 changer that puts its own tools first (Kobra X: `[kx_toolchanger]`, direct-fed
 turret inlets) owns the number of the first ACE slot and returns it from
 `ace_tool_offset()`; three direct inlets make the first unit `T3-T6`, a
-second unit `T7-T10`. Without that object the ACE starts at `T0`.
+second unit `T7-T10`. `[ace] tool_changer` names that object
+(`AceManager._tool_changer()`, a name no object answers to is a config
+error); without the option the ACE starts at `T0` and no object is asked.
+`ace_state` publishes the name and the base (`tool_changer`, `tool_base`).
 
 - `tool_base.apply_tool_base()` reads it at `klippy:connect`, before any
   `klippy:ready` handler reads a tool number, and sets
@@ -2240,9 +2244,10 @@ second unit `T7-T10`. Without that object the ACE starts at `T0`.
   `ace_parked_tools`) carry the base they were written under in
   `ace_tool_base` and are moved to the current one at start, so a changed
   tool changer layout keeps the loaded tool.
-- The KlipperScreen panel reads the same offset from the tool changer's
-  status (`TOOL_CHANGER` in `KlipperScreen/acepro.py`), numbers its slots
-  from it and shows and sends those numbers unchanged.
+- The KlipperScreen panel reads the base from `ace_state` `tool_base`,
+  numbers its slots from it and shows and sends those numbers unchanged.
+  RESUME (`printer_generic_macros.cfg`) reads the loaded tool from
+  `printer[ace_state.tool_changer].tool`.
 - The same object answers one more question, at sensor setup:
   `tool_base.rdm_in_ace_path()` asks `ace_rdm_in_path()`, and a False
   (Kobra X `topology: combo`, a tube per inlet) leaves a configured RDM

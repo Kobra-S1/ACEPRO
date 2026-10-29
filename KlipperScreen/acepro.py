@@ -10,13 +10,6 @@ from ks_includes.screen_panel import ScreenPanel  # noqa: E402
 from ks_includes.widgets.keypad import Keypad  # noqa: E402
 
 
-# A printer-side tool changer that puts tools of its own before the ACE's
-# (Kobra X: direct-fed turret inlets) reports how many in its status; ACEPRO
-# numbers its tools from there, and so does the panel. Absent on every other
-# printer: the ACE starts at T0.
-TOOL_CHANGER = "kx_toolchanger"
-
-
 # Content width the landscape control row needs with its full labels (ACE Pro,
 # Endless Spool, Match Mode), margins and KlipperScreen's scrollbar included:
 # 521 px measured at KlipperScreen's small font. Narrower landscape screens
@@ -80,8 +73,9 @@ class Panel(ScreenPanel):
 
         # Global state
         self.current_loaded_slot = -1
-        # Printer tool number of the first ACE's slot 0 (see TOOL_CHANGER);
-        # ACEPRO numbers its tools from it too. Unknown until the first
+        # Printer tool number of the first ACE's slot 0 (ace_state
+        # tool_base): a printer-side tool changer may put tools of its own
+        # first (Kobra X: direct-fed turret inlets); 0 on other printers. Unknown until the first
         # status reply; slot taps wait for it.
         self.printer_tool_offset = 0
         self.printer_tools_known = False
@@ -198,7 +192,7 @@ class Panel(ScreenPanel):
                 "cont_assist_time",
                 "connection_state",
             ]
-            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"], TOOL_CHANGER: ["ace_tool_offset"]}
+            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
             for instance_id in self.ace_instances:
                 objects[f"ace_instance_{instance_id}"] = ace_fields
 
@@ -359,7 +353,7 @@ class Panel(ScreenPanel):
                         "feed_assist_count",
                         "cont_assist_time",
                     ]
-                    objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"], TOOL_CHANGER: ["ace_tool_offset"]}
+                    objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
                     for instance_id in self.ace_instances:
                         key = f"ace_instance_{instance_id}"
                         objects[key] = ace_fields
@@ -427,7 +421,7 @@ class Panel(ScreenPanel):
                 "feed_assist_count",
                 "cont_assist_time",
             ]
-            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor"], TOOL_CHANGER: ["ace_tool_offset"]}
+            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
             for instance_id in self.ace_instances:
                 key = f"ace_instance_{instance_id}"
                 objects[key] = ace_fields
@@ -471,10 +465,10 @@ class Panel(ScreenPanel):
             if not hasattr(self, "_ace_debug_logged"):
                 self._ace_debug_logged = set()
 
-            tool_changer = status_payload.get(TOOL_CHANGER, {})
-            if isinstance(tool_changer, dict) and "ace_tool_offset" in tool_changer:
-                # Klipper answers None for an object that does not exist.
-                offset = int(tool_changer["ace_tool_offset"] or 0)
+            # Global/manager state
+            ace_state = status_payload.get("ace_state", {})
+            if isinstance(ace_state, dict) and "tool_base" in ace_state:
+                offset = int(ace_state["tool_base"] or 0)
                 self.printer_tools_known = True
                 if offset != self.printer_tool_offset:
                     self.printer_tool_offset = offset
@@ -482,8 +476,6 @@ class Panel(ScreenPanel):
                         data['tool_offset'] = offset + instance_id * 4
                     self.update_slot_loaded_states()
 
-            # Global/manager state
-            ace_state = status_payload.get("ace_state", {})
             if isinstance(ace_state, dict) and "current_index" in ace_state:
                 current_index = ace_state.get("current_index", -1)
                 if current_index != self.current_loaded_slot:
