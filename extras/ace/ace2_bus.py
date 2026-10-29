@@ -172,9 +172,18 @@ class Ace2BusSession:
             ),
         )
 
+        # Any known device may hold an id, present or not: handing it out
+        # again would put two units on one bus address.
+        held_ids = {
+            device.device_id
+            for device in self._devices_by_identity.values()
+            if device.device_id is not None
+        }
         next_device_id = start_device_id
         for device in ordered_devices:
             if device.device_id is None:
+                while next_device_id in held_ids:
+                    next_device_id += 1
                 device.device_id = next_device_id
-                next_device_id += 1
+                held_ids.add(next_device_id)
         return ordered_devices

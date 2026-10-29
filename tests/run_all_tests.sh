@@ -120,6 +120,27 @@ fi
 echo -e "${GREEN}Dependencies installed successfully${NC}"
 echo ""
 
+# GTK bindings (gi) come from the OS (python3-gi), not pip. When the system
+# Python has them, link only those packages into the venv so the KlipperScreen
+# tests run; without them (or without a display) those tests skip themselves.
+VENV_SITE=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+SYSTEM_PYTHON=$(python -c "import sys; print(sys._base_executable)")
+SYSTEM_GI=$("$SYSTEM_PYTHON" -c "import gi, os; print(os.path.dirname(gi.__path__[0]))" 2>/dev/null)
+if [ -n "$SYSTEM_GI" ] && [ ! -e "$VENV_SITE/gi" ]; then
+    for pkg in gi cairo; do
+        [ -e "$SYSTEM_GI/$pkg" ] && ln -s "$SYSTEM_GI/$pkg" "$VENV_SITE/$pkg"
+    done
+    if ! python -c "import gi" >/dev/null 2>&1; then
+        rm -f "$VENV_SITE/gi" "$VENV_SITE/cairo"
+    fi
+fi
+if python -c "import gi" >/dev/null 2>&1; then
+    echo -e "${GREEN}GTK bindings available: KlipperScreen tests run when a display is present${NC}"
+else
+    echo -e "${YELLOW}No GTK bindings (sudo apt install python3-gi gir1.2-gtk-3.0): KlipperScreen tests skip${NC}"
+fi
+echo ""
+
 # Set PYTHONPATH
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 

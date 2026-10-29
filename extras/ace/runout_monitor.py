@@ -37,11 +37,14 @@ state disambiguates, with generation-specific timing:
 
 import logging
 
+from . import monitor_events
+
 from .config import (
-    SENSOR_TOOLHEAD,
+    SENSOR_RUNOUT,
     SLOTS_PER_ACE,
     get_instance_from_tool,
     get_local_slot,
+    get_tool_base,
     ACE_INSTANCES,
 )
 
@@ -169,7 +172,9 @@ class RunoutMonitor:
         self._resume_no_filament_warned = False
 
     def start_monitoring(self):
-        """Start runout detection monitor loop."""
+        """Start runout detection monitor loop; a no-op while it runs."""
+        if self._monitoring_timer is not None:
+            return
         self.gcode.respond_info("ACE: Starting runout detection monitor")
         self.set_detection_active(True)
         self._monitoring_timer = self.reactor.register_timer(
@@ -238,7 +243,7 @@ class RunoutMonitor:
                 raw_print_state = ""
 
         current_tool = self.manager.state.get("ace_current_index", -1)
-        current_sensor_state = self.manager.get_switch_state(SENSOR_TOOLHEAD)
+        current_sensor_state = self.manager.get_switch_state(SENSOR_RUNOUT)
 
         # Track state changes for logging
         old_printing_active = self.last_printing_active
@@ -431,7 +436,7 @@ class RunoutMonitor:
                     f"{self.runout_debounce_count} readings)"
                 )
 
-                self._handle_runout_detected(current_tool)
+                self._queue_event("runout", current_tool)
 
                 self.prev_toolhead_sensor_state = current_sensor_state
                 return eventtime + 0.2
@@ -490,6 +495,15 @@ class RunoutMonitor:
         if getattr(self.manager, "toolchange_in_progress", False) is True:
             return  # a toolchange is still loading; not a dry resume
         self._resume_no_filament_warned = True
+        self._queue_event("dry_resume", tool_index)
+
+    def _queue_event(self, event, tool_index):
+        """From the monitor timer: the handling runs as a queued G-code
+        command (monitor_events), never inside the command running now."""
+        monitor_events.queue(self, event, tool_index)
+
+    def _handle_resume_without_filament(self, tool_index):
+        """The queued pause and dialog for a resume with no filament."""
         self.gcode.respond_info(
             f"ACE: Print resumed but NO filament at the toolhead sensor "
             f"(tool T{tool_index} recorded as loaded) - pausing to protect "
@@ -761,7 +775,7 @@ class RunoutMonitor:
             self.tangle_pump_time_hard, self.tangle_verify_time,
         )
         self._reset_tangle_phase()
-        self._handle_tangle_detected(current_tool)
+        self._queue_event("tangle", current_tool)
 
     def _assist_slot_empty(self, inst):
         """True when the device reports the pumping slot as empty.
@@ -806,10 +820,10 @@ class RunoutMonitor:
                 # fall through to the first-match scan below, i.e. exactly
                 # the wrong-instance behavior this resolution exists to
                 # prevent.  manager.instances is the authority here.
-                inst_num = current_tool // SLOTS_PER_ACE
-                if inst_num < len(instances):
+                inst_num, slot = divmod(current_tool - get_tool_base(),
+                                        SLOTS_PER_ACE)
+                if 0 <= inst_num < len(instances):
                     inst = instances[inst_num]
-                    slot = current_tool % SLOTS_PER_ACE
                     if getattr(inst, "_feed_assist_index", -1) == slot:
                         return inst
                     # Assist not on the loaded tool's slot: nothing valid
@@ -961,6 +975,30 @@ class RunoutMonitor:
                     f"runout: {e}"
                 )
 
+            # Step 2b, with an intake transfer: the runout was seen at the
+            # intake while the gear still holds the old piece, which keeps
+            # the toolhead sensor behind the gear covered - Retry and
+            # endless spool would find the tool still loaded. Cut it and
+            # pull it back off the sensor. A slot that still reads
+            # filament is a break or a jam, not a runout.
+            swap_allowed = True
+            if self.manager.has_intake_transfer(tool_index) is True:
+                if self.manager.slot_reads_empty(tool_index) is not True:
+                    swap_allowed = False
+                    self.gcode.respond_info(
+                        f"ACE: T{tool_index} stopped at the toolhead while its"
+                        f" ACE slot still has filament - broken, tangled or"
+                        f" stuck. No endless spool: free it, then Retry"
+                        f" T{tool_index}.")
+                try:
+                    self.manager.park_after_runout(tool_index)
+                except Exception as e:
+                    swap_allowed = False
+                    self.gcode.respond_info(
+                        f"ACE: Pulling T{tool_index}'s old filament back"
+                        f" failed ({e}) - no endless spool; unload it by"
+                        f" hand, then Retry T{tool_index}.")
+
             # Get runout details for prompt
             instance_num = get_instance_from_tool(tool_index)
             material = "unknown"
@@ -984,6 +1022,9 @@ class RunoutMonitor:
 
             # Step 4: Check if endless spool is enabled
             endless_spool_enabled = self.manager.state.get("ace_endless_spool_enabled", False)
+
+            if not swap_allowed:
+                return
 
             if not endless_spool_enabled:
                 self.gcode.respond_info(

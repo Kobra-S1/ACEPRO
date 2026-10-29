@@ -90,16 +90,17 @@ line whenever it is non-zero:
 **Tracking window**: 180 seconds (3 minutes)
 
 **Backoff pattern**:
-- **Initial delay**: 5s (RECONNECT_BACKOFF_MIN)
+- **Floor**: 1s once the unit's USB location is known (LOCATION_KNOWN_RECONNECT_BACKOFF_MIN; from the topology or a previous connect), 5s before that (RECONNECT_BACKOFF_MIN)
 - **Growth factor**: 1.5x per failure
-- **Maximum delay**: 30s (RECONNECT_BACKOFF_MAX)
-- **Pattern**: 5s → 7.5s → 11.25s → 16.875s → 25.3s → 30s → **5s** (cycles back)
-- **Reset**: Successful connection resets backoff to 5s
+- **Cap**: a step that would reach 30s (RECONNECT_BACKOFF_MAX) drops back to the floor instead, so 30s itself is never waited
+- **Pattern, location known**: 1s → 1.5s → 2.25s → 3.4s → 5.1s → 7.6s → 11.4s → 17.1s → 25.6s → **1s** (cycles back)
+- **Pattern, location unknown**: 5s → 7.5s → 11.25s → 16.9s → 25.3s → **5s** (cycles back)
+- **Reset**: a successful connection, and every new ACE_ENABLE/startup connect, starts again at the floor
 
 **What happens on connection failure**:
 1. Timestamps the failure: `_reconnect_timestamps.append(now)`
 2. Prunes old timestamps (>180s)
-3. Increases backoff delay (1.5x current, or cycle back to 5s if at max)
+3. Increases backoff delay (1.5x current, or back to the floor before reaching 30s)
 4. Logs: `"ACE[X]: Retry in Ys (N attempts in last 180s)"`
 5. Schedules reconnection timer with backoff delay
 
@@ -115,11 +116,16 @@ line whenever it is non-zero:
 **Trigger condition**: 4+ reconnection events (connection losses or failed attempts) within 3 minutes
 
 **What happens when triggered**:
-- **During printing**: 
-  1. Pauses print
-  2. Shows dialog: `"ACE X: unstable (N reconnects in 60s)"`
+- **During printing, the unstable unit feeding the loaded tool**:
+  1. Queues the pause (`_ACE_CONNECTION_PAUSE`, `connection_pause.py`): it
+     runs after the G-code command executing at the time, and only if the
+     print is still printing then. Run inline from the monitor timer, PAUSE
+     skipped the G-code lock and interleaved with a running CANCEL_PRINT,
+     whose motor-off then shut the MCU down ("Timer too close").
+  2. Shows dialog: `"ACE X: unstable (N reconnects in 180s)"`
   3. User can resume (after fixing) or cancel print
-- **When idle**:
+- **Paused**: the dialog, no second pause
+- **Idle, or printing on another unit's tool or a tool changer's own tool**:
   1. Shows informational dialog
   2. No print interruption
 
@@ -140,7 +146,7 @@ line whenever it is non-zero:
 ┌─────────────────────────────────────────────────────────┐
 │ DISCONNECTED / INITIAL STATE                            │
 │ - connect_timer = None                                  │
-│ - _reconnect_backoff = 5.0s                            │
+│ - _reconnect_backoff = floor (1s or 5s)                │
 └────────────────┬────────────────────────────────────────┘
                  │
                  ▼
@@ -156,7 +162,7 @@ line whenever it is non-zero:
          ▼                            ▼
 ┌────────────────────────┐  ┌──────────────────────────────┐
 │ CONNECTED              │  │ RECONNECT SCHEDULED          │
-│ - Reset backoff to 5s  │  │ - Timestamp failure          │
+│ - Backoff to floor     │  │ - Timestamp failure          │
 │ - Clear supervision    │  │ - Increase backoff (1.5x)    │
 │   counters             │  │ - Log retry delay            │
 │ - Start heartbeat      │  │ - Schedule connect_timer     │
@@ -199,8 +205,9 @@ line whenever it is non-zero:
 | `INSTABILITY_THRESHOLD` | 4 | Reconnects to trigger unstable state |
 | `STABILITY_GRACE_PERIOD` | 30s | Must be connected this long to be "stable" |
 | `COUNTER_RESET_PERIOD` | 180s | Reset counters after this stability |
-| `RECONNECT_BACKOFF_MIN` | 5s | Minimum reconnection delay |
-| `RECONNECT_BACKOFF_MAX` | 30s | Maximum reconnection delay |
+| `RECONNECT_BACKOFF_MIN` | 5s | Reconnection delay floor while the USB location is unknown |
+| `LOCATION_KNOWN_RECONNECT_BACKOFF_MIN` | 1s | Reconnection delay floor once the USB location is known |
+| `RECONNECT_BACKOFF_MAX` | 30s | Backoff drops to the floor before reaching this |
 | `RECONNECT_BACKOFF_FACTOR` | 1.5 | Backoff multiplier |
 | `COMM_SUPERVISION_WINDOW` | 30s | Monitor last N seconds for health |
 | `COMM_TIMEOUT_THRESHOLD` | 15 | Timeouts to trigger reconnection |
@@ -224,9 +231,9 @@ Time  Event
 10:06 Supervision check detects unhealthy state
 10:06 "ACE[0]: Communication unhealthy (17 timeouts AND 16 unsolicited in last 30.0s), forcing reconnection"
 10:06 disconnect() called - clears counters
-10:06 Reconnection scheduled (5s backoff)
-10:11 Connection attempt succeeds
-10:11 Backoff reset to 5s, supervision counters cleared
+10:06 Reconnection scheduled (1s backoff: the USB location is known)
+10:06 Connection attempt succeeds
+10:06 Backoff back at the floor, supervision counters cleared
 ```
 
 ### Scenario 2: ACE Powered Off (Multiple Failures)
@@ -234,21 +241,16 @@ Time  Event
 ```
 Time  Event
 ----  -----
-10:00 ACE disconnects (power loss)
-10:00 Reconnection attempt #1 fails, backoff = 5s
-10:05 Reconnection attempt #2 fails, backoff = 7.5s
-10:13 Reconnection attempt #3 fails, backoff = 11.25s
-10:24 Reconnection attempt #4 fails, backoff = 16.875s
-10:41 Reconnection attempt #5 fails, backoff = 25.3s
-11:06 Reconnection attempt #6 fails, backoff = 30s (max)
-11:36 Reconnection attempt #7 fails, backoff = 5s (cycled)
-      ... (4+ attempts within 3 minutes)
-11:40 Manager supervision detects instability (4+ reconnects)
-11:40 Print paused, dialog shown to user
-----  User fixes power issue
-11:45 Connection succeeds, backoff reset to 5s
-11:45-12:15 After 30s connected, marked as "stable"
-12:15 Dialog auto-closes, user can resume
+10:00:00 ACE disconnects (power loss), USB location known: floor 1s
+10:00:01 Reconnection attempts fail, retries after 1s, 1.5s, 2.25s, 3.4s ...
+10:00:08 4+ failed attempts within 3 minutes
+10:00:10 Manager supervision detects instability (checked every 2s)
+10:00:10 Print paused, dialog shown to user
+         Retries continue: ... 17.1s, 25.6s, then 1s again (cyclic)
+-------- User fixes power issue
+10:02:00 Connection succeeds, backoff back at the floor
+10:02:30 After 30s connected, marked as "stable"
+10:02:30 Dialog auto-closes, user can resume
 ```
 
 ### Scenario 3: Two ACE2 Units Answering as One device_id (Identity Collision)
@@ -283,7 +285,7 @@ Time  Event
 10:00 disconnect() called
 10:00 Reconnection scheduled with custom 2s delay (overrides backoff)
 10:02 Connection attempt
-10:02 Success - backoff reset to 5s
+10:02 Success - backoff back at the floor
 ```
 
 ---

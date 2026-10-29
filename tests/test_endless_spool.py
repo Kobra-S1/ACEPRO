@@ -898,5 +898,77 @@ class TestExecuteSwap:
         assert len(prompt_calls) > 0
 
 
+
+class TestToolBase:
+    """A printer's own tool changer numbers its tools first (the Kobra X in
+    shared topology: T0-T2 direct, the ACE from T3 on). Endless spool only
+    ever swaps between ACE tools: a direct tool is never a candidate, and
+    a direct tool's runout is not the driver's to swap."""
+
+    BASE = 3
+
+    def setup_method(self):
+        from ace.config import set_tool_base
+
+        reactor = Mock()
+        reactor.monotonic = Mock(return_value=0.0)
+        printer = Mock()
+        printer.get_reactor = Mock(return_value=reactor)
+        self.endless_spool = EndlessSpool(printer, Mock(), Mock())
+        set_tool_base(self.BASE)
+        ACE_INSTANCES.clear()
+        for i in range(2):
+            instance = Mock()
+            instance.instance_num = i
+            instance.inventory = [
+                {'material': 'PLA', 'color': [255, 0, 0], 'status': 'empty'}
+                for _ in range(SLOTS_PER_ACE)
+            ]
+            ACE_INSTANCES[i] = instance
+
+    def teardown_method(self):
+        from ace.config import set_tool_base
+
+        ACE_INSTANCES.clear()
+        set_tool_base(0)
+
+    def _ready(self, tool, material='PLA', color=(255, 0, 0)):
+        inst, slot = divmod(tool - self.BASE, SLOTS_PER_ACE)
+        ACE_INSTANCES[inst].inventory[slot] = {
+            'material': material, 'color': list(color), 'status': 'ready'}
+
+    def test_the_match_is_an_ace_tool_numbered_from_the_base(self):
+        self._ready(3)
+        self._ready(5)
+        assert self.endless_spool.find_exact_match(current_tool=3) == 5
+
+    def test_a_match_on_the_second_unit_is_found(self):
+        # T3-T6 on the first unit, T7-T10 on the second: counted from T0,
+        # the search would end at T7 and never reach T9.
+        self._ready(6)
+        self._ready(9)
+        assert self.endless_spool.find_exact_match(current_tool=6) == 9
+
+    def test_the_search_wraps_to_the_first_ace_tool_not_to_t0(self):
+        # From the last ACE tool (T10) the next one round is T3; T0-T2 are
+        # the tool changer's direct tools.
+        self.endless_spool.get_match_mode = Mock(return_value='next')
+        self._ready(10)
+        self._ready(3)
+        assert self.endless_spool.find_exact_match(current_tool=10) == 3
+
+    def test_no_ready_ace_spool_finds_nothing_rather_than_a_direct_tool(self):
+        self.endless_spool.get_match_mode = Mock(return_value='next')
+        self._ready(10)
+        assert self.endless_spool.find_exact_match(current_tool=10) == -1
+
+    @pytest.mark.parametrize("direct_tool", [0, 1, 2])
+    def test_a_direct_tool_runout_finds_no_ace_match(self, direct_tool):
+        self.endless_spool.get_match_mode = Mock(return_value='next')
+        self._ready(3)
+        assert self.endless_spool.find_exact_match(
+            current_tool=direct_tool) == -1
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

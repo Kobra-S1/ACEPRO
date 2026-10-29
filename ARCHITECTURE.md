@@ -17,17 +17,32 @@ extras/ace/
 │                           #   resolve_protocol_name(), shared request builders
 ├── protocol_ace1.py        # AceJsonProtocolAdapter — JSON frame codec for ACE1 units
 ├── protocol_ace2.py        # AceProtoProtocolAdapter — protobuf frame codec for ACE2,
-│                           #   ACE2_COMMAND_CATALOG with field schemas, response decoders
+│                           #   ACE2_COMMAND_CATALOG (name/code/tier/message types), response decoders
 ├── ace2_bus.py             # ACE2 shared-bus session — UID discovery, device-id binding,
 │                           #   deterministic assignment planning
+├── ace2_ota.py             # ACE2 firmware update: image checks, chunk plan,
+│                           #   transport-free IAP state machine (Ace2FirmwareUpdater)
 ├── serial_manager.py       # Serial transport — connect/reconnect, frame I/O, sliding-
 │                           #   window request queue, heartbeat, CRC, timeout tracking
 ├── endless_spool.py        # Automatic filament switching on runout
 ├── runout_monitor.py       # Filament runout & tangle detection during printing
+├── monitor_events.py       # Runout/tangle/dry-resume handling queued as a G-code command
+├── connection_pause.py     # Connection-issue pause queued as a G-code command
 ├── commands.py             # G-code command handlers (transport-agnostic)
 ├── config.py               # Configuration constants, tool mapping, per-instance overrides
 ├── persistent_state.py     # Deferred-flush saved_variables wrapper
-└── moonraker_lane_sync.py  # OrcaSlicer lane_data sync via Moonraker DB
+├── moonraker_lane_sync.py  # OrcaSlicer lane_data sync via Moonraker DB
+├── idle_assist.py          # Feed assist off on idle_timeout:idle, back on printing
+├── intake_gated.py         # toolhead_strategy intake_gated load/unload transfer
+├── rollback_assist.py      # ACE2 follows an extruder-only retract (rollback assist)
+├── tool_base.py            # Printer-side tool changer queries: tool base, RDM in path
+├── print_tools.py          # Tools a G-code file uses (slicer summary, else T lines) vs usable ACE slots
+└── version.py              # Driver git version for klippy.log
+
+extras/temperature_ace.py   # sensor_type: temperature_ace - ACE device temperature as a temperature_sensor
+extras/virtual_pins.py      # [virtual_pins] (third-party): virtual_pin: chip behind the ACE_Pro / TANGLE_DETECTION output pins
+ace_status_integration/     # Moonraker component (/server/ace/status, /slots, /command)
+                            #   and the ace.html web dashboard, served by the UI's web server
 ```
 
 ## High-Level Architecture
@@ -40,7 +55,7 @@ extras/ace/
 │  │  - Coordinates multiple ACE instances                      │ │
 │  │  - Manages global filament position state                  │ │
 │  │  - Handles runout detection & monitoring                   │ │
-│  │  │  Sensors: toolhead_sensor, return_module_sensor         │ │
+│  │  │  Sensors: toolhead_sensor, return_module                │ │
 │  │  - Orchestrates tool changes (T0-Tn)                       │ │
 │  └──┬────────────────────────────────────────────┬────────────┘ │
 │     │                                            │              │
@@ -79,6 +94,8 @@ extras/ace/
   - Instance 2: T8-T11 (slots 0-3)
   - Instance 3: T12-T15 (slots 0-3)
   - Instance N: ...
+  - All shifted by the tool base when a printer-side tool changer puts its
+    own tools first (see "Tool numbering behind a printer-side tool changer")
 - **Global State Management**:
   - `ace_filament_pos`: Tracks filament position ("bowden", "splitter", "toolhead", "nozzle")
 - `ace_current_index`: Currently active tool (-1 = none) — last **CONFIRMED** physically loaded tool
@@ -86,16 +103,18 @@ extras/ace/
   "In-Flight Toolchange Tracking" below
 - `ace_endless_spool_enabled`: Endless spool active/inactive
 - `ace_global_enabled`: ACE system master enable
+- `ace_parked_tools`: Tools parked at the toolhead intake (Parking under "Toolhead transfer strategies")
 - **Sensor Management**: Manages shared sensors (toolhead, optional RDM), supporting both
   `filament_switch_sensor` and `filament_tracker` via `FilamentTrackerAdapter`
 - **Smart Operations**: `smart_unload()`, `smart_load()`, and `full_unload_slot()` with sensor-aware fallback
 - **Tool Change Orchestration**: `perform_tool_change()` coordinates unload/load across instances
 - **Runout Detection**: Creates `RunoutMonitor` to poll sensors (50ms interval) and raise events
-- **Heater Safety**: Turns off the extruder heater after a standalone unload when not printing/paused.
+- **Heater Safety**: After a standalone unload when not printing/paused, puts the extruder heater
+  target back to what it was before the unload heated for its cut (off if it was off).
   During a tool change (`perform_tool_change`), the heater is intentionally **kept on** between unloading
   the old tool and loading the new tool — this avoids a 60-90 s reheat cycle. The POST macro
   (`_ACE_POST_TOOLCHANGE`) is responsible for heater shutdown after load+purge complete.
-  The `smart_unload(keep_heater=False)` default preserves the off-after-unload behavior for all
+  The `smart_unload(keep_heater=False)` default preserves the restore-after-unload behavior for all
   standalone callers; `perform_tool_change` passes `keep_heater=True` to all its internal call sites.
 - **Cold-Nozzle Recovery Guard**: Before executing a plausibility-mismatch recovery unload
   (which runs before the PRE macro heats the nozzle), `_ensure_hot_for_recovery_unload()` checks
@@ -117,14 +136,33 @@ This prevents silent loss of the stuck-tool identity, which previously caused th
 next tool change to hit the plausibility block and cycle blindly through parked slots.
 During a print, the existing print-recovery branch already records the requested tool correctly.
 
+**Failure reported to a printer-side tool changer:**
+`ACE_CHANGE_TOOL` reports every failed change as a G-code error, so its
+caller sees it: the wrapper converts whatever escapes, as an exception that
+is not a G-code error shuts Klipper down, and `safe_gcode_command`, which
+wraps every registered ACE command, lets G-code errors through and catches
+only the rest. With `register_tool_macros: False`
+(`manager.tool_changer_owns_tools`) a failure mid-print also raises, after
+the state decision above and without `PAUSE` or the Retry prompt: the tool
+changer holds the print and offers its own retry, and records the tool only
+when the call succeeded. A change asked for while ACE support is disabled
+raises there too instead of being ignored. Rejected: the tool changer
+checking `ace_current_index` after every call - the failure belongs to the
+command that failed, and a check per caller is skipped by the next caller.
+
+Proof: `tests/test_change_tool_failure.py`.
+
 **In-Flight Toolchange Tracking (`ace_target_index`):**
 Tracks the tool of an in-flight or failed toolchange attempt (-1 = none),
-separate from `ace_current_index` (last confirmed loaded tool). Owned
-entirely by `perform_tool_change()`:
+separate from `ace_current_index` (last confirmed loaded tool):
 
 - Set to `target_tool` at the start of `perform_tool_change()`.
 - Cleared to `-1` on confirmed success (load confirmed, or unload-only confirmed).
-- Left unchanged if an exception is raised during the attempt.
+- Left unchanged by `perform_tool_change()` if an exception is raised during the attempt.
+- `cmd_ACE_CHANGE_TOOL`'s failure handler clears it when no RESUME will follow
+  (idle/startup failure, or a printer-side tool changer that owns the retry);
+  it stays set only on the mid-print PAUSE + Retry path.
+- `ACE_RESET_ACTIVE_TOOLHEAD` clears it.
 
 Consumers:
 - `ACE_GET_CURRENT_INDEX` / `ACE_DEBUG_STATE`: report it alongside `ace_current_index`.
@@ -149,17 +187,30 @@ The decorator uses a **depth counter** (`_toolchange_depth`) to support nested t
 **Key Methods:**
 ```python
 # Core Operations
-smart_unload(tool_index, prepare_toolhead=True, keep_heater=False)
+smart_unload(tool_index, prepare_toolhead=True, keep_heater=False, cycle_on_blocked=False)
                                             # Intelligent unload with fallback strategies
-                                            # keep_heater=False (default): turns off heater
-                                            #   after unload (standalone unload behavior)
+                                            # @toolchange_in_progress_guard (blocks runout)
+                                            # keep_heater=False (default): restores the heater
+                                            #   target after unload (standalone unload behavior)
                                             # keep_heater=True: heater stays on (used by
                                             #   perform_tool_change; POST macro handles shutdown)
+                                            # cycle_on_blocked=True (ACE_SMART_UNLOAD without
+                                            #   TOOL=): a known-tool unload that leaves the path
+                                            #   blocked escalates to cycling all slots
 smart_load()                                # Load all non-empty slots to RDM sensor
 full_unload_slot(tool_index)                # Full retract until slot empty (active/non-active aware)
 perform_tool_change(current, target)        # Complete tool change sequence
 execute_coordinated_retraction(...)         # Synchronized ACE + extruder retraction
-_turn_off_heater_if_idle()                  # Safety: M104 S0 after unloads outside print jobs
+_restore_heater_if_idle()                   # Outside print jobs: M104 back to the target from
+                                            #   before the unload/park heated (0 if it was off)
+check_tool(tool_index)                      # ACE_CHECK_TOOL: one spool to toolhead sensor and back
+reconcile_stale_current_index(tool, reason) # Clear ace_current_index when its own slot reports empty
+redetect_transports(...)                    # ACE_REDETECT + automatic pass: adopt an instance stuck
+                                            #   on ace1_json onto a shared ACE2 bus (discovery-gated)
+cleanup_stale_persistent_vars(gcmd)         # ACE_CLEANUP_STALE_VARS: list / CONFIRM=1 delete
+is_feed_assist_active()                     # Any instance has feed assist on
+get_rdm_encoder_pulse()                     # RDM filament_tracker encoder count, or None
+_handle_shutdown()                          # klippy:shutdown: PersistentState.flush_direct()
 
 # Startup Validation
 _validate_startup_tool_state()              # Clear stale persisted tool state if sensors show clear.
@@ -203,10 +254,12 @@ _check_fast_disconnect_pause(eventtime)     # Pause quickly when the ACTIVE tool
                                             #   ACE1 30s, ACE2 5s). Scoped to the active
                                             #   tool; fires once per outage; re-arms on
                                             #   reconnect. The instability-count path
-                                            #   (6 reconnects/180s) is unchanged and covers
+                                            #   (4 reconnects/180s) runs separately and covers
                                             #   flaky-cable alerting for all instances.
 _resolve_disconnect_pause_timeout(instance) # Config value if >= 0, else protocol default
-_handle_connection_issue(instances, time)   # Pause print (if printing) and show dialog
+_handle_connection_issue(instances, time)   # Pause print (if printing, queued as
+                                            #   _ACE_CONNECTION_PAUSE, connection_pause.py)
+                                            #   and show dialog
 _show_connection_issue_dialog(instances, is_printing)  # Mainsail dialog with details
 _close_connection_dialog()                  # Close dialog when connection restored
 
@@ -241,7 +294,7 @@ ensure_tool_slot_loaded(tool_index)         # Raise before homing/heating/feedin
 **Key Attributes:**
 ```python
 instance_num: int                   # 0, 1, 2, 3...
-tool_offset: int                    # First tool: 0, 4, 8, 12...
+tool_offset: int                    # First tool: base + 0, 4, 8, 12...
 SLOT_COUNT = 4                      # Fixed per ACE unit
 inventory: List[Dict]               # Per-slot: material, color, temp, status
 serial_mgr: AceSerialManager        # Communication handler
@@ -261,11 +314,13 @@ _retract(slot, length, speed, on_retract_started, on_wait_for_ready,
                                              # Retract filament to slot with callbacks
 _stop_feed(slot)                             # Stop active feed operation
 _stop_retract(slot)                          # Stop active retract operation
-_feed_sync(slot, length, speed)              # Synchronous feed with blocking wait
+feed_filament_with_wait_for_response(slot, length, speed)
+                                             # Feed and block until the ACE answers
 
 # Toolhead Operations
 _feed_filament_into_toolhead(tool)           # Load filament to nozzle (multi-stage)
-_feed_filament_to_verification_sensor(slot)  # Feed to RDM/toolhead sensor only
+_feed_filament_to_verification_sensor(slot, target_sensor, feed_length)
+                                             # Feed to RDM/toolhead sensor only
 _smart_unload_slot(slot, length)             # Unload with sensor validation and retry
 rmd_triggered_unload_slot(...)               # RDM-triggered unload with callback-driven early stop + overshoot
 
@@ -274,10 +329,15 @@ _enable_feed_assist(slot)                    # Auto-push filament on detection
                                              # Contains protocol-aware post-send wait_ready():
                                              # runs on ACE1 (stays ready); skipped on ACE2
                                              # (transitions to busy — see Protocol Layer)
-_disable_feed_assist(slot)                   # Disable auto-push
-                                             # Contains protocol-aware pre-send wait_ready():
+_disable_feed_assist(slot)                   # Disable auto-push: _send_feed_assist_stop()
+                                             #   then _await_feed_assist_stopped()
+_send_feed_assist_stop(slot)                 # Send STOP; protocol-aware pre-send wait_ready():
                                              # runs on ACE1 (busy = transient); skipped on ACE2
                                              # (busy IS the feed-assist state → deadlock if waited)
+_await_feed_assist_stopped()                 # Settle delay, then wait_ready() on ACE1 only
+_ensure_feed_assist_off_for_motion(slot, action)
+                                             # Every feed/retract primitive: disable assist on
+                                             #   any slot first (ACE2 ignores motion while busy)
 _update_feed_assist(slot)                    # Update active feed assist slot
 _get_current_feed_assist_index()             # Query current feed assist slot
 _on_ace_connect()                            # Mark feed assist for deferred restoration
@@ -331,6 +391,15 @@ This enables precise timing measurements for:
 - Optimizing movement speeds
 - Diagnosing mechanical issues
 
+**Feed Assist While Idle** (`idle_assist.py`): `idle_timeout:idle` stops
+the loaded tool's assist through `disable_feed_assist_for_tool`, which also
+clears the remembered slot, so neither recovery layer below re-arms it.
+The first `idle_timeout:printing` afterwards restores it through
+`verify_feed_assist_for_tool`, only while the same tool is loaded. Both run
+as reactor callbacks: the events arrive in a timer or a toolhead sync, and
+stop/start wait on the ACE. Skipped during a toolchange, which owns assist.
+Proof: `tests/test_idle_assist.py`.
+
 **Feed Assist Loss Recovery (two layers):**
 ACE1 has a single gear assembly per unit — preloading a freshly inserted
 spool physically disables feed assist on the printing slot. ACE2 drives
@@ -339,10 +408,13 @@ slot (assist pulses continue through a full preload), so it never needs
 the slot-load restore — its layer 2 covers other loss causes.
 Tangle detection is blind in that state (no pumping → no
 `cont_assist_time` signal), so recovery must be driven by the driver:
-1. **Slot-ready restore** (both generations, `_status_update_callback`):
-   any slot transitioning INTO `ready` marks a finished (pre)load cycle
-   and queues a restore of the remembered assist slot. Triggers on any
-   `* → ready` transition — the 1 Hz heartbeat almost always samples the
+1. **Slot-ready restore** (ACE1 only, `_status_update_callback`):
+   any other slot transitioning INTO `ready` marks a finished (pre)load
+   cycle and queues a restore of the remembered assist slot. The assisted
+   slot itself is excluded: enabling assist makes ACE1 report it
+   `shifting` for about a second, and its return to `ready` is that
+   enable (`test_the_assisted_slots_own_gear_shift_queues_no_restore`).
+   Triggers on any `* → ready` transition: the 1 Hz heartbeat almost always samples the
    intermediate `preload`/`identifying` states, so the previous
    `empty → ready`-only condition virtually never matched. The restore
    goes through the retrying pending-restore queue rather than a direct
@@ -430,14 +502,15 @@ get_match_mode()                    # Get match mode ("exact", "material", "next
 find_exact_match(current_tool)      # Search for a match across all slots (mode-aware search)
 
 execute_swap(from_tool, to_tool)    # Execute automatic tool swap with fallback
-                                                      # Coordinates:
-                                                      # - Pause print (if not already paused)
-                                                      # - Mark old slot empty (status="empty", preserves
-                                                      #   color/material/temp, clears RFID fields)
-                                                      # - Execute tool change (skip unload)
-                                                      # - 1.5x purge on new tool when endless spool
-                                                      # - Resume print automatically
-                                                      # Max attempts: 3 (retry with next match on fail)
+                                                      # Called while already paused (RunoutMonitor
+                                                      #   paused). Per attempt:
+                                                      # - Mark old slot empty (inventory status only;
+                                                      #   other fields untouched)
+                                                      # - perform_tool_change(is_endless_spool=True):
+                                                      #   skips unload, 1.5x purge on the new tool
+                                                      # - RESUME PURGE=0
+                                                      # Max attempts: 3; a failed candidate is
+                                                      #   smart-unloaded and the next match searched
 
 _show_swap_failed_prompt(...)       # User prompt on failed swap
 
@@ -497,11 +570,23 @@ Mode     | Material | Color/RGB | Example
 - **Resume Feed-Assist Verification**: on paused → printing, re-enable feed assist on the loaded tool if it was silently lost (ACE power cycle / klippy restart)
 
 **Architecture:**
-RunoutMonitor is purely an observer - it does NOT change state directly. Instead:
-- Detects runout events
-- Calls `EndlessSpool.find_exact_match()` to find a swap candidate
-- If match found: Calls `EndlessSpool.execute_swap()`
-- If no match: Shows user prompt and pauses
+The monitor's timer runs no G-code for an event: on a runout, a tangle or a
+resume without filament it stops the print file (`send_pause_command`) and
+queues `_ACE_MONITOR_EVENT EVENT=runout|tangle|dry_resume TOOL=n`
+(`monitor_events.py`), which runs once the G-code command executing then has
+ended, and only while the print is printing or paused: a timer that runs
+G-code inline (`run_script_from_command`) interleaves it with the command
+running at the time (a CANCEL_PRINT, a tool change). Proof:
+`tests/test_monitor_events.py`.
+
+On a confirmed runout the queued command runs `_handle_runout_detected`:
+- Pauses the print and disables the runout tool's feed assist
+  (`disable_feed_assist_for_tool`)
+- With an intake transfer: `manager.park_after_runout()`; a slot that still
+  reads filament blocks endless spool
+- Always shows the runout prompt
+- Calls `EndlessSpool.find_exact_match()`; on a match closes the prompt and
+  calls `EndlessSpool.execute_swap()`, otherwise stays paused
 
 **Key Methods:**
 ```python
@@ -524,23 +609,29 @@ _monitor_runout(eventtime)          # Main monitoring loop (50ms interval)
                                     # - Guard: skip if toolchange in progress
                                     # - Guard: skip if detection disabled
                                     # - Detect print start, re-initialize baseline
-                                    # - On runout: call _handle_runout_detected()
+                                    # - On runout: queue it (_queue_event)
                                     # Returns: next callback time (eventtime + interval)
 
 _show_runout_prompt(tool_index, instance_num, local_slot, material, color)
                                     # Show Mainsail prompt for runout
                                     # Displays: tool, instance, slot, material, color
-                                    # Buttons: RESUME, CANCEL_PRINT
+                                    # Buttons: Retry T<n>, Extrude 100mm, Retract 100mm;
+                                    #   footer: Resume, Cancel Print
 
 _handle_runout_detected(tool_index) # Process detected runout
                                     # 1. Set runout_handling_in_progress flag
-                                    # 2. Pause print
-                                    # 3. Check endless spool enabled?
-                                    # 4a. If disabled: Show runout prompt, wait for user
-                                    # 4b. If enabled: Find match, auto-swap, resume
-                                    # 5. Clear handling flag
+                                    # 2. Pause print, disable the tool's feed assist
+                                    # 3. Intake transfer: park_after_runout()
+                                    # 4. Show runout prompt
+                                    # 5. Endless spool disabled/no match: stay paused
+                                    #    Match: close prompt, execute_swap()
+                                    # 6. Clear handling flag
 
 _pause_for_runout()                 # Execute PAUSE command via gcode
+
+_check_resume_without_filament(tool_index, sensor_present)
+                                    # Pause once when a print resumes with a loaded
+                                    #   tool but nothing at the toolhead sensor
 ```
 
 **State Tracking:**
@@ -551,7 +642,7 @@ last_print_state                    # Last raw print state ("idle", "printing", 
 runout_detection_active             # Is runout detection enabled?
 runout_handling_in_progress         # Are we handling a runout now?
 monitor_debug_counter               # For periodic debug logging (~15 min interval)
-runout_debounce_count               # Consecutive absent readings required (config, default 3)
+runout_debounce_count               # Consecutive absent readings required (config, default 1)
 _runout_false_count                 # Current consecutive absent reading counter
 ```
 
@@ -576,7 +667,7 @@ Sensor State Check
       ├─ Counter < runout_debounce_count?
       │  └─ Not yet confirmed → Keep prev as True → Poll again (50ms)
       └─ Counter >= runout_debounce_count?
-         └─ CONFIRMED RUNOUT! Reset counter → Call _handle_runout_detected()
+         └─ CONFIRMED RUNOUT! Reset counter → queue _ACE_MONITOR_EVENT EVENT=runout
 ```
 
 **Debounce:**
@@ -636,10 +727,10 @@ bus.
    so manager, instance, and command code stay focused on behavior rather than
    wire format details
 - The protocol layer now also owns debug request construction and the
-   proto-derived ACE2 command catalog used for future ACE2 expansion
+   proto-derived ACE2 command catalog
 
 **Request ID Behavior:**
-- IDs start at 0 and increment indefinitely (no wraparound)
+- IDs start at 1 and wrap from 0xFFFF back to 1
 - IDs never reset on reconnect to prevent collisions with pending responses
 - Callbacks registered per ID, dispatched on response arrival
 
@@ -719,7 +810,7 @@ seam. `AceSerialManager` no longer hardcodes "ACE by per-instance USB index" as
 its only model; instead, the protocol provides transport rules such as port
 description matching, whether the transport is shared-bus, and whether USB
 topology validation should apply. ACE1 still uses USB-topology validation,
-while future ACE2 transports can route multiple logical instances through one
+while ACE2 transports route multiple logical instances through one
 adapter and skip ACE1-style topology assumptions.
 
 `AceSerialManager` also no longer owns the ACE1 JSON wire codec directly.
@@ -730,7 +821,7 @@ hardcoded JSON serialization/parsing path from the serial manager itself.
 That seam is the prerequisite for letting ACE2 supply a different framed codec
 without re-teaching `AceSerialManager` about protobuf message shapes.
 
-The codebase now also contains dormant ACE2 scaffolding for that next layer:
+The ACE2 layer on top of that seam consists of:
 - an ACE2 protocol adapter that models command-based requests such as
    `DISCOVER_DEVICE`, `ASSIGN_DEVICE_ID`, `GET_INFO`, and `GET_STATUS`
 - an ACE2 shared-bus session object that tracks discovered UID triplets,
@@ -782,8 +873,8 @@ applies discovery results on top. This means ACE2 daisy-chain discovery order
 can change without shuffling which logical ACE instance each physical unit maps
 to.
 
-That scaffold now includes ACE2 wire-codec helpers for framed request
-serialization and framed response extraction plus shared transport ownership.
+The ACE2 adapter includes wire-codec helpers for framed request
+serialization and framed response extraction.
 Live solicited ACE2 runtime requests now reuse the persisted device-id binding
 for each logical instance, so normal callback-driven request/response traffic
 can target the bound physical unit on one shared bus without changing the
@@ -860,22 +951,29 @@ _send_heartbeat_request()                # Internal heartbeat implementation
 is_connection_stable()                   # Check if connected and not in reconnect loop
 get_connection_status()                  # Get detailed status dict:
                                          #   connected: bool - currently connected
-                                         #   stable: bool - connected 30s+ and <6 reconnects in 180s
+                                         #   stable: bool - connected 30s+ and <4 reconnects in 180s
                                          #   recent_reconnects: int - reconnects in last 180s
                                          #   time_connected: float - seconds since last connect
 
 # Connection stability ensures robust operation:
 # - Feed assist restoration deferred until first successful heartbeat
 # - This prevents send failures during initial connection negotiation
-# - Reconnect timestamps only track actual failed attempts (not initial connection)
+# - Reconnect timestamps record every connection loss (reconnect()) and failed attempt
 
 # Stability Constants (in __init__):
 #   INSTABILITY_WINDOW = 180.0           # Look at reconnects in last 3 minutes
-#   INSTABILITY_THRESHOLD = 6            # 6+ reconnects in window = unstable
+#   INSTABILITY_THRESHOLD = 4            # 4+ reconnects in window = unstable
 #   STABILITY_GRACE_PERIOD = 30.0        # Must stay connected 30s to be "stable"
-#   RECONNECT_BACKOFF_MIN = 5.0          # Initial retry delay
-#   RECONNECT_BACKOFF_MAX = 30.0         # Maximum retry delay (cyclic)
+#   COUNTER_RESET_PERIOD = 180.0         # Reset reconnect counter after 3 min stable
+#   RECONNECT_BACKOFF_MIN = 5.0          # Initial retry delay (USB location not yet known)
+#   LOCATION_KNOWN_RECONNECT_BACKOFF_MIN = 1.0  # Initial retry delay once the location is known
+#   RECONNECT_BACKOFF_MAX = 30.0         # A step reaching it resets to the minimum (cyclic)
 #   RECONNECT_BACKOFF_FACTOR = 1.5       # Multiply delay on each failure
+#   COMM_SUPERVISION_WINDOW = 30.0       # Comm supervision: timeouts AND unsolicited
+#   COMM_TIMEOUT_THRESHOLD = 15          #   in the window, each at its threshold,
+#   COMM_UNSOLICITED_THRESHOLD = 15      #   mean out-of-sync communication
+#   SUPERVISION_CHECK_INTERVAL = 5.0     # How often supervision is evaluated
+#   TX_STALL_LIMIT_S = 2.0 (class)       # Connected port taking no output this long -> reconnect
 
 # Protocol & Frame Handling
 _calc_crc(buffer)                        # Calculate CRC-16 for frame
@@ -899,15 +997,16 @@ is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 - **Protocol Seam**: Three-file split — `protocol.py` holds the base `AceProtocolAdapter` class, command spec dataclasses (`AceCommandSpec`, `AceTransportSpec`), shared request builders, and `resolve_protocol_name()` for auto-detection; `protocol_ace1.py` holds `AceJsonProtocolAdapter`; `protocol_ace2.py` holds `AceProtoProtocolAdapter` and `ACE2_COMMAND_CATALOG`.
 - **Dual Protocol Support**: `AceJsonProtocolAdapter` (ACE1) and
   `AceProtoProtocolAdapter` (ACE2) implement the same `AceProtocolAdapter` interface
-- **Command Catalog**: `ACE2_COMMAND_CATALOG` maps command names to `AceCommandSpec`
-  dataclasses with field schemas, response decoders, and timeout hints
+- **Command Catalog**: `ACE2_COMMAND_CATALOG` holds `AceCommandSpec`
+  entries (`name`, `code`, `tier`, `request_type`, `response_type`)
 - **Request Builders**: `build_feed_filament_request()`, `build_get_status_request()`,
   `build_stop_drying_request()`, etc. — callers never touch raw wire bytes
 - **Response Normalization**: `_decode_response_payload()` converts raw protobuf
   fields into the `{"code", "msg", "result"}` contract that `AceInstance`
   callbacks already consume
 - **Transport Rules**: `AceTransportSpec` describes per-protocol port matching,
-  shared-bus flag, baud defaults, and USB topology policy
+  shared-bus flag, and USB topology policy; default bauds live in
+  `DEFAULT_BAUD_BY_PROTOCOL`
 - **Wire Codec**: Frame serialization (`serialize_request_frame`) and response
   extraction (`extract_responses`) for both ACE1 (JSON + CRC) and ACE2
   (protobuf + CRC) framing
@@ -924,6 +1023,44 @@ protocol-specific `if/else` branches in filament logic.
 | Method | ACE1 | ACE2 | Meaning |
 |---|---|---|---|
 | `feed_assist_causes_busy()` | `False` | `True` | Whether activating feed assist transitions the device to a non-ready status |
+| `supports_firmware_update()` | `False` | `True` | Whether `build_iap_*_request()` exist (ACE2 IAP commands 2-4) |
+| `default_disconnect_pause_timeout()` | `30.0` | `5.0` | Fast disconnect pause when `disconnect_pause_timeout` is auto |
+| `slow_first_unwind()` | `None` | `(40.0, 4.0)` | Slow pull (mm, mm/s) before the full-speed unload pull |
+| `build_start_rollback_assist_request(slot)` | `None` | `FEED_OR_ROLLBACK` mode 3 | Rollback assist around extruder-only retracts |
+| `handle_bound_shared_bus_unsolicited(instance, response)` | `False` | routes `GET_STATUS`/`GET_INFO`/RFID, suppresses late ACKs | Unsolicited shared-bus response policy |
+
+**ACE2 firmware update (`ace2_ota.py`):**
+
+`ACE_FIRMWARE_UPDATE` builds an `Ace2FirmwareUpdater` and injects the instance's
+`send_high_prio_request`, a reactor `register_callback` wrapper, `respond_info`
+and `set_firmware_update_active`; the updater itself touches no reactor or
+serial port. The sequence follows the stock Kobra X host (avata_main 2.0.2.2,
+`OTA_FILAMENT_HUB_START`):
+
+- `IAP_UPGRADE {1 size, 2 crc, 3 version}`: size and CRC-16/MCRF4XX of the
+  unpadded image (`protocol.crc16_mcrf4xx`, the frame CRC too), version
+  `"V" + x.y.z` from the file name `ACE2_V<x.y.z>…_<YYYYMMDD>.bin`.
+- `IAP_FIRMWARE {1 address, 2 bytes}` per 64-byte chunk at
+  `0x08024000 + offset` (the bootloader's staging area; the application runs
+  from 0x08008000), last chunk zero-padded.
+- `IAP_UPGRADE_FINISH`, empty. A FINISH that is never answered is a warning,
+  not an abort (the box may reboot first), as in stock.
+- Three attempts per command; a request whose callback never comes is ended
+  by a 15 s watchdog. Every reply carries a request token, so late replies,
+  duplicate deliveries and stale watchdogs are ignored.
+- The instance's shared-bus status poll is suspended for the run
+  (`firmware_update_active`) and always resumed, including on internal errors.
+- IAP frames carry the box's assigned device id like every other runtime
+  command; the tier `"firmware"` keeps them out of `ACE_DEBUG`.
+
+Divergences from stock, deliberate: a non-zero reply code counts as a failed
+attempt (stock ignores IAP reply payloads); the vector table is checked
+before anything is sent; after FINISH the updater waits 5 s and asks
+`GET_INFO` up to five times to report `verified` / `unverified` (stock
+leaves that to its background poller). Not verified on hardware: whether a
+box keeps its bus device id across the reboot into new firmware.
+Proof: `tests/test_ace2_ota.py`, including an end-to-end run against a
+synthetic box that parses the real frames and rebuilds the staged image.
 
 **ACE2 feed assist and `wait_ready()`:**
 
@@ -999,8 +1136,12 @@ set_and_save(varname, value)    # Update RAM and either defer or write immediate
 flush()                         # Write all dirty variables to disk; clears dirty set
                                 # Safe to call when nothing is dirty (no-op)
 
-# Method (callable)
-has_pending()             # True if any dirty variables await flushing
+flush_direct()                  # Rewrite saved_variables.cfg from RAM, bypassing the GCode
+                                # queue (usable during shutdown); clears dirty set
+remove_keys(varnames)           # Delete variables from RAM and disk (via flush_direct)
+
+# Property
+has_pending               # True if any dirty variables await flushing
 ```
 
 **Usage Pattern:**
@@ -1021,9 +1162,14 @@ state.flush()
 ```
 
 **Where flushed:**
-- `_handle_disconnect()` in AceManager — on Klipper shutdown
+- `_handle_shutdown()` in AceManager: `flush_direct()` on `klippy:shutdown`
+- `_handle_disconnect()` in AceManager: on Klipper disconnect (`flush_direct()`
+  when already shut down)
 - `ACE_FLUSH` gcode command — on user request
 - `_flush_if_idle()` timer callback — background idle-time flush
+- `_ACE_HANDLE_PRINT_END`, `ACE_FULL_UNLOAD`, `ACE_RESET_PERSISTENT_INVENTORY`,
+  `ACE_RESET_SHARED_BUS_BINDINGS`: after their writes
+- `ACE_CLEANUP_STALE_VARS CONFIRM=1`: `remove_keys()`
 
 ### 8. Configuration (`config.py`)
 
@@ -1035,9 +1181,22 @@ FILAMENT_STATE_SPLITTER = "splitter"    # In RDM, so possible loaded in splitter
 FILAMENT_STATE_TOOLHEAD = "toolhead"    # At toolhead sensor
 FILAMENT_STATE_NOZZLE = "nozzle"        # In hotend/nozzle
 
+# Per-slot park state (runtime only, status slots[i]["park_state"])
+SLOT_PARK_STATE_UNKNOWN = "unknown"
+SLOT_PARK_STATE_PARKED = "parked"
+SLOT_PARK_STATE_LOADED = "loaded"
+
 # Sensor Names
 SENSOR_TOOLHEAD = 'toolhead_sensor'
 SENSOR_RDM = 'return_module'
+SENSOR_RUNOUT = 'runout_sensor'         # Toolhead sensor, or the intake on intake_gated
+
+# route_to_tool feeder: who moves the routed filament next
+FEEDER_EXTRUDER = "EXTRUDER"
+FEEDER_ACE = "ACE"
+
+# ACE slot state machine (AceSlotStateMachineState, codes 0-8):
+# empty, ready, feeding, unwinding, shifting, gear_err, preload, identifying, tmc_err
 
 # Slots per ACE unit (fixed)
 SLOTS_PER_ACE = 4
@@ -1072,13 +1231,18 @@ OVERRIDABLE_PARAMS = [
     "feed_speed", "retract_speed", "total_max_feeding_length",
     "toolchange_load_length", "incremental_feeding_length",
     "incremental_feeding_speed", "heartbeat_interval", "max_dryer_temperature",
+    "disconnect_pause_timeout",
 ]
+# Per-instance overridable string choices (parse_instance_choice_config)
+CHOICE_OVERRIDABLE_PARAMS = ["protocol"]
 ```
 
 **Helper Functions:**
 ```python
 # Tool Mapping
-get_tool_offset(instance_num)                        # → instance_num * 4
+set_tool_base(base)                                  # first ACE tool (klippy:connect)
+get_tool_base()                                      # → current base
+get_tool_offset(instance_num)                        # → base + instance_num * 4
 get_instance_from_tool(tool_index)                   # T7 → instance 1
 get_local_slot(tool_index, instance)                 # T7, instance 1 → slot 3
 get_ace_instance_and_slot_for_tool(tool)             # T7 → (instance_obj, slot 3)
@@ -1087,6 +1251,10 @@ get_ace_instance_and_slot_for_tool(tool)             # T7 → (instance_obj, slo
 parse_instance_number(name)                          # "ace 2" → 2
 parse_instance_config(config_value, instance, param) # "60,1:80" → 80 for instance 1
                                                      # Supports per-instance overrides
+parse_instance_choice_config(value, instance, param) # Same for string choices (protocol)
+parse_instance_baud_config(value, instance, protocol)# "auto" → protocol default baud
+park_pull_length(ace_config, toolhead_paths)         # Full-unload pull length per toolhead_paths
+normalize_ace_slot_state(raw_state)                  # Slot state code/string → lowercase name
 
 # Inventory Management
 create_empty_inventory_slot()                        # Create empty slot dict
@@ -1113,11 +1281,14 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `default_color_change_purge_length` | 50 | Default purge length for color change (mm) |
 | `default_color_change_purge_speed` | 400 | Default purge speed (mm/min) |
 | `purge_max_chunk_length` | 300 | Max chunk size per purge command (mm) |
-| `pre_cut_retract_length` | 2 | Safety retract before cutter (mm) |
+| `pre_cut_retract_length` | 2 | Retract before `CUT_TIP` (mm); 0 where the printer's `CUT_TIP` retracts itself (K3, K3M, KX) |
 | `timeout_multiplier` | 2 | Multiplier applied to ACE request timeouts |
 | `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
+| `feed_assist_off_when_idle` | True | Klipper's idle timeout stops the loaded tool's feed assist; the next toolhead activity restores it (`idle_assist.py`) |
+| `tool_changer` | (none) | Printer object of a printer-side tool changer that numbers the tools (Kobra X: `kx_toolchanger`); see "Tool numbering behind a printer-side tool changer" |
+| `register_tool_macros` | True | Register `T<n>` for every ACE slot. False when a printer-side tool changer owns `T<n>` and calls `ACE_CHANGE_TOOL` with printer tool numbers (Kobra X `[kx_toolchanger]`); it also owns the recovery of a failed change, see "Failure reported to a printer-side tool changer" |
 | `stop_ace_on_shutdown` | True | On `klippy:shutdown` (M112 / fatal error) stop feed assist and any running feed/retract on every connected ACE, and do not restore feed assist after the restart |
 | `stop_dryer_on_shutdown` | False | Also stop a running dryer on `klippy:shutdown` (needs `stop_ace_on_shutdown`) |
 | `runout_debounce_count` | 1 | Consecutive absent reads before confirming runout |
@@ -1141,6 +1312,21 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `incremental_feeding_speed` | 30 | Feed segment speed (mm/s); per-instance overridable |
 | `heartbeat_interval` | 1.0 | Heartbeat polling interval (s); per-instance overridable |
 | `max_dryer_temperature` | 60 | Dryer temperature cap (°C); per-instance overridable |
+| `total_max_feeding_length` | 2500 | Feed/retract length limit (mm); per-instance overridable |
+| `filament_runout_sensor_name_nozzle` | `filament_runout_nozzle` | Toolhead sensor object name |
+| `filament_runout_sensor_name_rdm` | None | RDM sensor object name; unset = no RDM |
+| `toolhead_strategy` | `sensor_push` | `sensor_push` or `intake_gated` (see "Toolhead transfer strategies") |
+| `filament_intake_sensor_name` | None | Intake sensor object for `intake_gated` |
+| `toolhead_paths` | `shared` | `shared`, `per_tool`, or a printer object name asked via `tools_share_path()` |
+| `toolhead_clear_length` | 20.0 | Full-unload pull (mm) with `per_tool` paths (`park_pull_length`) |
+| `intake_feed_speed` | 0 | ACE speed up to the intake sensor (mm/s); 0 = `feed_speed` |
+| `intake_clear_length` | 15.0 | `intake_gated` unload: extruder travel without intake count (mm) |
+| `runout_reload_length` | 0 | `intake_gated`: extra pull past the sensor on the load after a runout (mm) |
+| `toolhead_load_retries` | 0 | Extra attempts when a load does not reach the toolhead sensor |
+| `toolchange_homing_axes` | `xyz` | Axes `ACE_CHANGE_TOOL` homes first when unhomed |
+| `ace2_feed_check_length` | 110 | ACE2 `SET_FEED_CHECK` check_length, sent at shared-bus setup |
+| `ace2_feed_error_length` | 100 | ACE2 `SET_FEED_CHECK` error_length |
+| `moonraker_lane_sync_url` / `_namespace` / `_api_key` / `_timeout` | see "Config (`[ace]`)" below | Moonraker lane sync transport |
 
 ### 9. Commands (`commands.py`)
 
@@ -1157,14 +1343,25 @@ request construction to `build_debug_request()`.
 
 **Core Operations:**
 ```
-ACE_GET_STATUS [INSTANCE=<n>|TOOL=<n>] [VERBOSE=1]
+ACE_GET_STATUS [INSTANCE=<n>] [VERBOSE=1]
                                            # Query ACE hardware status
-                                           # Without INSTANCE/TOOL: all instances
+                                           # Without INSTANCE: all instances
                                            # VERBOSE=1: detailed output (all fields)
                                            # VERBOSE=0 (default): compact JSON
                                            
 ACE_RECONNECT [INSTANCE=<n>]               # Reconnect serial connection(s)
                                            # Without INSTANCE: reconnect all instances
+
+ACE_REDETECT                               # Re-type an instance stuck on ace1_json onto a
+                                           # shared ACE2 bus (discovery-gated; skipped while
+                                           # printing/paused or during a toolchange)
+
+ACE_RESET_SHARED_BUS_BINDINGS [RECONNECT=1|0] [DELAY=2.0]
+                                           # Clear persisted ace2_bus_bindings_*, then
+                                           # reconnect shared transports (default)
+
+ACE_FIRMWARE_UPDATE INSTANCE=<n> FILE=<ACE2_Vx.y.z_YYYYMMDD.bin> [CONFIRM=1]
+                                           # Flash an ACE2 box; dry run without CONFIRM=1
 
 ACE_FEED [T=<tool>|INSTANCE=<n> INDEX=<n>] LENGTH=<mm> [SPEED=<mm/s>]
                                            # Feed filament from slot
@@ -1182,17 +1379,23 @@ ACE_STOP_RETRACT [T=<tool>|INSTANCE=<n> INDEX=<n>]
 **Tool Change & Loading:**
 ```
 ACE_SMART_UNLOAD [TOOL=<n>]                # Intelligent unload with fallback strategies.
+                                           # No TOOL: current tool, and a path still blocked
+                                           #   after the unload escalates to cycling all slots
+                                           #   (cycle_on_blocked); with TOOL= it stays an error.
                                            # Case 1 (toolhead clear, RDM triggered): RDM-monitored
                                            #   retract (early-stop + overshoot) when RDM sensor
                                            #   present; fixed-length fallback otherwise.
                                            # Validates path clear after unload.
-                                           # Turns off heater when not printing/paused
+                                           # Restores the heater target when not printing/paused
                                            #   (standalone unload; keep_heater=False default).
 
 ACE_SMART_LOAD                             # Load all non-empty slots to verification sensor (toolhead)
+ACE_CHECK_TOOL TOOL=<n>                    # One spool to the toolhead sensor and back to park, error on failure
+ACE_CHECK_PRINT_TOOLS                      # Print start: refuse when a used tool has no usable spool (no motion)
 
-ACE_CHANGE_TOOL TOOL=<n>                   # Execute tool change T<n>
+ACE_CHANGE_TOOL TOOL=<n> [PARK=1]          # Execute tool change T<n>
                                            # TOOL=-1: unload current tool
+                                           # TOOL=-1 PARK=1: park at the intake (park_tool)
                                            
 ACE_FULL_UNLOAD [TOOL=<n>|TOOL=ALL]        # Full unload until slot sensor reports empty
                                            # TOOL=ALL: unload all non-empty slots
@@ -1200,7 +1403,9 @@ ACE_FULL_UNLOAD [TOOL=<n>|TOOL=ALL]        # Full unload until slot sensor repor
                                            # No TOOL: unload current tool
                                            # Active tool: includes toolhead prep + extruder retract + ACE retract
                                            # Non-active tool: ACE-only retract (no heating/cutting)
-                                           # Clears tool index on success
+                                           # full_unload_slot clears ace_current_index only for
+                                           #   the active tool, when the retract stopped on the
+                                           #   slot reporting empty
 ```
 
 **Inventory Management:**
@@ -1209,21 +1414,28 @@ ACE_SET_SLOT [T=<tool>|INSTANCE=<n> INDEX=<n>] COLOR=<name>|R,G,B MATERIAL=<name
              or EMPTY=1                    # Set slot metadata or clear
                                            # COLOR can be named (e.g. RED, BLUE) or R,G,B
 
-ACE_QUERY_SLOTS [INSTANCE=<n>] [VERBOSE=1] # Query slots with RFID details
-                                           # Without INSTANCE: all instances
+ACE_QUERY_SLOTS [INSTANCE=<n>|TOOL=<n>] [VERBOSE=1]
+                                           # Query slots with RFID details
+                                           # Without INSTANCE/TOOL: all instances
                                            # VERBOSE=1: Show all RFID fields
                                            # Format: Table with columns:
-                                           #   [#] T# | Status | RFID | SKU | Brand | Material | RGB | Temp | Extruder | Bed
+                                           #   [#] T# | Status | RFID | SKU | Brand | Material | Color | Temp | Extruder | Bed
                                            # Example: "[1] T1 | ready | RFID | AHPLBK-101 | Anycubic | PLA | RGB(255,0,0) | 210°C | 190-230°C | 50-60°C"
-                                           # Empty slots: "-----" status, "---" for missing fields
+                                           # Empty slots: "-----" status, "Empty" material;
+                                           #   unknown material "???"; "---" for missing fields
 
 ACE_SAVE_INVENTORY [INSTANCE=<n>]          # Persist inventory to saved_variables
                                            # If INSTANCE specified, saves that instance
 
-ACE_RESET_PERSISTENT_INVENTORY INSTANCE=<n>
-                                           # Clear all slot metadata for instance
+ACE_RESET_PERSISTENT_INVENTORY [INSTANCE=<n>]
+                                           # Clear all slot metadata (omit INSTANCE for all)
 
-ACE_RESET_ACTIVE_TOOLHEAD INSTANCE=<n>    # Reset active tool index to -1
+ACE_RESET_ACTIVE_TOOLHEAD                  # Reset feed assist on all instances, clear
+                                           # current and target tool, filament position
+                                           # to bowden
+
+ACE_CLEANUP_STALE_VARS [CONFIRM=1]         # List stale ace2_bus_bindings_* and out-of-range
+                                           # ace_inventory_N keys; CONFIRM=1 deletes them
 ```
 
 **Feed Assist Control:**
@@ -1274,7 +1486,8 @@ ACE_RFID_SYNC_STATUS [INSTANCE=<n>]        # Query RFID sync status
 
 **RFID Query Behavior:**
 - RFID tags are queried automatically when state transitions from `saved_rfid=False` to RFID detected
-- On (re)connect: All slots are queried unconditionally to catch spool changes during disconnect
+- On (re)connect, with RFID sync enabled: all slots are queried one at a time (the next once no
+  query is in flight) to catch spool changes during disconnect
 - No re-query for already-detected tags (prevents duplicate queries)
 - Query triggers: `get_filament_info` request to ACE firmware
 - Data update: Via callback, updates inventory with material/color/temp/brand/SKU/temps
@@ -1284,8 +1497,11 @@ ACE_RFID_SYNC_STATUS [INSTANCE=<n>]        # Query RFID sync status
 - Color auto-synced to inventory when RFID sync enabled
 - Empty slots default to RGB(0,0,0) - black
 - Manual color override: `ACE_SET_SLOT T=0 COLOR=RED` or `COLOR=255,0,0`
-- Named colors: RED, GREEN, BLUE, YELLOW, ORANGE, PURPLE, WHITE, BLACK, GRAY
-- RGB values preserved when slot becomes empty (for auto-restore)
+- Named colors (`COLOR_NAMES` in commands.py): BLACK, BLUE, BLUEISH, CYAN, DARK_GRAY,
+  DARK_YELLOW, GRAY, GREEN, GREENISH, LIGHT_GRAY, MAGENTA, ORANGE, RED, REDISH, YELLOW,
+  WHITE, ORCA
+- RGB values preserved when a slot reports empty while printing/paused (see
+  "Slot Empty Transition Behavior")
 
 **Dryer Control:**
 ```
@@ -1297,13 +1513,21 @@ ACE_STOP_DRYING [INSTANCE=<n>]             # Stop drying
 
 **Configuration & Purge:**
 ```
-ACE_SET_PURGE_AMOUNT PURGELENGTH=<mm> PURGESPEED=<mm/min> [INSTANCE=<n>]
+ACE_SET_PURGE_AMOUNT PURGELENGTH=<mm> [PURGESPEED=<mm/min>] [INSTANCE=<n>]
                                            # Set purge parameters for tool changes
+                                           # PURGESPEED default: default_color_change_purge_speed
 ```
 
 **Lifecycle Hooks:**
 ```
 _ACE_HANDLE_PRINT_END                      # Called at print end (cleanup sequence)
+```
+
+**Tangle Detection:**
+```
+ACE_TANGLE_DETECTION [ENABLE=0|1]          # Toggle live; no ENABLE queries the state
+_ACE_TANGLE_DISABLE_AND_RESUME             # Internal: tangle prompt button - disable
+                                           # detection and resume
 ```
 
 **Debug & Testing Commands:**
@@ -1321,11 +1545,9 @@ ACE_DEBUG_SENSORS                          # Print all sensor states
 ACE_DEBUG_STATE                            # Print manager & instance state
                                            # (tool mapping, filament position)
 
-ACE_DEBUG INSTANCE=<n> METHOD=<name> [PARAMS=<json>]
+ACE_DEBUG [INSTANCE=<n>] [METHOD=<name>] [PARAMS=<json>]
                                            # Send raw debug request to hardware
-
-ACE_DEBUG_CHECK_SPOOL_READY TOOL=<n>       # Test spool ready check
-                                           # Verifies slot is ready and available
+                                           # METHOD default: get_status
 
 ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=0|1 RDM=0|1 or RESET=1
                                            # Inject sensor state (testing)
@@ -1354,7 +1576,10 @@ ACE_SHOW_INSTANCE_CONFIG [INSTANCE=<n>]    # Display resolved config for instanc
 
 **Tool Selection (Dynamic):**
 ```
-T<0-N>                                    # Per-tool commands (auto-registered)
+T<0-N>                                    # Per-tool commands (AceManager.register_tool_macros)
+                                           # Not registered when register_tool_macros: False;
+                                           # skipped per tool when a [gcode_macro T<n>] exists;
+                                           # numbered from the tool base
                                            # Count depends on ace_count:
                                            # ace_count=1: T0-T3
                                            # ace_count=2: T0-T7
@@ -1367,7 +1592,7 @@ T<0-N>                                    # Per-tool commands (auto-registered)
 def ace_get_instance(gcmd):
     # Priority:
     # 1. INSTANCE=<n> parameter (explicit instance)
-    # 2. T=<tool> or TOOL=<tool> parameter (map tool to instance)
+    # 2. TOOL=<tool> parameter (map tool to instance)
     # 3. Fallback to instance 0 if neither specified
 
 def ace_get_instance_and_slot(gcmd):
@@ -1376,42 +1601,56 @@ def ace_get_instance_and_slot(gcmd):
     # 2. INSTANCE=<n> INDEX=<n> parameters → explicit slot
 ```
 
-### 10. Macros (`ace.cfg`)
+### 10. Macros (`config/ace_macros_generic.cfg`, `config/printer_generic_macros.cfg`, per-printer `CUT_TIP`)
+
+`ace_macros_generic.cfg` (included by every `ace_<printer>.cfg`) holds the
+ACE hooks; `printer_generic_macros.cfg` holds PAUSE/RESUME; `CUT_TIP` comes
+from `printer_K3.cfg` / `printer_K3M.cfg` / `printer_KS1.cfg` /
+`printer_KS1M.cfg`, or on the Kobra X from the fork's `kx_multimaterial.cfg`.
 
 **Key Macros:**
 
 ```gcode
-[gcode_macro _ACE_PRE_TOOLCHANGE]
-# Pre-toolchange preparation:
-# - Z-hop for safety
-# - Ensure homed
-# - Heat to appropriate temperature
-# - Move to throw position (if heating needed during print)
+[gcode_macro _ACE_PRE_TOOLCHANGE]          # ace_macros_generic.cfg
+# Pre-toolchange preparation (homing is done before, by ACE_CHANGE_TOOL):
+# - Save original heater target (pre-pause temp when paused) to _ACE_STATE
+# - SAVE_GCODE_STATE, Z-hop (none while Z is unhomed)
+# - Save part fan speed to _ACE_STATE, fan off
+# - TO_THROW_POSITION (always)
+# - Pick target temp: pre-pause > current target > inventory > min_extrude+30,
+#   M109 if more than 10 °C below
 
-[gcode_macro _ACE_POST_TOOLCHANGE]
+[gcode_macro _ACE_POST_TOOLCHANGE]         # ace_macros_generic.cfg
 # Post-toolchange finalization:
-# - Purge new filament
-# - Wipe nozzle
-# - Restore temperature
-# - Resume moves
+# - Heat to purge temp if needed
+# - Purge: _ACE_PURGE if defined, else PURGE_IN_CHUNKS
+# - Nozzle wipe unless startup toolchange or _ACE_PURGE owns it
+# - Restore fan speed; restore heater target (M104 S0 if it was 0)
+# - RESTORE_GCODE_STATE MOVE=1
 
-[gcode_macro CUT_TIP]
-# Cut filament at cutter (Kobra 3 Combo):
+[gcode_macro _ACE_PREPARE_FOR_RETRACTION]  # ace_macros_generic.cfg
+# Heat if below min_extrude_temp, pre-cut retract, CUT_TIP, optional _ACE_AFTER_CUT
+
+[gcode_macro CUT_TIP]                      # printer_<printer>.cfg
+# Cut filament at cutter (Kobra 3 example):
+# - Home if not all axes homed
 # - CRITICAL: Z-lift BEFORE Y movement (prevents collision)
 # - Uses G91 (relative) for Z-lift to avoid absolute position issues
 # - Move to cutter position (X=0, Y=260)
 # - Multiple extruder jabs to ensure clean cut (-2mm/+2mm cycles)
 # - Move to flush position after cut
 # - Safety: M400 waits ensure moves complete before next operation
-# 
-# G91/G90 Z-lift sequence prevents toolhead collision with the cutter
-# arm during print toolchanges
 
-[gcode_macro RESUME]
+[gcode_macro RESUME]                       # printer_generic_macros.cfg
 # Resume after pause:
-# - Check filament position
-# - Reload tool only if needed (filament at splitter/bowden)
-# - Restore position and continue
+# - Reheat to the stored temperature
+# - Reload T{active} whenever ACE is enabled and a tool is recorded (no
+#   filament-position check); active = _ACE_STATE.active, or
+#   the [ace] tool_changer's .tool when one is set, or ace_target_index when
+#   it names an unconfirmed different tool (not with a tool changer)
+# - Purge PURGE=<mm> (default 40, 0 skips): _RESUME_PURGE if defined, else
+#   generic purge + wipe
+# - BASE_RESUME, then _RESUME_REPRIME if defined
 ```
 
 ## USB Discovery & Instance-to-Hardware Topology Resolution
@@ -1445,6 +1684,11 @@ addressed afterward by `device_id` — so port count can be less than
 3. Walk the ordered candidates assigning instance numbers sequentially; the
    first shared-bus candidate found backs *every remaining* instance slot
    (one physical port, N logical instances via device_id).
+4. Fewer instances placed than `ace_count`: no mapping at all; each serial
+   manager falls back to claim-protected, location-learning port detection
+   until the full chain is up. An instance left on `ace1_json` by a late ACE2
+   adapter is re-typed by `redetect_transports()` (automatic pass, or
+   `ACE_REDETECT`).
 
 **Why the scan retries (`_scan_ace_candidate_ports_with_retry`):** USB
 enumeration is async relative to Klipper startup — a physically-present
@@ -1497,101 +1741,105 @@ mixup above). So the scan polls instead of reading once:
 ### Tool Change Sequence
 
 ```
-1. User Command: T3
+1. User Command: T3 (ACE_CHANGE_TOOL TOOL=3; homes toolchange_homing_axes if unhomed)
    ↓
 2. AceManager.perform_tool_change(current=-1, target=3)
    - Set ace_target_index = 3 (in-flight, unconfirmed)
+   - ensure_tool_slot_loaded(3): raise if the slot reports empty
+   - _clear_parked_for(3); route_to_tool (loaded tool, else target)
    ↓
-3. _ACE_PRE_TOOLCHANGE macro
-   - Z-hop
-   - Heat to target temp
-   - Move to throw position (if heating needed)
-   ↓
-4. Plausibility Check (if sensors mismatch persisted state)
-   - _ensure_hot_for_recovery_unload(): heat nozzle if cold (runs before PRE macro)
+3. Plausibility Check (if sensors mismatch persisted state; before PRE)
+   - _ensure_hot_for_recovery_unload(): heat nozzle if cold
    - smart_unload(keep_heater=True): clear stuck filament from path
    - G92 E0 + M400: flush stale extruder state after emergency unload
    ↓
-5. Unload Current Tool (if any)
+4. Reselection of the loaded tool (current == target): return early when
+   it is still loaded, else clear the path and continue to the load
+   ↓
+5. _ACE_PRE_TOOLCHANGE macro (Z-hop, fan off, throw position, heat)
+   ↓
+6. Unload Current Tool (if any; skipped for endless spool)
    - AceManager.smart_unload(current_tool, keep_heater=True)
-   - Cut filament (CUT_TIP macro)
+   - Cut filament (CUT_TIP via _ACE_PREPARE_FOR_RETRACTION)
    - Retract to bowden
    - Validate sensors clear
    - Heater stays on (POST macro handles shutdown after load+purge)
    ↓
-6. Cold-nozzle guard before load
-   - Verify extruder ≥ min_extrude_temp before loading
-   - If cold + target_temp known: M109 to heat
-   - If cold + no target_temp: raise (fail fast — PRE macro should have heated)
-   ↓
 7. Load Target Tool
-   - Find instance managing T3 (instance 0)
-   - Check spool ready
-   - Feed from slot 3 → toolhead sensor
-   - Feed toolhead sensor → nozzle
-   - Update ace_filament_pos = "nozzle"
+   - check_and_wait_for_spool_ready
+   - Cold-nozzle guard: M109 if cold and target_temp known, else raise
+   - route_to_tool(target, FEEDER=ACE unless intake_gated)
+   - _feed_filament_into_toolhead: slot → toolhead sensor → nozzle
    ↓
-8. _ACE_POST_TOOLCHANGE macro
-   - Purge filament
+8. Set ace_current_index = 3, clear ace_target_index = -1 (confirmed),
+   _ACE_STATE.active = 3, reset runout baseline
+   ↓
+9. _ACE_POST_TOOLCHANGE macro
+   - Purge filament (1.5x for endless spool)
    - Wipe nozzle
    - Restore temperature / shut off heater if done
-   ↓
-9. Set ace_current_index = 3, clear ace_target_index = -1 (confirmed)
 
-If any step raises before step 9, ace_target_index stays = 3.
+If any step raises before step 8, perform_tool_change leaves
+ace_target_index = 3 (see "In-Flight Toolchange Tracking" for who clears it).
 ```
 
 ### Runout Detection Flow
 
 ```
-1. Toolhead Sensor Triggers (filament absent)
+1. Toolhead Sensor Triggers (filament absent; intake sensor on intake_gated)
    ↓
 2. RunoutMonitor._monitor_runout() (50ms interval)
    - Detects state change (present → absent)
-   - Debounce: requires N consecutive absent readings (default 3 ≈ 150ms)
+   - Debounce: requires N consecutive absent readings (runout_debounce_count, default 1)
    - Guards: not during toolchange, printing active, detection enabled
    - Tracks previous sensor state for transition detection
+   - Confirmed: stop the file (send_pause_command), queue
+     _ACE_MONITOR_EVENT EVENT=runout behind the running G-code command
    ↓
-3. RunoutMonitor._handle_runout_detected(tool_index)
+3. RunoutMonitor._handle_runout_detected(tool_index), in that command
    - Sets runout_handling_in_progress flag
    - Resets sensor baseline to prevent repeated triggers
    ↓
 4. RunoutMonitor._pause_for_runout()
    - Execute PAUSE command (Klipper pause macro)
    ↓
-5. Show Interactive Mainsail Prompt
-   - Display runout details (instance, slot, material, color)
-   - Buttons: RESUME, CANCEL_PRINT
+5. Disable the runout tool's feed assist; with an intake transfer,
+   park_after_runout() (a slot still reading filament blocks endless spool)
    ↓
-6. Check Endless Spool Enabled
+6. Show Interactive Mainsail Prompt (always)
+   - Display runout details (instance, slot, material, color)
+   - Buttons: Retry T<n>, Extrude/Retract 100mm, Resume, Cancel Print
+   ↓
+7. Check Endless Spool Enabled
    - Query ace_endless_spool_enabled from saved_variables
    ↓
-7a. If Endless Spool DISABLED:
+8a. If Endless Spool DISABLED:
    - Stay paused, wait for user to refill spool
    - User must click RESUME after refilling
    ↓
-7b. If Endless Spool ENABLED:
+8b. If Endless Spool ENABLED:
    - EndlessSpool.find_exact_match(tool_index) (mode-aware: exact/material/next)
    - Search all instances according to match mode
    ↓
-8a. If NO MATCH Found:
+9a. If NO MATCH Found:
    - Stay paused, prompt remains visible
    - User must refill or load matching material
    ↓
-8b. If MATCH Found:
+9b. If MATCH Found:
    - Close prompt automatically
-   - EndlessSpool.execute_swap(from_tool, to_tool)
-   - Mark old slot empty (status="empty", preserves color/RGB/material/temp)
+   - EndlessSpool.execute_swap(from_tool, to_tool), up to 3 candidates
+   - Mark old slot status empty
    - Execute tool change with is_endless_spool=True
    - Skip unload (already empty), perform 1.5x purge
-   - Resume print automatically
+   - RESUME PURGE=0
    ↓
-9. Finally: Clear runout_handling_in_progress flag
+10. Finally: Clear runout_handling_in_progress flag
 
 **Note on Color Preservation:**
-RGB values are preserved when a slot becomes empty, allowing the system to
-restore previous settings if the same spool is reinserted. This also enables
-endless spool matching based on the previous spool's color/material metadata.
+While printing/paused, color/material/temp are preserved when a slot reports
+empty, allowing the system to restore previous settings if the same spool is
+reinserted. This also enables endless spool matching based on the previous
+spool's color/material metadata.
 ```
 
 ## State Management
@@ -1605,21 +1853,27 @@ ace_target_index: int               # In-flight/unconfirmed toolchange target (-
 ace_endless_spool_enabled: bool     # Endless spool active
 ace_endless_spool_match_mode: str   # Match mode: "exact" | "material" | "next"
 ace_global_enabled: bool            # ACE system enabled
+ace_parked_tools: List[int]         # Tools parked at the toolhead intake
+ace_tool_base: int                  # Tool base the saved tool numbers were written under
 
-# Per-instance inventory (persisted)
+# Per-instance (persisted)
 ace_inventory_0: List[Dict]         # Instance 0 slots
 ace_inventory_1: List[Dict]         # Instance 1 slots
 # ... etc
+ace_feed_assist_index_<n>: int      # Instance n's feed assist slot (-1 = none)
+
+# Per shared ACE2 bus
+ace2_bus_bindings_<ids>: Dict       # UID-to-instance bindings (ACE_RESET_SHARED_BUS_BINDINGS)
 ```
 
 ### Runtime State (AceManager)
 
 ```python
 toolchange_in_progress: bool        # Tool change active (blocks runout)
-runout_detection_active: bool       # Runout monitoring enabled
-prev_toolhead_sensor_state: bool    # For detecting state changes
-last_printing_state: bool           # Track print start/stop
 sensors: Dict[str, Sensor]          # Sensor objects
+runout_monitor: RunoutMonitor       # Owns runout_detection_active,
+                                    #   prev_toolhead_sensor_state, last_printing_active
+                                    #   (see RunoutMonitor "State Tracking")
 ```
 
 ### Runtime State (AceInstance)
@@ -1631,6 +1885,8 @@ _pending_feed_assist_restore: int   # Slot pending restoration after reconnect (
 _info: Dict                         # ACE hardware status
 serial_mgr: AceSerialManager        # Communication handler
 feed_assist_active_after_ace_connect: bool  # Restore feed assist on reconnect (config)
+slot_park_state: List[str]          # Per slot "unknown" | "parked" | "loaded" (not persisted;
+                                    #   status slots[i]["park_state"])
 ```
 
 ### Inventory Slot Structure
@@ -1639,13 +1895,14 @@ Each slot in the inventory contains:
 
 ```python
 {
-    "status": str,      # "ready" | "empty" - hardware state
-    "color": List[int], # [R, G, B] - preserved when empty
-    "material": str,    # e.g. "PLA" - preserved when empty
-    "temp": int,        # Print temperature - preserved when empty
+    "status": str,      # Normalized slot state ("ready", "empty", "feeding", ...)
+    "color": List[int], # [R, G, B] - preserved when empty while printing/paused
+    "material": str,    # e.g. "PLA" - preserved when empty while printing/paused
+    "temp": int,        # Print temperature - preserved when empty while printing/paused
     "rfid": bool,       # True if data came from RFID tag - cleared when empty
     
     # Optional RFID fields (cleared when slot becomes empty):
+    "icon_type": int,       # Tag icon type
     "extruder_temp": Dict,  # {"min": int, "max": int}
     "hotbed_temp": Dict,    # {"min": int, "max": int}
     "diameter": float,      # Filament diameter in mm
@@ -1658,27 +1915,28 @@ Each slot in the inventory contains:
 
 ### Slot Empty Transition Behavior
 
-When a slot transitions from `ready` to `empty` (runout, manual EMPTY=1, etc.):
+When the hardware reports a slot `empty` (`AceInstance._status_update_callback`):
 
 | Field | Behavior | Reason |
 |-------|----------|--------|
 | `status` | Set to `"empty"` | Hardware reports no filament |
-| `color` | **Preserved** (RGB) | Allows auto-restore if same spool reinserted |
-| `material` | **Preserved** | Allows auto-restore if same spool reinserted |
-| `temp` | **Preserved** | Allows auto-restore if same spool reinserted |
+| `color` | **Preserved** while printing/paused, else `[0, 0, 0]` | Allows auto-restore / endless spool matching mid-print |
+| `material` | **Preserved** while printing/paused, else `""` | Same |
+| `temp` | **Preserved** while printing/paused, else `0` | Same |
 | `rfid` | Set to `False` | No RFID tag present |
-| `extruder_temp` | **Cleared** | RFID data no longer valid |
-| `hotbed_temp` | **Cleared** | RFID data no longer valid |
-| `diameter` | **Cleared** | RFID data no longer valid |
-| `sku`, `brand`, etc. | **Cleared** | RFID data no longer valid |
+| `extruder_temp`, `hotbed_temp`, `diameter` | **Cleared** | RFID data no longer valid |
+| `sku`, `brand`, `icon_type`, `total`, `current` | **Cleared** | RFID data no longer valid |
 
-**Display Behavior**:
-- Empty slots show `-----` for status and material in ACE_QUERY_SLOTS output
-- RGB color preserved (displays as RGB(r,g,b) even when empty)
-- Temperature shows 0°C when empty (temp field preserved but not active)
-- RFID indicator shows `[----]` when no RFID tag present
+`ACE_SET_SLOT ... EMPTY=1` replaces the slot with
+`{"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0, "rfid": False}`
+(nothing preserved).
 
-**Rationale**: Core metadata (color/RGB, material, temp) is preserved so that if the same
+**Display Behavior** (ACE_QUERY_SLOTS):
+- Empty slots show `-----` for status and `Empty` for material
+- RGB color shown as RGB(r,g,b) even when empty
+- RFID column shows `----` when no RFID tag present
+
+**Rationale**: Core metadata (color/RGB, material, temp) is preserved mid-print so that if the same
 spool is reinserted, the slot auto-restores to `ready` with its previous settings.
 RFID-specific fields are cleared because they only apply when an RFID-tagged spool
 is physically present.
@@ -1686,7 +1944,7 @@ is physically present.
 **Auto-Restore on Spool Swap:**
 ```
 1. Slot 0: status=ready, material=PLA, color=RGB(255,0,0), temp=210
-2. Runout detected → status=empty (material/color/temp preserved)
+2. Runout detected while printing → status=empty (material/color/temp preserved)
 3. User inserts NEW spool → ACE hardware detects filament
 4a. IF RFID present: All fields updated from RFID tag (material, RGB, temp, etc.)
 4b. IF NO RFID: Slot restores to ready with preserved material/color/temp
@@ -1695,13 +1953,13 @@ is physically present.
 
 
 ## Configuration Example
-This example is just for reference; check printer_KS1.cfg / printer_K3.cfg for live values.
+This example is just for reference; `[ace]` lives in `config/ace_<printer>.cfg` (e.g. ace_KS1.cfg, ace_K3.cfg) - check there for live values.
 
 ```ini
 [ace]
 ace_count: 1
 protocol: auto                               # auto | ace1 | ace2 (default: auto-detect)
-baud: 115200                                 # protocol-aware default; omit to auto-select
+baud: auto                                   # 115200 for ACE1, 230400 for ACE2
 
 # Tube Lengths
 parkposition_to_toolhead_length: 800
@@ -1730,9 +1988,10 @@ pre_cut_retract_length: 2
 heartbeat_interval: 1.0
 max_dryer_temperature: 55
 feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect (deferred until first successful heartbeat)
+feed_assist_off_when_idle: True              # Stop feed assist on Klipper's idle timeout, restore it on the next toolhead activity
 stop_ace_on_shutdown: True                   # Stop feed assist / running feed+retract on M112 or fatal shutdown
 stop_dryer_on_shutdown: False                # Also stop the dryer on M112 or fatal shutdown
-runout_debounce_count: 3                     # Consecutive absent sensor readings before confirming runout (default 1 = no debounce)
+runout_debounce_count: 1                     # Consecutive absent sensor readings before confirming runout (1 = no debounce)
 ```
 ### Debug Commands
 
@@ -1759,7 +2018,11 @@ This feature publishes ACE slot metadata into Moonraker's database namespace
   - Adds `moonraker_lane_sync_*` settings.
 - `extras/ace/manager.py`
   - Creates adapter once during manager init.
-  - Triggers sync on startup and whenever inventory persistence occurs.
+  - Triggers sync on startup and whenever inventory persistence occurs;
+    forced syncs at `klippy:ready` and print end (`_ACE_HANDLE_PRINT_END`).
+- Sync runs on a background worker thread (blocking HTTP off the reactor).
+  Non-forced syncs are skipped while printing/paused (one deferred sync is
+  scheduled for when the print ends) and when the payload is unchanged.
 
 ### Data Flow
 
@@ -1787,6 +2050,7 @@ initial `lane_data` snapshot.
   - `lane` (0-based string)
   - `material`
   - `color` (`#RRGGBB`)
+  - `scan_time`, `td` (always empty strings)
 - Optional payload fields:
   - `nozzle_temp`
   - `bed_temp`
@@ -1801,6 +2065,206 @@ initial `lane_data` snapshot.
   `moonraker_lane_sync_unknown_material_mode` (`passthrough`/`empty`/`map`)
   and its marker/map settings.
 
+### Printer-side lane writer (Kobra X)
+
+A printer whose tools are not all ACE slots publishes the lanes itself: the
+Kobra X's `[kx_filament]` (Kobra Klipper fork) maps printer `T<n>` onto
+turret inlets, direct-fed ones included. ACEPRO then keeps
+`moonraker_lane_sync_enabled: False` (two writers delete each other's lanes)
+and offers its entries instead, with no import either way:
+
+- `ace_state` status `lanes`: `MoonrakerLaneSyncAdapter.lane_entries()`, the
+  entries above as a list in slot order (first unit's slot 0 first), built
+  also with the sync off.
+- Event `ace:lanes_changed`: sent from `manager._sync_moonraker_lane_data()`
+  on every call, before the sync itself, so a disabled sync still announces
+  the change.
+- `ace_state` status `lane_sync_enabled`: whether this driver writes
+  `lane_data` itself, so the printer-side writer can refuse to start as a
+  second one.
+- `ace_state` status `toolchange_in_progress`: the guarded operations'
+  flag, so a printer-side tag reader polls only while none runs.
+- `ace_state` status `box_tag_tools`: the tools whose loaded spool the box
+  identified by its own tag; a manual slot setting there is overwritten by
+  the box's next identify, so a printer-side reader does not offer them.
+
+Proof: `test_lane_entries_are_indexed_by_ace_tool_even_with_sync_disabled`,
+`test_lane_change_is_announced_with_moonraker_sync_disabled`,
+`test_status_carries_the_lane_entries`,
+`test_status_tells_whether_this_driver_writes_the_lanes`.
+
+### Toolhead transfer strategies (`toolhead_strategy`)
+
+How a filament is moved between the ACE's park position and the toolhead
+sensor. Decided once per printer in the ACE config.
+
+- `sensor_push` (default): the ACE pushes to the toolhead sensor, the
+  extruder then feeds fixed lengths; an unload runs fixed lengths on both.
+  Code: `AceInstance._feed_to_toolhead_with_extruder_assist`, the
+  coordinated retract in `AceManager.smart_unload`.
+- `intake_gated` (`extras/ace/intake_gated.py`): for an extruder gear
+  between two sensors. Load: ACE feeds until the intake sensor counts, the
+  extruder pulls until the toolhead sensor triggers. Unload: the extruder
+  retracts until the toolhead sensor clears and on until the intake has not
+  counted for `intake_clear_length` (the sensor is behind the gear, so its
+  clearing leaves the tip in the gear), then the ACE pulls back. The
+  configured lengths are limits. An unload that finds the toolhead sensor
+  already clear routes with `FEEDER=ACE` before the ACE pulls alone.
+  Runout: a spool's end passes the intake in front of the gear while the
+  toolhead sensor behind it stays covered by the rest of the filament, so
+  with an intake that reports presence (`intake_present()`) the runout
+  monitor reads `SENSOR_RUNOUT` from it (`get_switch_state(SENSOR_RUNOUT)`;
+  the toolhead sensor everywhere else). After the pause
+  `park_after_runout` cuts and retracts the old piece off the toolhead
+  sensor without marking the tool parked, so Retry T<n> and endless spool
+  find it unloaded; the next load through that path pulls
+  `runout_reload_length` past the sensor, the intake counting, so the
+  refilled filament - not the old piece - is in the gear. A slot that still
+  reads filament is a break or a jam: pause, no endless spool. Rejected alternative: printer-side
+  load/unload macros - the same sequence fits other toolheads with an
+  encoder in front of the gear, so it lives here.
+- Seams: `AceInstance._feed_filament_into_toolhead` (load) and the
+  sensor-triggered branch of `AceManager.smart_unload`; everything around
+  them (temperatures, purge, state, runout) is shared. `AceManager.transfers`
+  maps instance numbers to their `IntakeGatedTransfer`.
+- Intake sensor: the printer object named by `filament_intake_sensor_name`,
+  offering `intake_edges()` - a growing count of filament movement in the
+  path in front of the extruder (Kobra X: `kx_clog_check`, the encoder of
+  the turret's inlet).
+- Parking (`AceManager.park_tool`, `ACE_CHANGE_TOOL TOOL=-1 PARK=1`): cut,
+  then the extruder retracts only until the toolhead sensor clears; the ACE
+  does not pull, the tip stays in the gear, and the tool is recorded in the
+  saved variable `ace_parked_tools`. Feed assist is told to stop before the
+  cut and awaited after it (`_send_feed_assist_stop` /
+  `_await_feed_assist_stopped`); a failed cut turns it back on. Its next
+  load is a short extruder pull with feed assist already on - no ACE feed
+  command - (`IntakeGatedTransfer.load(parked=True)`), falling back to the
+  normal feed. Sensor-stopped extruder moves hand each queued stretch to
+  the steppers at once (`_start_queued_toolhead_moves`): Klipper's
+  look-ahead would hold them back and the filament would run on past the
+  sensor. Park and resume log the distance they moved. The printer side asks for a park; only it knows that its toolhead
+  can hold a filament out of the way (Kobra X: the turret leaves the
+  inlet). `toolhead_paths` says whether a parked filament blocks other
+  tools - literally, or as the name of a printer object asked through its
+  `tools_share_path()` (Kobra X: `kx_toolchanger`, from its inlet table): The same object may offer `ace_tool_at_toolhead()`:
+  when no tool is on record, an unload asks it which filament the toolhead
+  holds (`AceManager.tool_at_toolhead`). Without an answer an intake-gated
+  toolhead refuses to identify the tool by test retracts
+  (`_identify_unrecorded_tool`): its extruder clears the toolhead sensor
+  whichever slot is tried. The layouts: `shared` (default, the tools meet in one tube) - it is fully
+  unloaded before another tool loads (`_clear_parked_for`); `per_tool` -
+  it stays. A full `smart_unload` of a tool ends its park. The same key
+  picks how far the ACE pulls on a full unload (`config.park_pull_length`):
+  `parkposition_to_toolhead_length` (the tube back to behind the hub) or
+  `toolhead_clear_length` (just clear of the toolhead) - two keys, so that
+  rearranging the tubes changes `toolhead_paths` and no length. Decided against:
+  parking from `perform_tool_change` on its own - a single-gear toolhead
+  cannot hold a parked filament out of the next one's way. Proof:
+  `tests/test_intake_parking.py`.
+- Rollback assist (`extras/ace/rollback_assist.py`): an ACE2 clamps the
+  filament while idle, so an extruder-only retract slips against it and
+  moves the filament only part of the way. Unload and park run that
+  retract inside `rollback_assist()`: `FEED_OR_ROLLBACK` mode 3, length and speed 0, then
+  `STOP_FEED_OR_ROLLBACK` and `wait_ready` however the retract ends - the
+  sequence Anycubic's firmware runs (avata_main 2.0.2.2, 0x01257778). The
+  protocol decides: `build_start_rollback_assist_request` is None for an
+  ACE1, which lets go by itself. A refused start raises before the
+  extruder moves. After it, the unload pulls an ACE2's filament out
+  slowly before the full-speed pull back (`slow_first_unwind`: 40 mm at
+  4 mm/s, stock's "low speed unwind" before its "high speed unwind" at
+  50 mm/s; 0x0125d6a8, 0x0125f5fc). Stock repeats the slow pull until the
+  inlet switch clears; here the extruder has cleared it already, so it is
+  made once, as stock's first try is. Proof: `tests/test_rollback_assist.py`.
+- Proof: `tests/test_intake_gated.py`, `tests/test_intake_gated_wiring.py`.
+
+### Printer-side path selection (`_ACE_ROUTE_TOOL`)
+
+A toolhead with several filament paths behind one extruder (the Kobra X
+turret) must have a tool's path in front of the extruder and the toolhead
+sensor before this driver moves that tool's filament. The driver does not
+know the paths; it announces the tool and the printer config acts.
+
+- `AceManager.route_to_tool(tool)` runs `_ACE_ROUTE_TOOL TOOL=<global tool>`
+  when `[gcode_macro _ACE_ROUTE_TOOL]` exists; without the macro, or for
+  tool -1, it does nothing. An error from the macro propagates and stops
+  the operation before any feed.
+- `route_to_tool(tool, FEEDER_ACE)` adds `FEEDER=ACE`: the ACE alone moves
+  the filament up to the toolhead sensor while the extruder stands still,
+  so the path must be open (the Kobra X turret's engaged gear holds a
+  filament in front of the sensor). Without `FEEDER` the extruder moves it.
+- Call sites: `perform_tool_change` (the loaded tool before the sensor
+  plausibility check, or the target when nothing is loaded; the target with
+  `FEEDER=ACE` before the load), `_feed_to_toolhead_with_extruder_assist`
+  (once the sensor has the filament, before the extruder pulls),
+  `smart_unload` with a known tool, `smart_load` when it verifies at the
+  toolhead sensor (`FEEDER=ACE`), `full_unload_slot` for the loaded tool.
+  Raw `ACE_FEED`/`ACE_RETRACT` and the cycling unload of an unknown tool do
+  not route.
+- With `toolhead_strategy: intake_gated` the route before a load is plain
+  (`FEEDER=ACE` is not used): the extruder pulls the filament to the sensor.
+- A load that does not reach the toolhead sensor is repeated
+  `toolhead_load_retries` times (default 0): 150 mm back, `FEEDER=ACE`
+  routed again, feed again. A feed the ACE aborted itself (slot
+  `gear_err`, `FeedAbortedByFirmware`) is retried without the pull-back:
+  the filament is still in the gears, and a pull-back after an early stall
+  takes it out of their reach.
+- `toolchange_homing_axes` (default `xyz`): the axes `ACE_CHANGE_TOOL` homes
+  first when they are unhomed (`commands.toolchange_homing_script`);
+  `_ACE_PRE_TOOLCHANGE` skips its Z lift while Z is unhomed. Kobra X: `x`.
+- `_ACE_POST_TOOLCHANGE` hands the purge to the optional `_ACE_PURGE` macro
+  (`PURGE=<mm> SPEED=<mm/min>`) and then skips its own nozzle wipe (Kobra X:
+  stock's sweep and throw into the bin).
+- `_ACE_PREPARE_FOR_RETRACTION` runs the optional `_ACE_AFTER_CUT` macro
+  between `CUT_TIP` and the unload retract (Kobra X: to the purge position).
+- The printer side reads the loaded tool back from `ace_state` status
+  `current_index`.
+
+Proof: `tests/test_tool_route_hook.py`.
+
+### Tool numbering behind a printer-side tool changer
+
+The ACE's tools are numbered as the printer numbers them. A printer-side tool
+changer that puts its own tools first (Kobra X: `[kx_toolchanger]`, direct-fed
+turret inlets) owns the number of the first ACE slot and returns it from
+`ace_tool_offset()`; three direct inlets make the first unit `T3-T6`, a
+second unit `T7-T10`. `[ace] tool_changer` names that object
+(`AceManager._tool_changer()`, a name no object answers to is a config
+error); without the option the ACE starts at `T0` and no object is asked.
+`ace_state` publishes the name and the base (`tool_changer`, `tool_base`).
+
+- `tool_base.apply_tool_base()` reads it at `klippy:connect`, before any
+  `klippy:ready` handler reads a tool number, and sets
+  `config.set_tool_base()`. Every number ACEPRO takes or shows follows: `T=`
+  and `TOOL=` of its commands, `ACE_QUERY_SLOTS`, its messages, `ace_state`
+  `current_index`/`target_index`, the lane numbers, the `_ACE_ROUTE_TOOL`
+  hook. The printer-side tool changer sends and reads the same numbers.
+- Code that maps a tool number to a unit and slot goes through `config.py`
+  (`get_tool_offset`, `get_instance_from_tool`, `get_local_slot`); code
+  that cannot (endless spool's wrap-around, the runout monitor's
+  resolution, range checks) starts from the base, never from 0.
+- Saved tool numbers (`ace_current_index`, `ace_target_index`,
+  `ace_parked_tools`) carry the base they were written under in
+  `ace_tool_base` and are moved to the current one at start, so a changed
+  tool changer layout keeps the loaded tool.
+- The KlipperScreen panel reads the base from `ace_state` `tool_base`,
+  numbers its slots from it and shows and sends those numbers unchanged.
+  RESUME (`printer_generic_macros.cfg`) reads the loaded tool from
+  `printer[ace_state.tool_changer].tool`.
+- The same object answers one more question, at sensor setup:
+  `tool_base.rdm_in_ace_path()` asks `ace_rdm_in_path()`, and a False
+  (Kobra X `topology: combo`, a tube per inlet) leaves a configured RDM
+  sensor out of `sensors`, so the driver runs its RDM-less paths. Without
+  the object, or with one that has no such method, `[ace]` decides.
+
+Rejected: translating at the edges (commands and messages in printer
+numbers, ACE numbers inside). The numbering already had a per-unit start
+for daisy-chained units; a base on that start moves every number at once,
+where the edge translation needed every message site converted by hand.
+
+Proof: `tests/test_tool_base.py`, `TestToolBase` in
+`tests/test_config_utils.py`,
+`tests/test_klipperscreen_printer_tool_numbers.py`.
+
 ### Config (`[ace]`)
 
 ```ini
@@ -1809,9 +2273,9 @@ moonraker_lane_sync_url: http://127.0.0.1:7125
 moonraker_lane_sync_namespace: lane_data
 moonraker_lane_sync_api_key:                # optional
 moonraker_lane_sync_timeout: 2.0
-moonraker_lane_sync_unknown_material_mode: passthrough   # passthrough|empty|map
+moonraker_lane_sync_unknown_material_mode: passthrough   # passthrough|empty|map (default empty)
 moonraker_lane_sync_unknown_material_markers: ???,unknown,n/a,none
-moonraker_lane_sync_unknown_material_map_to: PLA         # used when mode=map
+moonraker_lane_sync_unknown_material_map_to: PLA         # used when mode=map (default "")
 ```
 
 ## Test & Debug (Moonraker DB)

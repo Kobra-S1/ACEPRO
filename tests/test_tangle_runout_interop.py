@@ -18,6 +18,7 @@ at the 1 Hz heartbeat cadence, asserting the verdict the fix must reach:
   pause at verdict-window expiry.
 """
 from unittest.mock import Mock
+from ace import monitor_events
 from ace.runout_monitor import RunoutMonitor
 
 
@@ -47,7 +48,21 @@ def _make_monitor(insts, tangle_pump_time, tangle_verify_time=10.0):
         tangle_pump_time=tangle_pump_time,
         tangle_verify_time=tangle_verify_time,
     )
+    _run_queued_events(monitor)
     return monitor, gcode
+
+
+def _run_queued_events(monitor):
+    """Run the monitor's queued events as Klipper does once the running
+    command ends: the callback, then the _ACE_MONITOR_EVENT command's
+    handler (its print-state check is test_monitor_events')."""
+    monitor.reactor.register_callback = lambda callback: callback(0.0)
+
+    def run_script(script):
+        params = dict(p.split("=", 1) for p in script.split()[1:])
+        handler = monitor_events.HANDLERS[params["EVENT"]]
+        getattr(monitor, handler)(int(params["TOOL"]))
+    monitor.gcode.run_script = run_script
 
 
 def _pause_calls(gcode):

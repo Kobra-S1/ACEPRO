@@ -147,6 +147,7 @@ def setup_mocks(mock_ace_instance, mock_ace_manager):
     ACE_INSTANCES[0] = mock_ace_instance
     INSTANCE_MANAGERS[0] = mock_ace_manager
     mock_ace_manager.instances = {0: mock_ace_instance}
+    mock_ace_manager.tool_at_toolhead = Mock(return_value=-1)
     
     yield
     
@@ -925,19 +926,10 @@ class TestCommandSmoke:
         # "PURPLE" is not a valid named color and will fail R,G,B parsing too
         mock_gcmd.get = Mock(side_effect=["PURPLE", "PLA"])
         
-        # Mock error to raise exception (will be caught and converted to respond_info)
-        def error_func(msg):
-            raise Exception(msg)
-        mock_gcmd.error = error_func
-        
-        # The function catches all exceptions and calls respond_info with error message
-        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
-        
-        # Verify respond_info was called with error message
-        assert mock_gcmd.respond_info.called
-        call_args = str(mock_gcmd.respond_info.call_args)
-        # Check that error message mentions color format
-        assert "COLOR" in call_args or "named color" in call_args.lower()
+        mock_gcmd.error = Exception
+
+        with pytest.raises(Exception, match="COLOR"):
+            ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
 
     def test_cmd_ACE_SET_SLOT_rgb_values_clamped_to_valid_range(self, mock_gcmd, setup_mocks):
         """Test ACE_SET_SLOT clamps out-of-range RGB values to 0-255."""
@@ -968,16 +960,10 @@ class TestCommandSmoke:
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
         mock_gcmd.get = Mock(side_effect=["128,64", "PLA"])  # Only 2 values
         
-        def error_func(msg):
-            raise Exception(msg)
-        mock_gcmd.error = error_func
-        
-        ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
-        
-        # Should have reported an error
-        assert mock_gcmd.respond_info.called
-        call_args = str(mock_gcmd.respond_info.call_args)
-        assert "COLOR" in call_args or "error" in call_args.lower()
+        mock_gcmd.error = Exception
+
+        with pytest.raises(Exception, match="COLOR"):
+            ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
 
     def test_cmd_ACE_SAVE_INVENTORY(self, mock_gcmd, setup_mocks):
         """Test ACE_SAVE_INVENTORY."""
@@ -1481,6 +1467,20 @@ class TestDryingCommands:
         ace.commands.cmd_ACE_SMART_LOAD(mock_gcmd)
         assert INSTANCE_MANAGERS[0].smart_load.called
 
+    def test_cmd_ACE_CHECK_TOOL_checks_the_tool(self, mock_gcmd, setup_mocks):
+        mock_gcmd.get_int = Mock(return_value=5)
+        ace.commands.cmd_ACE_CHECK_TOOL(mock_gcmd)
+        INSTANCE_MANAGERS[0].check_tool.assert_called_once_with(5)
+
+    def test_cmd_ACE_CHECK_TOOL_fails_the_command_on_a_failed_check(
+            self, mock_gcmd, setup_mocks):
+        # An error, not a notice: a print start running it must stop.
+        mock_gcmd.get_int = Mock(return_value=5)
+        INSTANCE_MANAGERS[0].check_tool = Mock(side_effect=Exception("T5: slot empty"))
+        with pytest.raises(Exception):
+            ace.commands.cmd_ACE_CHECK_TOOL(mock_gcmd)
+        assert "T5: slot empty" in mock_gcmd.error.call_args[0][0]
+
     def test_cmd_ACE_RESET_PERSISTENT_INVENTORY(self, mock_gcmd, setup_mocks):
         """Test ACE_RESET_PERSISTENT_INVENTORY."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0})
@@ -1580,12 +1580,6 @@ class TestDryingCommands:
         """Test ACE_DEBUG_STATE."""
         ace.commands.cmd_ACE_DEBUG_STATE(mock_gcmd)
         assert mock_gcmd.respond_info.called
-
-    def test_cmd_ACE_DEBUG_CHECK_SPOOL_READY(self, mock_gcmd, setup_mocks):
-        """Test ACE_DEBUG_CHECK_SPOOL_READY."""
-        mock_gcmd.get_int = Mock(return_value=0)
-        ace.commands.cmd_ACE_DEBUG_CHECK_SPOOL_READY(mock_gcmd)
-        assert INSTANCE_MANAGERS[0].check_and_wait_for_spool_ready.called
 
     def test_cmd_ACE_ENABLE_RFID_SYNC_single(self, mock_gcmd, setup_mocks):
         """Test ACE_ENABLE_RFID_SYNC for single instance."""
@@ -2032,6 +2026,7 @@ class TestAceChangeTool:
         manager.get_ace_global_enabled.return_value = True
         manager.perform_tool_change = Mock(return_value="OK")
         manager.state.get = Mock(return_value=0)
+        manager.toolchange_homing_axes = "xyz"
         printer, gcode = self._make_printer(homed_axes="xy")  # missing z -> triggers homing
 
         with patch('ace.commands.get_printer', return_value=printer):
@@ -2040,6 +2035,44 @@ class TestAceChangeTool:
         manager.perform_tool_change.assert_called_once_with(0, 2)
         # Homing warning should have triggered a G28
         gcode.run_script_from_command.assert_any_call("G28")
+
+
+class TestToolChangeHoming:
+    """A tool change homes what its moves need and nothing else. On most
+    printers that is everything (Z lift, a throw position in X and Y); a
+    toolhead whose change only travels in X says so with
+    toolchange_homing_axes, and a load at standstill then does not run a
+    full homing cycle after the cut has already homed X."""
+
+    def test_everything_needed_and_something_missing_is_a_full_homing(self):
+        assert ace.commands.toolchange_homing_script("xyz", "xy") == "G28"
+        assert ace.commands.toolchange_homing_script("xyz", "") == "G28"
+
+    def test_nothing_missing_is_no_homing(self):
+        assert ace.commands.toolchange_homing_script("xyz", "xyz") is None
+        assert ace.commands.toolchange_homing_script("x", "x") is None
+
+    def test_only_the_missing_needed_axes_are_homed(self):
+        assert ace.commands.toolchange_homing_script("x", "") == "G28 X"
+        assert ace.commands.toolchange_homing_script("xy", "x") == "G28 Y"
+
+    def test_axes_that_are_not_needed_stay_unhomed(self):
+        assert ace.commands.toolchange_homing_script("x", "xz") is None
+
+    def test_the_change_homes_by_the_managers_axes(self, mock_gcmd, setup_mocks):
+        manager = INSTANCE_MANAGERS[0]
+        manager.get_ace_global_enabled.return_value = True
+        manager.perform_tool_change = Mock(return_value="OK")
+        manager.state.get = Mock(return_value=0)
+        manager.toolchange_homing_axes = "x"
+        printer, gcode = TestAceChangeTool()._make_printer(homed_axes="x")
+
+        with patch('ace.commands.get_printer', return_value=printer):
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, tool_index=2)
+
+        scripts = [c.args[0] for c in gcode.run_script_from_command.call_args_list]
+        assert not any(script.startswith("G28") for script in scripts), scripts
+        manager.perform_tool_change.assert_called_once_with(0, 2)
 
 
 class TestToolChangeFailureDuringResume:
@@ -2160,9 +2193,72 @@ class TestAceSetRetractSpeed:
 class TestToolChangeIntegration:
     """Integration tests for ACE_CHANGE_TOOL - the most critical business logic."""
 
+    def test_cmd_ACE_CHANGE_TOOL_unload_with_park_parks_the_tool(self, mock_gcmd, setup_mocks):
+        """TOOL=-1 PARK=1: out of the hotend only, not a full unload."""
+        mock_gcmd.get_int = Mock(
+            side_effect=lambda name, default=None: 1 if name == "PARK" else -1)
+        INSTANCE_MANAGERS[0].state.get = Mock(return_value=2)
+
+        ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
+
+        INSTANCE_MANAGERS[0].park_tool.assert_called_once_with(2)
+        INSTANCE_MANAGERS[0].smart_unload.assert_not_called()
+        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
+
+    def test_an_unload_of_an_unrecorded_tool_asks_what_is_at_the_toolhead(
+            self, mock_gcmd, setup_mocks):
+        """The record can be lost (a failed change); the printer may still
+        know which filament its toolhead holds. Guessing by test retracts
+        pulled another slot's filament out of its tube."""
+        mock_gcmd.get_int = Mock(
+            side_effect=lambda name, default=None: 1 if name == "PARK" else -1)
+        manager = INSTANCE_MANAGERS[0]
+        manager.state.get = Mock(return_value=-1)
+        manager.tool_at_toolhead = Mock(return_value=3)
+
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, -1)
+
+        manager.park_tool.assert_called_once_with(3)
+        manager.smart_unload.assert_not_called()
+
+    def test_a_change_that_fails_after_its_load_keeps_the_loaded_tool(
+            self, mock_gcmd, setup_mocks):
+        """The purge failed with the new filament already in the nozzle:
+        the tool on record must be that one, not the none from before."""
+        mock_gcmd.get_int = Mock(return_value=3)
+        manager = INSTANCE_MANAGERS[0]
+        variables = {"ace_current_index": -1, "ace_filament_pos": "bowden"}
+        manager.state.get = Mock(
+            side_effect=lambda key, default=None: variables.get(key, default))
+        manager.state.set = Mock(
+            side_effect=lambda key, value: variables.__setitem__(key, value))
+        manager.tool_at_toolhead = Mock(return_value=-1)
+
+        def load_then_fail(current_tool, target_tool):
+            variables["ace_current_index"] = target_tool
+            variables["ace_filament_pos"] = "nozzle"
+            raise Exception("purge failed")
+
+        manager.perform_tool_change = Mock(side_effect=load_then_fail)
+        mock_printer = Mock()
+        print_stats = Mock()
+        print_stats.get_status = Mock(return_value={'state': 'printing'})
+        ace_state = Mock()
+        ace_state.variables = {'startup_toolchange': 0}
+        mock_printer.get_reactor.return_value.monotonic.return_value = 1.0
+        mock_printer.lookup_object = Mock(
+            side_effect=lambda name, default=None: {
+                'print_stats': print_stats,
+                'gcode_macro _ACE_STATE': ace_state}.get(name, Mock()))
+
+        with patch('ace.commands.get_printer', return_value=mock_printer):
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 3)
+
+        assert variables["ace_current_index"] == 3
+
     def test_cmd_ACE_CHANGE_TOOL_unload_tool_success(self, mock_gcmd, setup_mocks):
         """Test tool unload (TOOL=-1) - happy path."""
-        mock_gcmd.get_int = Mock(return_value=-1)
+        mock_gcmd.get_int = Mock(return_value=0)
         
         # Mock state.get to return current tool
         INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
@@ -2177,7 +2273,7 @@ class TestToolChangeIntegration:
 
     def test_cmd_ACE_CHANGE_TOOL_unload_failure(self, mock_gcmd, setup_mocks):
         """Test tool unload failure - error handling."""
-        mock_gcmd.get_int = Mock(return_value=-1)
+        mock_gcmd.get_int = Mock(return_value=0)
         
         # Mock smart_unload to fail
         INSTANCE_MANAGERS[0].smart_unload = Mock(return_value=False)
@@ -2230,6 +2326,7 @@ class TestToolChangeIntegration:
     def test_cmd_ACE_CHANGE_TOOL_homing_check(self, mock_gcmd, setup_mocks):
         """Test that printer is homed before tool change."""
         mock_gcmd.get_int = Mock(return_value=1)
+        INSTANCE_MANAGERS[0].toolchange_homing_axes = "xyz"
         
         # Mock printer objects
         mock_printer = Mock()
@@ -3713,3 +3810,120 @@ class TestQuerySlotsCommand:
         assert "ColorMix" in output
         # Verify rgba field is NOT in output (removed)
         assert "rgba=" not in output
+
+
+class TestFirmwareUpdateCommand:
+    """ACE_FIRMWARE_UPDATE: argument checks, dry run, and hand-off to the updater."""
+
+    FILENAME = "ACE2_V1.1.34_20260430.bin"
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path):
+        import struct
+        from types import SimpleNamespace
+        from ace import ace2_ota
+        from ace.protocol_ace2 import AceProtoProtocolAdapter
+
+        ace2_ota.Ace2FirmwareUpdater._active = None
+        self.config_dir = tmp_path
+        (tmp_path / self.FILENAME).write_bytes(
+            struct.pack("<II", 0x20009B48, 0x08008245) + bytes(248))
+        self.instance = SimpleNamespace(
+            instance_num=1,
+            protocol=AceProtoProtocolAdapter(),
+            serial_mgr=SimpleNamespace(is_connected=lambda: True,
+                                       device_info={"version": "V1.1.31"}),
+            _is_printing_or_paused=lambda: False,
+            _feed_assist_index=-1,
+            _info={"status": "ready"},
+            send_high_prio_request=Mock(),
+            set_firmware_update_active=Mock(),
+            reactor=Mock(monotonic=Mock(return_value=100.0)),
+            gcode=Mock(),
+        )
+        printer = Mock()
+        printer.get_start_args.return_value = {"config_file": str(tmp_path / "printer.cfg")}
+        ACE_INSTANCES[1] = self.instance
+        with patch.object(ace.commands, "get_printer", return_value=printer):
+            yield
+        ACE_INSTANCES.pop(1, None)
+        ace2_ota.Ace2FirmwareUpdater._active = None
+
+    def _gcmd(self, **params):
+        class GcodeError(Exception):
+            pass
+        gcmd = Mock()
+        gcmd.get_command_parameters = Mock(return_value=params)
+        gcmd.get = Mock(side_effect=lambda name, default=None: params.get(name, default))
+        gcmd.get_int = Mock(side_effect=lambda name, default=None: int(params.get(name, default)))
+        gcmd.error = GcodeError
+        gcmd.respond_info = Mock()
+        return gcmd
+
+    def _said(self, gcmd):
+        return " ".join(str(call.args[0]) for call in gcmd.respond_info.call_args_list)
+
+    def test_without_confirm_it_is_a_dry_run(self):
+        gcmd = self._gcmd(INSTANCE="1", FILE=self.FILENAME)
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        said = self._said(gcmd)
+        assert "V1.1.31 -> V1.1.34" in said
+        assert "Dry run" in said
+        self.instance.send_high_prio_request.assert_not_called()
+        self.instance.set_firmware_update_active.assert_not_called()
+
+    def test_confirm_starts_the_update_on_the_named_box(self):
+        from ace import ace2_ota
+        gcmd = self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1")
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        request, _ = self.instance.send_high_prio_request.call_args[0]
+        assert request["command"] == "IAP_UPGRADE"
+        assert request["params"]["version"] == "V1.1.34"
+        self.instance.set_firmware_update_active.assert_called_once_with(True)
+        assert ace2_ota.Ace2FirmwareUpdater.active() is not None
+
+    def test_absolute_path_is_used_as_given(self):
+        gcmd = self._gcmd(INSTANCE="1", FILE=str(self.config_dir / self.FILENAME))
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        assert "Dry run" in self._said(gcmd)
+
+    def test_relative_path_resolves_next_to_printer_cfg(self):
+        assert ace.commands.resolve_firmware_path("fw/x.bin", "/home/pi/printer_data/config/printer.cfg") \
+            == "/home/pi/printer_data/config/fw/x.bin"
+
+    def test_instance_is_required(self):
+        gcmd = self._gcmd(FILE=self.FILENAME, CONFIRM="1")
+        with pytest.raises(Exception, match="INSTANCE"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_missing_file_is_refused(self):
+        gcmd = self._gcmd(INSTANCE="1", FILE="ACE2_V9.9.9_20990101.bin", CONFIRM="1")
+        with pytest.raises(Exception, match="No such file"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_badly_named_file_is_refused(self):
+        (self.config_dir / "ace2.bin").write_bytes(b"\x00" * 64)
+        gcmd = self._gcmd(INSTANCE="1", FILE="ace2.bin", CONFIRM="1")
+        with pytest.raises(Exception, match="does not match"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_box_that_must_not_be_flashed_is_refused(self):
+        self.instance._is_printing_or_paused = lambda: True
+        gcmd = self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1")
+        with pytest.raises(Exception, match="print"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(gcmd)
+        self.instance.send_high_prio_request.assert_not_called()
+
+    def test_second_update_while_one_runs_is_refused(self):
+        ace.commands.cmd_ACE_FIRMWARE_UPDATE(
+            self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1"))
+        with pytest.raises(Exception, match="already flashing"):
+            ace.commands.cmd_ACE_FIRMWARE_UPDATE(
+                self._gcmd(INSTANCE="1", FILE=self.FILENAME, CONFIRM="1"))
+        assert self.instance.send_high_prio_request.call_count == 1
+
+    def test_command_is_registered(self):
+        assert "ACE_FIRMWARE_UPDATE" in [name for name, _, _ in ace.commands.ACE_COMMANDS]

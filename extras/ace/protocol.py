@@ -12,6 +12,26 @@ from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 
 # ---------------------------------------------------------------------------
+# Shared checksum
+# ---------------------------------------------------------------------------
+
+def crc16_mcrf4xx(data: bytes) -> int:
+    """CRC-16/MCRF4XX (poly 0x8408 reflected, init 0xFFFF, no final XOR).
+
+    The one checksum of the ACE wire protocol: it covers every frame of both
+    generations and, on ACE2, the whole firmware image announced in
+    IAP_UPGRADE (stock uses one function for both). Check value for
+    b"123456789" is 0x6F91.
+    """
+    crc = 0xFFFF
+    for byte in data:
+        mixed = (byte ^ crc) & 0xFF
+        mixed ^= (mixed & 0x0F) << 4
+        crc = ((mixed << 8) | (crc >> 8)) ^ (mixed >> 4) ^ (mixed << 3)
+    return crc & 0xFFFF
+
+
+# ---------------------------------------------------------------------------
 # Shared data types
 # ---------------------------------------------------------------------------
 
@@ -311,6 +331,10 @@ class AceProtocolAdapter:
         """Build a protocol-specific debug request."""
         raise NotImplementedError()
 
+    def supports_firmware_update(self) -> bool:
+        """Whether ``build_iap_*_request`` exist for this protocol."""
+        return False
+
     def get_command_catalog(self) -> Tuple[AceCommandSpec, ...]:
         """Return the command catalog exposed by this protocol."""
         raise NotImplementedError()
@@ -334,6 +358,19 @@ class AceProtocolAdapter:
     def build_stop_feed_assist_request(self, slot_index: int) -> Dict[str, Any]:
         """Build a request to disable feed assist for a slot."""
         raise NotImplementedError()
+
+    def build_start_rollback_assist_request(self, slot_index: int) -> Dict[str, Any] | None:
+        """Build a request that makes the unit follow while the extruder pulls
+        the slot's filament back, or None for a unit that lets the filament
+        go by itself while idle and needs none. Stopped with
+        build_stop_unwind_filament_request."""
+        return None
+
+    def slow_first_unwind(self) -> Tuple[float, float] | None:
+        """(length mm, speed mm/s) of a slow pull out of the toolhead's
+        inlet that an unload makes before the full-speed pull back, or None
+        for none."""
+        return None
 
     def feed_assist_causes_busy(self) -> bool:
         """Return True if activating feed assist transitions the device to a non-ready status.

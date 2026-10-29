@@ -9,6 +9,7 @@ Responsibilities:
 - Port detection and enumeration
 """
 
+import select
 import serial
 import json
 import threading
@@ -20,7 +21,7 @@ from types import SimpleNamespace
 from serial import SerialException
 import serial.tools.list_ports
 
-from .protocol import transport_description_matches, parse_usb_location
+from .protocol import crc16_mcrf4xx, transport_description_matches, parse_usb_location
 from .protocol_ace1 import AceJsonProtocolAdapter
 
 # Process-global registry of physical serial ports currently claimed by a
@@ -41,6 +42,8 @@ class AceSerialManager:
     QUEUE_MAXSIZE = 1024
     WINDOW_SIZE = 4
     DEFAULT_TIMEOUT_S = 5.0
+    # A connected port that takes no output for this long is reconnected.
+    TX_STALL_LIMIT_S = 2.0
 
     def __init__(
             self,
@@ -104,6 +107,9 @@ class AceSerialManager:
         self._queue = queue.Queue(maxsize=self.QUEUE_MAXSIZE)
 
         self.read_buffer = bytearray()
+        # Frames not yet taken by the port, and since when it takes nothing.
+        self._tx_buffer = bytearray()
+        self._tx_stalled_since = None
         self.send_time = None
 
         self.writer_timer = None
@@ -205,7 +211,7 @@ class AceSerialManager:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Using baud rate: {baud}"
             )
-            self.connect_to_ace(baud, delay=0.5)
+            self.connect_to_ace(baud)
 
     def disable_ace_pro(self):
         """Disable ACE Pro and disconnect immediately."""
@@ -454,8 +460,12 @@ class AceSerialManager:
 
     # ========== Serial Connection Management ==========
 
-    def connect_to_ace(self, baud, delay=2):
-        """Start connection attempts (only if ACE enabled)."""
+    def connect_to_ace(self, baud):
+        """Start a fresh run of connection attempts (only if ACE enabled).
+
+        The first attempt comes after the backoff floor: a backoff grown by
+        an earlier run (e.g. before ACE was switched off and on) is dropped.
+        """
         if not self._ace_pro_enabled:
             self.gcode.respond_info(
                 f'ACE[{self.instance_num}]: ACE Pro disabled - '
@@ -502,6 +512,7 @@ class AceSerialManager:
                 )
                 return eventtime + current_backoff
 
+        self._reconnect_backoff = self._reconnect_backoff_floor()
         initial_delay = self._reconnect_backoff
         logging.info(
             f'ACE[{self.instance_num}]: Starting connection (first attempt in {initial_delay:.0f}s)'
@@ -724,7 +735,8 @@ class AceSerialManager:
                 port=port,
                 baudrate=baud,
                 timeout=0,
-                write_timeout=0.1
+                # Non-blocking: see _drain_tx.
+                write_timeout=0
             )
             if self._serial.is_open:
                 self._connected = True
@@ -791,7 +803,9 @@ class AceSerialManager:
                         )
 
                 return True
-        except SerialException as e:
+        except (SerialException, OSError) as e:
+            # OSError: the device left between the port scan and the open
+            # (pyserial's DTR ioctl does not wrap it).
             self.gcode.respond_info(f"ACE[{self.instance_num}]: Connection failed: {e}")
             self._serial = None
         return False
@@ -824,6 +838,8 @@ class AceSerialManager:
 
         self._connected = False
         self.read_buffer = bytearray()
+        self._tx_buffer = bytearray()
+        self._tx_stalled_since = None
         self.clear_queues()
 
         # Clear supervision counters on disconnect
@@ -1069,13 +1085,7 @@ class AceSerialManager:
 
     def _calc_crc(self, buffer):
         """Calculate CRC-16 for payload."""
-        _crc = 0xffff
-        for byte in buffer:
-            data = byte
-            data ^= _crc & 0xff
-            data ^= (data & 0x0f) << 4
-            _crc = ((data << 8) | (_crc >> 8)) ^ (data >> 4) ^ (data << 3)
-        return _crc
+        return crc16_mcrf4xx(buffer)
 
     # ========== Request/Response Queuing ==========
 
@@ -1153,39 +1163,70 @@ class AceSerialManager:
 
         data = self.protocol.serialize_request_frame(request, self._calc_crc)
 
+        self._tx_buffer += data
+        self._drain_tx()
+
+    def _fail_inflight(self):
+        """Answer every in-flight request with None and forget it."""
+        with self._lock:
+            for rid in list(self.inflight):
+                self.inflight.pop(rid, None)
+                cb = self._callback_map.pop(rid, None)
+                if cb:
+                    try:
+                        cb(response=None)
+                    except Exception as cb_e:
+                        self.gcode.respond_info(
+                            f"ACE[{self.instance_num}]: Error callback error: {cb_e}"
+                        )
+
+    def _tx_writable(self):
+        """Whether the port takes output right now, without waiting."""
+        return bool(select.select([], [self._serial], [], 0)[1])
+
+    def _drain_tx(self):
+        """Write what the port takes of the pending output, without waiting.
+
+        This runs in the reactor, where a wait stalls all of Klipper: step
+        generation for a homing move runs only about 0.1 s ahead. So the
+        port is written only when it is writable (pyserial's own
+        non-blocking write spins on EAGAIN), the rest stays buffered for
+        the next writer tick, and a port that takes nothing for
+        TX_STALL_LIMIT_S is reconnected. A failed write drops the output
+        and fails every in-flight request.
+        """
+        if not self._tx_buffer:
+            self._tx_stalled_since = None
+            return
         try:
             with self._serial_lock:
-                self._serial.write(data)
-        except serial.SerialTimeoutException as e:
-            self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: Serial write timeout: {e} (clearing inflight)"
-            )
-            with self._lock:
-                rid = request.get('id')
-                if rid in self.inflight:
-                    self.inflight.pop(rid, None)
-                    cb = self._callback_map.pop(rid, None)
-                    if cb:
-                        try:
-                            cb(response=None)
-                        except Exception as cb_e:
-                            self.gcode.respond_info(
-                                f"ACE[{self.instance_num}]: Timeout callback error: {cb_e}"
-                            )
+                writable = self._tx_writable()
+                if writable:
+                    sent = self._serial.write(bytes(self._tx_buffer))
+                    del self._tx_buffer[:sent]
         except Exception as e:
             self.gcode.respond_info(f"ACE[{self.instance_num}]: Serial write error: {e}")
-            with self._lock:
-                rid = request.get('id')
-                if rid in self.inflight:
-                    self.inflight.pop(rid, None)
-                    cb = self._callback_map.pop(rid, None)
-                    if cb:
-                        try:
-                            cb(response=None)
-                        except Exception as cb_e:
-                            self.gcode.respond_info(
-                                f"ACE[{self.instance_num}]: Error callback error: {cb_e}"
-                            )
+            self._tx_buffer = bytearray()
+            self._tx_stalled_since = None
+            # The dropped bytes may hold any in-flight request; which ones
+            # is unknown, so none of them can be answered any more.
+            self._fail_inflight()
+            return
+        if writable:
+            self._tx_stalled_since = None
+            return
+
+        now = self.reactor.monotonic()
+        if self._tx_stalled_since is None:
+            self._tx_stalled_since = now
+        elif now - self._tx_stalled_since > self.TX_STALL_LIMIT_S:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: Serial port took no data for "
+                f"{now - self._tx_stalled_since:.1f}s - reconnecting"
+            )
+            self._tx_buffer = bytearray()
+            self._tx_stalled_since = None
+            self.reconnect()
 
     # ========== Frame Reading and Parsing ==========
 
@@ -1402,6 +1443,7 @@ class AceSerialManager:
         """Timer callback: send requests from queue, handle timeouts, fill window."""
         try:
             now = self.reactor.monotonic()
+            self._drain_tx()
 
             with self._lock:
                 for rid, t0 in list(self.inflight.items()):

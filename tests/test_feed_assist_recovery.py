@@ -115,6 +115,30 @@ class TestSlotReadyAssistRestore(unittest.TestCase):
         self.instance._status_update_callback(self._status('ready'))
         assert self.instance._pending_feed_assist_restore == -1
 
+    def _status_both(self, slot0_status, slot1_status):
+        return {
+            'result': {
+                'slots': [
+                    {'index': 0, 'status': slot0_status, 'rfid': 0},
+                    {'index': 1, 'status': slot1_status, 'rfid': 0},
+                ]
+            }
+        }
+
+    def test_the_assisted_slots_own_gear_shift_queues_no_restore(self):
+        # Enabling assist makes the ACE1 report the assisted slot 'shifting'
+        # for about a second (observed on a Kobra X, 4 of 5 enables); its
+        # return to ready is the enable itself, not a load of another slot.
+        self.instance.inventory[0]['status'] = 'ready'
+        self.instance._status_update_callback(self._status_both('ready', 'shifting'))
+        self.instance._status_update_callback(self._status_both('ready', 'ready'))
+        assert self.instance._pending_feed_assist_restore == -1
+
+    def test_another_slot_loading_while_the_assisted_one_shifts_still_queues(self):
+        self.instance._status_update_callback(self._status_both('preload', 'shifting'))
+        self.instance._status_update_callback(self._status_both('ready', 'ready'))
+        assert self.instance._pending_feed_assist_restore == 1
+
     def test_ace2_does_not_queue_from_slot_ready(self):
         # ACE2 stays 'busy' while assist is active - if assist survived the
         # slot load, a queued restore would hammer wait_ready against a

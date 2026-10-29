@@ -118,6 +118,21 @@ class TestStartStopMonitoring:
         # Should not raise exception
         self.reactor.unregister_timer.assert_not_called()
 
+    def test_start_monitoring_twice_keeps_one_timer(self):
+        """The ACE switch toggled on twice must not run two monitor loops."""
+        self.monitor.start_monitoring()
+        self.monitor.start_monitoring()
+
+        self.reactor.register_timer.assert_called_once()
+
+    def test_start_after_stop_registers_again(self):
+        self.monitor.start_monitoring()
+        self.monitor.stop_monitoring()
+        self.monitor.start_monitoring()
+
+        assert self.reactor.register_timer.call_count == 2
+        assert self.monitor.runout_detection_active is True
+
     def test_stop_monitoring_swallows_unregister_errors(self):
         """Stop monitoring should ignore unregister errors."""
         self.monitor.start_monitoring()
@@ -1698,7 +1713,7 @@ class TestMonitorRunoutEdgeCases:
         monitor.last_print_state = 'printing'
         monitor.prev_toolhead_sensor_state = True
         self.manager.get_switch_state.return_value = False
-        monitor._handle_runout_detected = Mock(side_effect=CmdError("shutdown now"))
+        monitor._queue_event = Mock(side_effect=CmdError("shutdown now"))
 
         result = monitor._monitor_runout(3.0)
 
@@ -1719,7 +1734,7 @@ class TestMonitorRunoutEdgeCases:
         monitor.last_print_state = 'printing'
         monitor.prev_toolhead_sensor_state = True
         self.manager.get_switch_state.return_value = False
-        monitor._handle_runout_detected = Mock(side_effect=CmdError("temporary failure"))
+        monitor._queue_event = Mock(side_effect=CmdError("temporary failure"))
 
         result = monitor._monitor_runout(4.0)
 
@@ -1738,7 +1753,7 @@ class TestMonitorRunoutEdgeCases:
         monitor.last_print_state = 'printing'
         monitor.prev_toolhead_sensor_state = True
         self.manager.get_switch_state.return_value = False
-        monitor._handle_runout_detected = Mock(side_effect=RuntimeError("boom"))
+        monitor._queue_event = Mock(side_effect=RuntimeError("boom"))
 
         result = monitor._monitor_runout(5.0)
 
@@ -2047,6 +2062,12 @@ class TestResumeWithoutFilamentNet:
         self.monitor = RunoutMonitor(
             self.printer, self.gcode, self.reactor, Mock(), self.manager
         )
+        # The queued _ACE_MONITOR_EVENT, run as Klipper runs it once the
+        # command executing now ends.
+        self.reactor.register_callback = lambda callback: callback(0.0)
+        self.gcode.run_script = lambda script: (
+            self.monitor._handle_resume_without_filament(
+                int(script.rsplit("TOOL=", 1)[1])))
 
     def _pause_calls(self):
         return [
@@ -2063,6 +2084,15 @@ class TestResumeWithoutFilamentNet:
         ]
         assert prompts
         assert self.monitor._resume_no_filament_warned is True
+
+    def test_the_dry_resume_pause_waits_for_the_running_command(self):
+        # Seen on the RESUME's state change, inside the monitor timer: no
+        # G-code runs there, the pause is queued.
+        queued = []
+        self.reactor.register_callback = queued.append
+        self.monitor._check_resume_without_filament(5, sensor_present=False)
+        assert not self._pause_calls()
+        assert len(queued) == 1
 
     def test_second_dry_resume_proceeds_unhindered(self):
         # After the one warning, "Resume anyway" must actually resume
@@ -2122,3 +2152,94 @@ class TestRunoutDisablesAssist:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestRunoutAtTheIntake:
+    """With an intake transfer (the Kobra X), the runout comes from the
+    intake sensor, and after the pause the cut old piece is pulled back off
+    the toolhead sensor before the prompt, so Retry and endless spool find
+    the tool unloaded. A slot that still reads filament is a break or a
+    jam: no endless spool."""
+
+    def setup_method(self):
+        self.printer = Mock()
+        self.gcode = Mock()
+        self.reactor = Mock()
+        self.endless_spool = Mock()
+        self.manager = Mock()
+        self.save_vars = Mock()
+        self.save_vars.allVariables = {'ace_current_index': 0,
+                                       'ace_endless_spool_enabled': True}
+        self.manager.state.get = lambda key, default=None: (
+            self.save_vars.allVariables.get(key, default))
+        self.manager.toolchange_in_progress = False
+        self.manager.has_intake_transfer = Mock(return_value=True)
+        self.manager.slot_reads_empty = Mock(return_value=True)
+        self.order = []
+        self.manager.park_after_runout = Mock(
+            side_effect=lambda tool: self.order.append('park'))
+        self.gcode.run_script_from_command = Mock(
+            side_effect=lambda script: self.order.append(script))
+        self.endless_spool.find_exact_match = Mock(return_value=4)
+        self.endless_spool.execute_swap = Mock(
+            side_effect=lambda a, b: self.order.append('swap'))
+        self.printer.lookup_object = Mock(return_value=None)
+        self.monitor = RunoutMonitor(self.printer, self.gcode, self.reactor,
+                                     self.endless_spool, self.manager)
+
+    def handle(self):
+        with patch('ace.runout_monitor.get_instance_from_tool', return_value=0), \
+                patch('ace.runout_monitor.get_local_slot', return_value=0), \
+                patch('ace.runout_monitor.ACE_INSTANCES') as instances:
+            instances.get = Mock(return_value=None)
+            self.monitor._handle_runout_detected(0)
+
+    def first(self, needle):
+        return next(i for i, step in enumerate(self.order) if needle in step)
+
+    def test_the_old_piece_is_parked_after_the_pause_before_the_prompt(self):
+        self.handle()
+        self.manager.park_after_runout.assert_called_once_with(0)
+        assert self.first('PAUSE') < self.order.index('park') \
+            < self.first('prompt_begin'), self.order
+
+    def test_an_empty_slot_still_swaps_with_endless_spool(self):
+        self.handle()
+        assert 'swap' in self.order
+
+    def test_a_slot_that_still_has_filament_pauses_without_endless_spool(self):
+        self.manager.slot_reads_empty = Mock(return_value=False)
+        self.handle()
+        assert 'swap' not in self.order
+        messages = " ".join(c[0][0] for c in self.gcode.respond_info.call_args_list)
+        assert 'broken' in messages.lower(), messages
+
+    def test_a_failed_park_still_shows_the_prompt_and_does_not_swap(self):
+        self.manager.park_after_runout = Mock(side_effect=Exception("cutter"))
+        self.handle()
+        assert any('prompt_begin' in step for step in self.order), self.order
+        assert 'swap' not in self.order
+
+    def test_without_an_intake_transfer_nothing_new_runs(self):
+        self.manager.has_intake_transfer = Mock(return_value=False)
+        self.handle()
+        self.manager.park_after_runout.assert_not_called()
+        assert 'swap' in self.order
+
+    def test_the_runout_edge_is_read_from_the_runout_sensor(self):
+        from ace.config import SENSOR_RUNOUT
+        reads = {SENSOR_RUNOUT: True, SENSOR_TOOLHEAD: True}
+        self.manager.get_switch_state = Mock(side_effect=lambda name: reads[name])
+        print_stats = Mock()
+        print_stats.get_status = Mock(return_value={'state': 'printing'})
+        self.printer.lookup_object = Mock(
+            side_effect=lambda name, default=None: print_stats
+            if name == 'print_stats' else default)
+        self.monitor.runout_detection_active = True
+        self.monitor.last_printing_active = True
+        self.monitor.last_print_state = 'printing'
+        self.monitor.prev_toolhead_sensor_state = True
+        self.monitor._queue_event = Mock()
+        reads[SENSOR_RUNOUT] = False        # the switch below the gear stays
+        self.monitor._monitor_runout(1.0)
+        self.monitor._queue_event.assert_called_once_with("runout", 0)

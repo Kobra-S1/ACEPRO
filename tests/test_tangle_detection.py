@@ -1,5 +1,6 @@
 """Tests for ACE pump_time tangle detection in RunoutMonitor."""
 from unittest.mock import Mock, patch
+from ace import monitor_events
 from ace.runout_monitor import RunoutMonitor
 
 
@@ -49,7 +50,21 @@ def _make_monitor(tangle_detection=True, tangle_pump_time=None,
         tangle_verify_time=tangle_verify_time,
         tangle_pump_time_hard=tangle_pump_time_hard,
     )
+    _run_queued_events(monitor)
     return monitor, manager, gcode
+
+
+def _run_queued_events(monitor):
+    """Run the monitor's queued events as Klipper does once the running
+    command ends: the callback, then the _ACE_MONITOR_EVENT command's
+    handler (its print-state check is test_monitor_events')."""
+    monitor.reactor.register_callback = lambda callback: callback(0.0)
+
+    def run_script(script):
+        params = dict(p.split("=", 1) for p in script.split()[1:])
+        handler = monitor_events.HANDLERS[params["EVENT"]]
+        getattr(monitor, handler)(int(params["TOOL"]))
+    monitor.gcode.run_script = run_script
 
 
 def _pause_calls(gcode):
@@ -65,6 +80,8 @@ def _setup_printing_state(monitor, manager, gcode):
     stats_obj.get_status.return_value = {"state": "printing"}
     save_vars = Mock()
     save_vars.allVariables = {"ace_current_index": 0}
+    # A tangle stops the print file at once (send_pause_command).
+    pause_resume = Mock()
     manager.state = Mock()
     manager.state.get = lambda k, d=None: save_vars.allVariables.get(k, d)
 
@@ -73,6 +90,8 @@ def _setup_printing_state(monitor, manager, gcode):
             return stats_obj
         if name == "save_variables":
             return save_vars
+        if name == "pause_resume":
+            return pause_resume
         if default is not None:
             return default
         raise Exception(name)
@@ -385,6 +404,18 @@ class TestVerdictWindow:
             instances=[inst], tangle_pump_time=4.0, tangle_verify_time=0.0)
         self._cross_threshold(monitor, inst)
         assert _pause_calls(gcode)
+
+    def test_the_tangle_pause_waits_for_the_running_command(self):
+        # On the monitor timer no G-code runs: the file stops, and PAUSE
+        # comes with the queued _ACE_MONITOR_EVENT (test_monitor_events).
+        inst = _make_instance()
+        monitor, _m, gcode = _make_monitor(
+            instances=[inst], tangle_pump_time=4.0, tangle_verify_time=0.0)
+        queued = []
+        monitor.reactor.register_callback = queued.append
+        self._cross_threshold(monitor, inst)
+        assert not _pause_calls(gcode)
+        assert len(queued) == 1
 
 
 class TestHardCeiling:

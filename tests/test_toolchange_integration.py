@@ -318,6 +318,23 @@ class TestToolChangeIntegration(unittest.TestCase):
         self.assertTrue(any('_ACE_PRE_TOOLCHANGE' in cmd for cmd in self.gcode_commands))
         self.assertTrue(any('_ACE_POST_TOOLCHANGE' in cmd for cmd in self.gcode_commands))
     
+    def test_a_load_after_a_runout_park_ends_the_pull_through(self):
+        """After a runout the old piece sat in T0's path; the load pulled it
+        through, so the next one does not again, and the runout monitor's
+        baseline comes from the runout sensor (the intake), not the
+        toolhead switch."""
+        manager = self._create_manager()
+        manager.runout_reload_length = 55.0
+        manager._runout_piece = 0
+        # The intake sees the new filament; this fixture registers no
+        # toolhead sensor, which then reads False.
+        manager._runout_presence = Mock(return_value=True)
+
+        manager.perform_tool_change(current_tool=-1, target_tool=0)
+
+        self.assertEqual(manager.runout_reload_length_for(0), 0.0)
+        self.assertIs(manager.runout_monitor.prev_toolhead_sensor_state, True)
+
     def test_load_tool_ace1_from_empty(self):
         """
         Test: No tool loaded → Load tool on ACE1 (T4)

@@ -19,6 +19,7 @@ from ace.ace2_bus import Ace2BusSession
 from ace.instance import AceInstance
 from ace.config import (
     ACE_INSTANCES,
+    FeedAbortedByFirmware,
     INSTANCE_MANAGERS,
     SLOTS_PER_ACE,
     SENSOR_TOOLHEAD,
@@ -81,6 +82,38 @@ class TestAceInstance(unittest.TestCase):
         elif name == 'save_variables':
             return self.mock_save_vars
         return default
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_tool_with_its_own_tube_parks_just_clear_of_the_toolhead(self, mock_serial_mgr_class):
+        """toolhead_paths: per_tool - every ACE pull to the park position
+        uses toolhead_clear_length; the hub tube's length stays configured
+        and unused."""
+        ace_config = dict(self.ace_config, toolhead_paths="per_tool",
+                          toolhead_clear_length=25.0)
+
+        instance = AceInstance(0, ace_config, self.mock_printer, ace_enabled=True)
+
+        self.assertEqual(instance.parkposition_to_toolhead_length, 25.0)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_layout_asked_of_the_printer_applies_once_it_is_known(self, mock_serial_mgr_class):
+        ace_config = dict(self.ace_config, toolhead_paths="kx_toolchanger",
+                          toolhead_clear_length=25.0)
+        instance = AceInstance(0, ace_config, self.mock_printer, ace_enabled=True)
+
+        instance.apply_toolhead_paths("per_tool")
+
+        self.assertEqual(instance.parkposition_to_toolhead_length, 25.0)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_tools_sharing_a_tube_park_behind_the_hub(self, mock_serial_mgr_class):
+        ace_config = dict(self.ace_config, toolhead_paths="shared",
+                          toolhead_clear_length=25.0)
+
+        instance = AceInstance(0, ace_config, self.mock_printer, ace_enabled=True)
+
+        self.assertEqual(instance.parkposition_to_toolhead_length,
+                         float(self.ace_config['parkposition_to_toolhead_length']))
 
     @patch('ace.instance.AceSerialManager')
     def test_instance_initialization(self, mock_serial_mgr_class):
@@ -340,6 +373,43 @@ class TestAceInstance(unittest.TestCase):
         )
         self.mock_reactor.register_timer.assert_called_once()
         self.assertEqual(instance._shared_bus_heartbeat_timer, 'heartbeat-timer')
+
+    def _bound_ace2_instance(self):
+        ace_config = dict(self.ace_config)
+        ace_config['protocol'] = 'ace2_proto'
+        bus_session = Ace2BusSession(port='/dev/ttyUSB0')
+        bus_session.bind_logical_instance(0, 11, 22, 33)
+        bus_session.assign_device_id(11, 22, 33, 7)
+        instance = AceInstance(0, ace_config, self.mock_printer, bus_session=bus_session)
+        instance.serial_mgr.is_connected.return_value = True
+        return instance
+
+    @patch('ace.instance.AceSerialManager')
+    def test_shared_bus_heartbeat_pauses_during_firmware_update(self, mock_serial_mgr_class):
+        """No status poll may interleave with an IAP transfer; polling resumes after."""
+        instance = self._bound_ace2_instance()
+
+        instance.set_firmware_update_active(True)
+        instance._send_shared_bus_heartbeat_request()
+        instance.serial_mgr.send_high_prio_request.assert_not_called()
+
+        instance.set_firmware_update_active(False)
+        instance._send_shared_bus_heartbeat_request()
+        instance.serial_mgr.send_high_prio_request.assert_called_once()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_iap_requests_are_addressed_to_the_bound_device(self, mock_serial_mgr_class):
+        """IAP frames carry the box's assigned id, never the discovery address 0."""
+        instance = self._bound_ace2_instance()
+        callback = Mock()
+
+        instance.send_high_prio_request(
+            instance.protocol.build_iap_firmware_request(0x08024000, bytes(64)), callback)
+
+        request, sent_callback = instance.serial_mgr.send_high_prio_request.call_args[0]
+        self.assertEqual(request['command'], 'IAP_FIRMWARE')
+        self.assertEqual(request['target_device_id'], 7)
+        self.assertIs(sent_callback, callback)
 
     @patch('ace.instance.AceSerialManager')
     def test_request_shared_bus_info_refresh_uses_targeted_get_info(self, mock_serial_mgr_class):
@@ -728,6 +798,24 @@ class TestRetract(unittest.TestCase):
         instance.serial_mgr.send_request.assert_not_called()
 
     @patch('ace.instance.AceSerialManager')
+    def test_a_retract_of_no_or_negative_length_is_not_sent(self, mock_serial_mgr_class):
+        """The ACE takes a negative length as 'keep pulling': it wound a
+        parked filament all the way out of the tube."""
+        for length in (0, -80.0):
+            instance = AceInstance(0, self.ace_config, self.mock_printer)
+            INSTANCE_MANAGERS[0] = Mock()
+            instance._info['slots'] = [{'index': 1, 'status': 'ready'}]
+            instance.wait_ready = Mock()
+            instance.send_request = Mock()
+            instance.serial_mgr.send_request = Mock()
+
+            response = instance._retract(1, length, 50)
+
+            instance.send_request.assert_not_called()
+            instance.serial_mgr.send_request.assert_not_called()
+            self.assertEqual(response["code"], 0)
+
+    @patch('ace.instance.AceSerialManager')
     def test_retract_success_with_callbacks(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         instance._info['slots'] = [{'index': 0, 'status': 'ready'}]
@@ -816,7 +904,7 @@ class TestRetract(unittest.TestCase):
         self.assertEqual(sent_request.get("target_device_id"), 7)
 
 
-class TestFeedFilamentIntoToolhead(unittest.TestCase):
+class TestFeedFilamentIntoToolheadRetries(unittest.TestCase):
     """Branch coverage for _feed_filament_into_toolhead."""
 
     def setUp(self):
@@ -862,35 +950,6 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         }
 
     @patch('ace.instance.AceSerialManager')
-    def test_successful_feed_sets_positions_and_moves_extruder(self, mock_serial_mgr_class):
-        instance = AceInstance(0, self.ace_config, self.mock_printer)
-        manager = Mock()
-        manager.has_rdm_sensor.return_value = False
-        manager.get_switch_state.return_value = False
-        INSTANCE_MANAGERS[0] = manager
-
-        instance.wait_ready = Mock()
-        instance._feed_to_toolhead_with_extruder_assist = Mock(return_value=None)
-        instance._extruder_move = Mock()
-
-        result = instance._feed_filament_into_toolhead(1)
-
-        self.assertEqual(result, instance.toolhead_full_purge_length)
-        instance._feed_to_toolhead_with_extruder_assist.assert_called_once()
-        instance._extruder_move.assert_called_once_with(
-            instance.toolhead_full_purge_length,
-            instance.toolhead_slow_loading_speed
-        )
-        # Toolhead wait_moves called once
-        toolhead = self.mock_printer.lookup_object('toolhead')
-        toolhead.wait_moves.assert_called_once()
-        # Two position updates: toolhead (set) then nozzle (set)
-        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
-        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_NOZZLE)
-        # G92 command sent
-        self.mock_gcode.run_script_from_command.assert_called_once_with("G92 E0")
-
-    @patch('ace.instance.AceSerialManager')
     def test_precondition_blocks_on_rdm_sensor(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
@@ -924,24 +983,26 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         manager.state.set_and_save.assert_not_called()
 
     @patch('ace.instance.AceSerialManager')
-    def test_precondition_skipped_when_flag_false(self, mock_serial_mgr_class):
-        """Sensors ignored when check_pre_condition is False."""
+    def test_firmware_aborted_feed_is_not_pulled_back(self, mock_serial_mgr_class):
+        # The device stopped its own gears on a stall; a pull-back of the
+        # usual 150 mm after a stall within the first 150 mm takes the
+        # filament out of the gears, and nothing upstream was pushed.
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         manager = Mock()
-        manager.has_rdm_sensor.return_value = True
-        manager.get_switch_state = Mock(return_value=True)  # would block if checked
+        manager.has_rdm_sensor.return_value = False
+        manager.get_switch_state.return_value = False
         INSTANCE_MANAGERS[0] = manager
 
         instance.wait_ready = Mock()
-        instance._feed_to_toolhead_with_extruder_assist = Mock(return_value=None)
+        instance._feed_to_toolhead_with_extruder_assist = Mock(
+            side_effect=FeedAbortedByFirmware("feed_error"))
+        instance._retract = Mock()
         instance._extruder_move = Mock()
 
-        result = instance._feed_filament_into_toolhead(0, check_pre_condition=False)
+        with self.assertRaises(FeedAbortedByFirmware):
+            instance._feed_filament_into_toolhead(0)
 
-        self.assertEqual(result, instance.toolhead_full_purge_length)
-        manager.get_switch_state.assert_not_called()
-        manager.state.set.assert_called_once_with("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
-        manager.state.set_and_save.assert_called_once_with("ace_filament_pos", FILAMENT_STATE_NOZZLE)
+        instance._retract.assert_not_called()
 
     @patch('ace.instance.AceSerialManager')
     def test_precondition_blocks_toolhead_when_rdm_available(self, mock_serial_mgr_class):
@@ -1483,6 +1544,52 @@ class TestFeedAssist(unittest.TestCase):
         instance.send_request.assert_called_once()
         self.assertEqual(instance._feed_assist_index, -1)
         instance.dwell.assert_called_once_with(1.0)
+
+    def _instance_stopping_assist(self):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._feed_assist_index = 1
+        instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 0}))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+        self.mock_reactor.monotonic.return_value = 50.0
+        self.assertTrue(instance._send_feed_assist_stop(1))
+        instance.wait_ready.reset_mock()
+        return instance
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_stop_sent_long_ago_needs_no_further_settling(self, mock_serial_mgr_class):
+        """Split stop: the caller did other work (a cut) since the send."""
+        instance = self._instance_stopping_assist()
+        self.mock_reactor.monotonic.return_value = 56.0
+
+        instance._await_feed_assist_stopped()
+
+        instance.dwell.assert_not_called()
+        instance.wait_ready.assert_called_once_with()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_stop_sent_just_now_settles_for_the_rest_of_the_time(self, mock_serial_mgr_class):
+        instance = self._instance_stopping_assist()
+        self.mock_reactor.monotonic.return_value = 50.4
+
+        instance._await_feed_assist_stopped()
+
+        (settled_for,), _ = instance.dwell.call_args
+        self.assertAlmostEqual(settled_for, 0.6)
+        instance.wait_ready.assert_called_once_with()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_stop_for_an_inactive_slot_sends_nothing(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._feed_assist_index = 2
+        instance.send_request = Mock()
+
+        self.assertFalse(instance._send_feed_assist_stop(1))
+
+        instance.send_request.assert_not_called()
+        self.assertEqual(instance._feed_assist_index, 2)
 
     @patch('ace.instance.AceSerialManager')
     def test_disable_feed_assist_ace1_still_waits(self, mock_serial_mgr_class):
@@ -2730,8 +2837,138 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         
         self.assertIn("filament stuck in RMS", str(context.exception))
 
+    def _instance_with_failing_feeds(self, failures, retries):
+        """An instance whose feed to the toolhead fails `failures` times,
+        then succeeds; every step is recorded in self.steps."""
+        instance = AceInstance(0, dict(self.ace_config, toolhead_load_retries=retries),
+                               self.mock_printer)
+        self.steps = []
+        objects = {'gcode': self.mock_gcode, 'save_variables': self.mock_save_vars,
+                   'toolhead': Mock()}
+        self.mock_printer.lookup_object.side_effect = (
+            lambda name, default=None: objects.get(name, default))
+        manager = Mock()
+        manager.route_to_tool = Mock(
+            side_effect=lambda tool, feeder: self.steps.append(f"route {tool} {feeder}"))
+        INSTANCE_MANAGERS[0] = manager
+        outcomes = [ValueError("sensor not triggering")] * failures + [None]
 
-class TestSmartUnloadSlot(unittest.TestCase):
+        def feed(*args):
+            self.steps.append("feed")
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        instance.wait_ready = Mock()
+        instance._feed_to_toolhead_with_extruder_assist = Mock(side_effect=feed)
+        instance._retract = Mock(side_effect=lambda *a: self.steps.append("retract"))
+        instance._extruder_move = Mock()
+        return instance
+
+    @patch('ace.instance.AceSerialManager')
+    def test_an_intake_gated_load_replaces_the_default_feed(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=0, retries=0)
+        instance.transfer = Mock()
+        instance.transfer.load.side_effect = (
+            lambda slot, parked, push_through: self.steps.append(
+                f"transfer {slot} parked={parked} push={push_through:g}"))
+        instance.manager.is_parked = Mock(return_value=False)
+        instance.manager.runout_reload_length_for = Mock(return_value=0.)
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps, ["transfer 2 parked=False push=0"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_load_after_a_runout_park_pulls_through(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=0, retries=0)
+        instance.transfer = Mock()
+        instance.transfer.load.side_effect = (
+            lambda slot, parked, push_through: self.steps.append(
+                f"transfer {slot} parked={parked} push={push_through:g}"))
+        instance.manager.is_parked = Mock(return_value=False)
+        instance.manager.runout_reload_length_for = Mock(return_value=55.)
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps, ["transfer 2 parked=False push=55"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_parked_tool_is_resumed_and_a_retry_feeds_from_the_ace(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=0, retries=1)
+        outcomes = [ValueError("no sensor"), None]
+
+        def load(slot, parked, push_through):
+            self.steps.append(f"transfer parked={parked}")
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        instance.transfer = Mock()
+        instance.transfer.load.side_effect = load
+        instance.manager.is_parked = Mock(return_value=True)
+        instance.manager.runout_reload_length_for = Mock(return_value=0.)
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        # The failed attempt's 150 mm pull-back ended the park.
+        self.assertEqual(
+            [s for s in self.steps if s.startswith("transfer")],
+            ["transfer parked=True", "transfer parked=False"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_an_intake_gated_retry_routes_for_the_extruder(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=0, retries=1)
+        outcomes = [ValueError("no intake"), None]
+
+        def load(slot, parked, push_through):
+            self.steps.append("transfer")
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        instance.transfer = Mock()
+        instance.transfer.load.side_effect = load
+        instance.manager.is_parked = Mock(return_value=False)
+        instance.manager.runout_reload_length_for = Mock(return_value=0.)
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        # The gear may hold the filament: the ACE pulls it back only once
+        # the route has freed it.
+        self.assertEqual(
+            self.steps, ["transfer", "route 2 ACE", "retract",
+                         "route 2 EXTRUDER", "transfer"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_failed_feed_is_retried_with_the_path_reopened(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=1, retries=2)
+
+        instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps, ["feed", "retract", "route 2 ACE", "feed"])
+
+    @patch('ace.instance.AceSerialManager')
+    def test_the_last_failed_feed_raises(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=3, retries=2)
+
+        with self.assertRaises(ValueError):
+            instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps.count("feed"), 3)
+        self.assertEqual(self.steps[-1], "retract")
+
+    @patch('ace.instance.AceSerialManager')
+    def test_without_configured_retries_one_failure_raises(self, mock_serial_mgr_class):
+        instance = self._instance_with_failing_feeds(failures=1, retries=0)
+
+        with self.assertRaises(ValueError):
+            instance._feed_filament_into_toolhead(2, check_pre_condition=False)
+
+        self.assertEqual(self.steps, ["feed", "retract"])
+
+
+class TestSmartUnloadSlotEarlyStop(unittest.TestCase):
     """Test smart unload slot functionality."""
 
     def setUp(self):
@@ -3809,7 +4046,23 @@ class TestExtruderMove(unittest.TestCase):
             return self.mock_save_vars
         if name == 'toolhead':
             return self.mock_toolhead
+        if name == 'gcode_move':
+            return self.mock_gcode_move
         return default
+
+    mock_gcode_move = Mock()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_the_gcode_position_follows_the_move(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        self.mock_toolhead.get_position.return_value = [1, 2, 3, 4]
+        order = Mock()
+        self.mock_toolhead.move = order.move
+        self.mock_gcode_move.reset_last_position = order.reset
+
+        instance._extruder_move(45, 4)
+
+        self.assertEqual([call[0] for call in order.mock_calls], ["move", "reset"])
 
     @patch('ace.instance.AceSerialManager')
     def test_skips_zero_length_move(self, mock_serial_mgr_class):
@@ -4136,7 +4389,10 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
         instance._update_feed_assist = Mock()
 
         # Mock _retract to invoke the early_stop_callback once (simulates dwell loop)
-        def mock_retract(slot, length, speed, early_stop_callback=None):
+        def mock_retract(slot, length, speed, on_retract_started=None,
+                         early_stop_callback=None):
+            if on_retract_started:
+                on_retract_started()
             if early_stop_callback:
                 early_stop_callback()
             return {'code': 0, 'msg': 'OK'}
@@ -4148,11 +4404,10 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
 
         self.assertTrue(result)
         instance._disable_feed_assist.assert_called_once_with(1)
-        # _retract called with early_stop_callback kwarg
-        instance._retract.assert_called_once()
-        call_kwargs = instance._retract.call_args[1]
-        self.assertIn('early_stop_callback', call_kwargs)
-        self.assertIsNotNone(call_kwargs['early_stop_callback'])
+        # The RDM-monitored retract, then the overshoot as a move of its own
+        monitored, overshoot = instance._retract.call_args_list
+        self.assertIsNotNone(monitored[1].get('early_stop_callback'))
+        self.assertEqual(overshoot[0], (1, 20, 100.0))
         instance._update_feed_assist.assert_called_once_with(2)
 
     @patch('ace.instance.AceSerialManager')
@@ -4171,7 +4426,10 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
         instance._get_current_feed_assist_index = Mock(return_value=2)
         instance._update_feed_assist = Mock()
 
-        def mock_retract(slot, length, speed, early_stop_callback=None):
+        def mock_retract(slot, length, speed, on_retract_started=None,
+                         early_stop_callback=None):
+            if on_retract_started:
+                on_retract_started()
             if early_stop_callback:
                 early_stop_callback()
             return {'code': 0, 'msg': 'OK'}

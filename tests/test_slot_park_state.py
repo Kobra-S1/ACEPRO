@@ -146,7 +146,10 @@ class TestSlotParkState(unittest.TestCase):
         instance._get_current_feed_assist_index = Mock(return_value=-1)
         instance._update_feed_assist = Mock()
 
-        def mock_retract(slot, length, speed, early_stop_callback=None):
+        def mock_retract(slot, length, speed, on_retract_started=None,
+                         early_stop_callback=None):
+            if on_retract_started:
+                on_retract_started()
             instance.set_slot_park_state(slot, SLOT_PARK_STATE_UNKNOWN)  # like the real _retract
             if early_stop_callback:
                 early_stop_callback()
@@ -170,7 +173,10 @@ class TestSlotParkState(unittest.TestCase):
         instance._get_current_feed_assist_index = Mock(return_value=-1)
         instance._update_feed_assist = Mock()
 
-        def mock_retract(slot, length, speed, early_stop_callback=None):
+        def mock_retract(slot, length, speed, on_retract_started=None,
+                         early_stop_callback=None):
+            if on_retract_started:
+                on_retract_started()
             instance.set_slot_park_state(slot, SLOT_PARK_STATE_UNKNOWN)
             return {'code': 0, 'msg': 'OK'}
         instance._retract = Mock(side_effect=mock_retract)
@@ -192,7 +198,10 @@ class TestSlotParkState(unittest.TestCase):
         instance._get_current_feed_assist_index = Mock(return_value=-1)
         instance._update_feed_assist = Mock()
 
-        def mock_retract(slot, length, speed, early_stop_callback=None):
+        def mock_retract(slot, length, speed, on_retract_started=None,
+                         early_stop_callback=None):
+            if on_retract_started:
+                on_retract_started()
             instance.set_slot_park_state(slot, SLOT_PARK_STATE_UNKNOWN)
             return {'code': 0, 'msg': 'Retract skipped: slot empty'}
         instance._retract = Mock(side_effect=mock_retract)
@@ -342,7 +351,10 @@ class TestSlotParkState(unittest.TestCase):
         instance._update_feed_assist = Mock()
         instance._stop_retract = Mock()
 
-        def mock_retract(slot, length, speed, early_stop_callback=None):
+        def mock_retract(slot, length, speed, on_retract_started=None,
+                         early_stop_callback=None):
+            if on_retract_started:
+                on_retract_started()
             instance.set_slot_park_state(slot, SLOT_PARK_STATE_UNKNOWN)
             if early_stop_callback:
                 early_stop_callback()

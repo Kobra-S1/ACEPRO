@@ -6,9 +6,14 @@ instances based on INSTANCE parameter or tool mapping.
 """
 
 import json
+import os
 import traceback
 import logging
 
+from . import ace2_ota
+from . import connection_pause
+from . import monitor_events
+from . import print_tools
 from .version import get_driver_version
 from .config import (
     ACE_INSTANCES,
@@ -25,6 +30,8 @@ from .config import (
     RFID_STATE_IDENTIFYING,
     get_instance_from_tool,
     get_local_slot,
+    get_tool_offset,
+    SLOTS_PER_ACE,
     OVERRIDABLE_PARAMS,
 )
 
@@ -181,6 +188,11 @@ def safe_gcode_command(func):
         try:
             return func(gcmd)
         except Exception as e:
+            # A G-code error is the command's answer to its caller (a macro,
+            # a printer-side tool changer, the start sequence) and is safe to
+            # raise; only other exceptions would shut Klipper down.
+            if isinstance(gcmd.error, type) and isinstance(e, gcmd.error):
+                raise
             traceback.print_exc()
             error_msg = f"ACE ERROR: {type(e).__name__}: {e}"
             gcmd.respond_info(error_msg)
@@ -220,7 +232,7 @@ def safe_gcode_command(func):
 
 
 def cmd_ACE_GET_STATUS(gcmd):
-    """Query ACE status. INSTANCE= or TOOL= (omit to query all instances). VERBOSE=1 for detailed output."""
+    """Query ACE status. INSTANCE= (omit to query all instances). VERBOSE=1 for detailed output."""
     try:
         instance_num = gcmd.get_int("INSTANCE", None)
         verbose = gcmd.get_int("VERBOSE", 0)
@@ -653,7 +665,7 @@ def cmd_ACE_FEED(gcmd):
         validate_feed_and_retract_arguments(gcmd, ace, slot, length, speed)
         ace._feed(slot, length, speed)
     except Exception as e:
-        gcmd.respond_info(f"ACE_FEED error: {e}")
+        raise gcmd.error(f"ACE_FEED error: {e}") from e
 
 
 def cmd_ACE_STOP_FEED(gcmd):
@@ -666,7 +678,7 @@ def cmd_ACE_STOP_FEED(gcmd):
 
         ace._stop_feed(slot)
     except Exception as e:
-        gcmd.respond_info(f"ACE_STOP_FEED error: {e}")
+        raise gcmd.error(f"ACE_STOP_FEED error: {e}") from e
 
 
 def cmd_ACE_RETRACT(gcmd):
@@ -679,7 +691,7 @@ def cmd_ACE_RETRACT(gcmd):
         validate_feed_and_retract_arguments(gcmd, ace, slot, length, speed)
         ace._retract(slot, length, speed)
     except Exception as e:
-        gcmd.respond_info(f"ACE_RETRACT error: {e}")
+        raise gcmd.error(f"ACE_RETRACT error: {e}") from e
 
 
 def cmd_ACE_STOP_RETRACT(gcmd):
@@ -692,7 +704,7 @@ def cmd_ACE_STOP_RETRACT(gcmd):
 
         ace._stop_retract(slot)
     except Exception as e:
-        gcmd.respond_info(f"ACE_STOP_RETRACT error: {e}")
+        raise gcmd.error(f"ACE_STOP_RETRACT error: {e}") from e
 
 
 # Predefined color names mapping (0.0-1.0 float range converted to 0-255 RGB)
@@ -760,7 +772,7 @@ def cmd_ACE_SET_SLOT(gcmd):
         manager._sync_inventory_to_persistent(ace.instance_num)
         gcmd.respond_info(f"Slot {idx}: color={color}, material={material}, temp={temp}")
     except Exception as e:
-        gcmd.respond_info(f"ACE_SET_SLOT error: {e}")
+        raise gcmd.error(f"ACE_SET_SLOT error: {e}") from e
 
 
 def cmd_ACE_SAVE_INVENTORY(gcmd):
@@ -769,6 +781,21 @@ def cmd_ACE_SAVE_INVENTORY(gcmd):
     manager = ace_get_manager(ace.instance_num)
     manager._sync_inventory_to_persistent(ace.instance_num)
     gcmd.respond_info("Inventory saved")
+
+
+def _dryer_start_callback(gcmd, inst_num, ace, temperature, duration):
+    """Response handler for a dryer start: reports the start once until a
+    confirmed stop (_dryer_stop_callback) re-arms it."""
+    def callback(response):
+        if response and response.get("code") == 0:
+            if not getattr(ace, "_dryer_start_logged", False):
+                gcmd.respond_info(f"ACE[{inst_num}]: Dryer started: {temperature}°C for {duration}min")
+                ace._dryer_start_logged = True
+        else:
+            msg = response.get("msg", "Unknown error") if response else ""
+            gcmd.respond_info(f"ACE[{inst_num}]: Dryer start failed: {msg}")
+
+    return callback
 
 
 def cmd_ACE_START_DRYING(gcmd):
@@ -791,16 +818,8 @@ def cmd_ACE_START_DRYING(gcmd):
             if temperature <= 0 or temperature > ace.max_dryer_temperature:
                 raise gcmd.error(f"TEMP must be between 1 and {ace.max_dryer_temperature}°C")
 
-            def callback(response):
-                if response and response.get("code") == 0:
-                    if not getattr(ace, "_dryer_start_logged", False):
-                        gcmd.respond_info(f"ACE[{instance_num}]: Dryer started: {temperature}°C for {duration}min")
-                        ace._dryer_start_logged = True
-                else:
-                    msg = response.get("msg", "Unknown error") if response else ""
-                    gcmd.respond_info(f"ACE[{instance_num}]: Dryer start failed: {msg}")
-
-            ace.start_drying(temperature, duration, callback)
+            ace.start_drying(temperature, duration,
+                             _dryer_start_callback(gcmd, instance_num, ace, temperature, duration))
         else:
             if len(ACE_INSTANCES) > 1:
                 gcmd.respond_info(
@@ -812,21 +831,27 @@ def cmd_ACE_START_DRYING(gcmd):
                     gcmd.respond_info(f"ACE[{inst_num}]: Temp {temperature}°C out of range, skipping")
                     return
 
-                def callback(response):
-                    if response and response.get("code") == 0:
-                        if not getattr(ace, "_dryer_start_logged", False):
-                            gcmd.respond_info(f"ACE[{inst_num}]: Dryer started: {temperature}°C for {duration}min")
-                            ace._dryer_start_logged = True
-                    else:
-                        msg = response.get("msg", "Unknown error") if response else ""
-                        gcmd.respond_info(f"ACE[{inst_num}]: Dryer start failed: {msg}")
-
-                ace.start_drying(temperature, duration, callback)
+                ace.start_drying(temperature, duration,
+                                 _dryer_start_callback(gcmd, inst_num, ace, temperature, duration))
 
             for_each_instance(start_dryer)
 
     except Exception as e:
         gcmd.respond_info(f"ACE_START_DRYING error: {e}")
+
+
+def _dryer_stop_callback(gcmd, inst_num, ace):
+    """Response handler for a dryer stop: a confirmed stop lets the next
+    start report itself again."""
+    def callback(response):
+        if response and response.get("code") == 0:
+            gcmd.respond_info(f"ACE[{inst_num}]: Dryer stopped")
+            ace._dryer_start_logged = False
+        else:
+            msg = response.get("msg", "Unknown error") if response else ""
+            gcmd.respond_info(f"ACE[{inst_num}]: Dryer stop failed: {msg}")
+
+    return callback
 
 
 def cmd_ACE_STOP_DRYING(gcmd):
@@ -836,16 +861,7 @@ def cmd_ACE_STOP_DRYING(gcmd):
 
         if instance_num is not None:
             ace = ace_get_instance(gcmd)
-
-            def callback(response):
-                if response and response.get("code") == 0:
-                    gcmd.respond_info(f"ACE[{instance_num}]: Dryer stopped")
-                    ace._dryer_start_logged = False
-                else:
-                    msg = response.get("msg", "Unknown error") if response else ""
-                    gcmd.respond_info(f"ACE[{instance_num}]: Dryer stop failed: {msg}")
-
-            ace.stop_drying(callback)
+            ace.stop_drying(_dryer_stop_callback(gcmd, instance_num, ace))
         else:
             if len(ACE_INSTANCES) > 1:
                 gcmd.respond_info(
@@ -853,14 +869,7 @@ def cmd_ACE_STOP_DRYING(gcmd):
                 )
 
             def stop_dryer(inst_num, manager, ace):
-                def callback(response):
-                    if response and response.get("code") == 0:
-                        gcmd.respond_info(f"ACE[{inst_num}]: Dryer stopped")
-                    else:
-                        msg = response.get("msg", "Unknown error") if response else ""
-                        gcmd.respond_info(f"ACE[{inst_num}]: Dryer stop failed: {msg}")
-
-                ace.stop_drying(callback)
+                ace.stop_drying(_dryer_stop_callback(gcmd, inst_num, ace))
 
             for_each_instance(stop_dryer)
 
@@ -947,8 +956,7 @@ def cmd_ACE_QUERY_SLOTS(gcmd):
         if not ace_connected and status != 'empty':
             status = '???'
 
-        # Calculate tool number: instance 0 slot 0 = T0, instance 1 slot 0 = T4, etc.
-        tool_num = (inst_num * 4) + idx
+        tool_num = get_tool_offset(inst_num) + idx
 
         # Plain text values for padding calculations
         status_text = '-----' if status == 'empty' else status
@@ -1286,6 +1294,16 @@ def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
     gcmd.respond_info(f"ACE[{ace.instance_num}]: Active toolhead state reset")
 
 
+def _check_ace_tool(gcmd, tool):
+    """Refuse a TOOL= that is neither -1 (none) nor one of the ACE's tools."""
+    first = get_tool_offset(0)
+    last = first + len(ACE_INSTANCES) * SLOTS_PER_ACE - 1
+    if tool != -1 and not (first <= tool <= last):
+        raise gcmd.error(
+            f"TOOL={tool} is out of range. Valid: -1 (none) or T{first}-T{last}"
+        )
+
+
 def cmd_ACE_DEBUG_SET_CURRENT_INDEX(gcmd):
     """Manually override ace_current_index.
 
@@ -1304,12 +1322,7 @@ def cmd_ACE_DEBUG_SET_CURRENT_INDEX(gcmd):
     # Default -1 = no tool loaded
     tool = gcmd.get_int("TOOL", default=-1)
 
-    # Validate range
-    total_tools = len(ACE_INSTANCES) * 4
-    if tool != -1 and not (0 <= tool < total_tools):
-        raise gcmd.error(
-            f"TOOL={tool} is out of range. Valid range: -1 (none) to {total_tools - 1}"
-        )
+    _check_ace_tool(gcmd, tool)
 
     prev = manager.state.get("ace_current_index", -1)
     manager.state.set_and_save("ace_current_index", tool)
@@ -1345,12 +1358,7 @@ def cmd_ACE_DEBUG_SET_TARGET_INDEX(gcmd):
     # Default -1 = no toolchange in flight
     tool = gcmd.get_int("TOOL", default=-1)
 
-    # Validate range
-    total_tools = len(ACE_INSTANCES) * 4
-    if tool != -1 and not (0 <= tool < total_tools):
-        raise gcmd.error(
-            f"TOOL={tool} is out of range. Valid range: -1 (none) to {total_tools - 1}"
-        )
+    _check_ace_tool(gcmd, tool)
 
     prev = manager.state.get("ace_target_index", -1)
     manager.state.set_and_save("ace_target_index", tool)
@@ -1579,9 +1587,79 @@ def cmd_ACE_SMART_LOAD(gcmd):
         gcmd.respond_info(f"ACE: Smart load error: {e}")
 
 
+def cmd_ACE_CHECK_TOOL(gcmd):
+    """One tool's spool to the toolhead sensor and back to its park; an
+    error when it fails, so a print start running it stops."""
+    tool = gcmd.get_int("TOOL", minval=0)
+    manager = ace_get_manager(0)
+    try:
+        manager.check_tool(tool)
+    except Exception as e:
+        raise gcmd.error(f"ACE: {e}")
+    gcmd.respond_info(f"ACE: T{tool} reached the toolhead and is parked")
+
+
+def cmd__ACE_MONITOR_EVENT(gcmd):
+    """A runout monitor event the monitor queued; see monitor_events."""
+    manager = ace_get_manager(0)
+    try:
+        monitor_events.run(manager.runout_monitor, gcmd.get("EVENT"),
+                           gcmd.get_int("TOOL"))
+    except ValueError as e:
+        raise gcmd.error(f"ACE: {e}") from e
+
+
+def cmd__ACE_CONNECTION_PAUSE(gcmd):
+    """The pause the connection monitor queued; see connection_pause."""
+    connection_pause.run_pause(ace_get_manager(0))
+
+
+def cmd_ACE_CHECK_PRINT_TOOLS(gcmd):
+    """Refuse the print when a tool its file uses has no ACE slot or no
+    usable spool; the start macro's first command, so nothing moves first."""
+    manager = ace_get_manager(0)
+    if not manager.get_ace_global_enabled():
+        gcmd.respond_info("ACE: ACE Pro disabled - print tools not checked")
+        return
+    printer = manager.get_printer()
+    sdcard = printer.lookup_object("virtual_sdcard", None)
+    path = sdcard.file_path() if sdcard is not None else None
+    if path is None:
+        gcmd.respond_info("ACE: no file printing, no tools to check")
+        return
+    reactor = printer.get_reactor()
+    used = print_tools.tools_used(path, lambda: reactor.pause(reactor.NOW))
+    problems = print_tools.unusable_tools(used)
+    if problems:
+        details = "; ".join(f"T{tool}: {reason}" for tool, reason in problems)
+        raise gcmd.error(f"ACE: the print uses {print_tools.tool_names(t for t, _ in problems)}"
+                         f" without a usable spool ({details}). Load it and start again")
+    gcmd.respond_info(f"ACE: the print uses {print_tools.tool_names(used) or 'no tool'},"
+                      " each with a usable spool")
+
+
+def toolchange_homing_script(needed_axes, homed_axes):
+    """The homing a tool change runs first, or None: only axes it needs
+    (toolchange_homing_axes) and that are not homed yet. Needing all three
+    is a plain G28, which keeps the printer's own homing order."""
+    missing = [axis for axis in needed_axes if axis not in homed_axes]
+    if not missing:
+        return None
+    if set(needed_axes) == set("xyz"):
+        return "G28"
+    return "G28 " + " ".join(axis.upper() for axis in missing)
+
+
 def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     """Handle tool change command."""
     if not manager.get_ace_global_enabled():
+        if getattr(manager, "tool_changer_owns_tools", False) is True:
+            # Ignoring it would let the tool changer record a tool that
+            # never loaded.
+            raise gcmd.error(
+                f"ACE: Global ACE Pro support disabled - cannot change to "
+                f"T{tool_index}"
+            )
         gcmd.respond_info("ACE: Global ACE Pro support disabled - tool change ignored")
         return
 
@@ -1589,9 +1667,16 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
     if tool_index == -1:
         current_tool = manager.state.get("ace_current_index", -1)
+        if current_tool < 0:
+            current_tool = manager.tool_at_toolhead()
 
+        # PARK=1: out of the hotend only, parked at the toolhead's intake.
+        park = gcmd.get_int("PARK", 0) and current_tool >= 0
         try:
-            success = manager.smart_unload(current_tool)
+            if park:
+                success = manager.park_tool(current_tool)
+            else:
+                success = manager.smart_unload(current_tool)
             if success:
                 # gcmd.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
                 manager.state.set("ace_current_index", -1)
@@ -1620,10 +1705,12 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             kin_status = toolhead.get_kinematics().get_status(reactor.monotonic())
             homed_axes = kin_status.get('homed_axes', '')
 
-            if 'xyz' not in homed_axes:
+            homing = toolchange_homing_script(
+                manager.toolchange_homing_axes, homed_axes)
+            if homing is not None:
                 gcode = printer.lookup_object("gcode")
-                gcode.respond_info("ACE: Printer not homed, homing now...")
-                gcode.run_script_from_command("G28")
+                gcode.respond_info(f"ACE: Printer not homed, homing now ({homing})...")
+                gcode.run_script_from_command(homing)
 
         except Exception as e:
             gcode = printer.lookup_object("gcode")
@@ -1677,7 +1764,11 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             # the "already loaded" reselection path, which trusts the poisoned
             # index, skips the real toolchange, and enables a second feed
             # assist in parallel with the still-loaded previous tool's.
-            if filament_pos in (FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER):
+            # The exception: perform_tool_change itself recorded the
+            # requested tool as loaded, and a later step (the purge) failed.
+            load_confirmed = manager.state.get("ace_current_index", -1) == tool_index
+            if (filament_pos in (FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER)
+                    and not load_confirmed):
                 active_tool = fallback_tool
             else:
                 active_tool = tool_index
@@ -1732,6 +1823,14 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
         # instance_num = get_instance_from_tool(tool_index)
         # slot_index = get_local_slot(tool_index, instance_num)
+
+        if (is_printing and not is_startup
+                and getattr(manager, "tool_changer_owns_tools", False) is True):
+            # The tool changer holds the print and offers its own retry; a
+            # pause and prompt of ours would run beside it, and no RESUME
+            # of ours follows to use ace_target_index.
+            manager.state.set("ace_target_index", -1)
+            raise gcmd.error(f"Tool change to T{tool_index} failed: {str(e)}")
 
         if is_printing and not is_startup:
             gcode.run_script_from_command('PAUSE')
@@ -1968,20 +2067,6 @@ def cmd_ACE_DEBUG_STATE(gcmd):
         gcmd.respond_info(f"ACE_DEBUG_STATE error: {e}")
 
 
-def cmd_ACE_DEBUG_CHECK_SPOOL_READY(gcmd):
-    """Debug: Test check_and_wait_for_spool_ready. TOOL= required."""
-    try:
-        tool = gcmd.get_int("TOOL")
-        manager = ace_get_manager(0)
-
-        gcmd.respond_info(f"ACE: Testing spool readiness for tool {tool}...")
-        manager.check_and_wait_for_spool_ready(tool)
-        gcmd.respond_info(f"ACE: Spool for tool {tool} is ready and available.")
-
-    except Exception as e:
-        gcmd.respond_info(f"ACE_DEBUG_CHECK_SPOOL_READY error: {e}")
-
-
 def _set_rfid_sync_for_instance_or_all(gcmd, enabled):
     """Helper: Set RFID sync state for specific instance or all instances."""
     instance_num = gcmd.get_int("INSTANCE", None)
@@ -2132,7 +2217,10 @@ def cmd_ACE_CHANGE_TOOL_WRAPPER(gcmd):
         manager = ace_get_manager(0)
         cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index)
     except Exception as e:
-        gcmd.respond_info(f"ACE_CHANGE_TOOL error: {e}")
+        # The caller (a T<n> macro, a printer-side tool changer, the start
+        # sequence) has to see the failure; converted, as any other
+        # exception escaping a G-code command shuts Klipper down.
+        raise gcmd.error(f"ACE_CHANGE_TOOL error: {e}")
 
 
 def cmd_ACE_FULL_UNLOAD(gcmd):
@@ -2435,8 +2523,72 @@ def cmd_ACE_FLUSH(gcmd):
         gcmd.respond_info("ACE: No pending state to flush")
 
 
+def resolve_firmware_path(file_param, config_file):
+    """FILE= as given, with ~ expanded; relative paths are next to printer.cfg.
+
+    Mainsail uploads into the config directory, so a bare file name works.
+    """
+    path = os.path.expanduser(file_param)
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(config_file), path)
+    return path
+
+
+def cmd_ACE_FIRMWARE_UPDATE(gcmd):
+    """Flash an ACE2 box. INSTANCE= FILE=ACE2_V<x.y.z>_<date>.bin, CONFIRM=1 to flash."""
+    if "INSTANCE" not in gcmd.get_command_parameters():
+        raise gcmd.error("ACE_FIRMWARE_UPDATE needs INSTANCE=<n>: it never picks a box itself")
+    ace = ace_get_instance(gcmd)
+    config_file = get_printer().get_start_args().get("config_file", "")
+    path = resolve_firmware_path(gcmd.get("FILE"), config_file)
+    try:
+        image = ace2_ota.load_firmware_image(path)
+    except (OSError, ace2_ota.FirmwareImageError) as exc:
+        raise gcmd.error(f"ACE_FIRMWARE_UPDATE: {exc}")
+
+    refusal = ace2_ota.update_refusal(ace)
+    if refusal:
+        raise gcmd.error(f"ACE_FIRMWARE_UPDATE: ACE[{ace.instance_num}]: {refusal}")
+    running = ace2_ota.Ace2FirmwareUpdater.active()
+    if running is not None:
+        raise gcmd.error(f"ACE_FIRMWARE_UPDATE: already flashing ({running.image.version})")
+
+    device_info = getattr(ace.serial_mgr, "device_info", None) or {}
+    current = device_info.get("version") or "unknown"
+    gcmd.respond_info(
+        f"ACE[{ace.instance_num}]: firmware {current} -> {image.version} "
+        f"(built {image.build_date}, {image.size} bytes, crc16 0x{image.crc:04X}, "
+        f"{path})"
+    )
+    if not gcmd.get_int("CONFIRM", 0):
+        gcmd.respond_info(
+            "Dry run: nothing sent. Repeat with CONFIRM=1 to flash; "
+            "do not power off the box until the update reports its result."
+        )
+        return
+
+    reactor = ace.reactor
+
+    def call_later(delay_s, fn):
+        reactor.register_callback(lambda eventtime: fn(), reactor.monotonic() + delay_s)
+
+    updater = ace2_ota.Ace2FirmwareUpdater(
+        image,
+        protocol=ace.protocol,
+        send=ace.send_high_prio_request,
+        call_later=call_later,
+        report=ace.gcode.respond_info,
+        set_polling_suspended=ace.set_firmware_update_active,
+        on_finished=lambda result: logging.info(
+            "ACE[%s]: firmware update %s: %s", ace.instance_num,
+            result.outcome.value, result.message),
+        label=f"ACE[{ace.instance_num}]",
+    )
+    updater.start()
+
+
 ACE_COMMANDS = [
-    ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. INSTANCE= or TOOL=, VERBOSE=1 for detailed output"),
+    ("ACE_GET_STATUS", cmd_ACE_GET_STATUS, "Query ACE status. [INSTANCE=] (omit for all), VERBOSE=1 for detailed output"),
     ("ACE_GET_CONNECTION_STATUS", cmd_ACE_GET_CONNECTION_STATUS,
      "Get connection status for all ACE instances (connected, stable, retry info)"),
     ("ACE_RECONNECT", cmd_ACE_RECONNECT, "Reconnect ACE serial. INSTANCE= DELAY=5"),
@@ -2450,6 +2602,11 @@ ACE_COMMANDS = [
     ("ACE_SMART_UNLOAD", cmd_ACE_SMART_UNLOAD,
      "Unload filament, trys also other filament slots if sensor still triggers after unload of current tool [TOOL=]"),
     ("ACE_SMART_LOAD", cmd_ACE_SMART_LOAD, "Load all non-empty slots to verification sensor."),
+    ("ACE_CHECK_PRINT_TOOLS", cmd_ACE_CHECK_PRINT_TOOLS,
+     "Refuse the print when a tool its file uses has no usable ACE spool"),
+    (monitor_events.EVENT_COMMAND, cmd__ACE_MONITOR_EVENT, "Internal: a runout monitor event, queued by the monitor"),
+    (connection_pause.PAUSE_COMMAND, cmd__ACE_CONNECTION_PAUSE, "Internal: the ACE connection monitor's queued pause"),
+    ("ACE_CHECK_TOOL", cmd_ACE_CHECK_TOOL, "One tool's spool to the toolhead sensor and back to its park: TOOL=<n>"),
     ("_ACE_HANDLE_PRINT_END", cmd_ACE_HANDLE_PRINT_END, "Execute print end sequence (retract, cut, store)"),
     ("ACE_SET_SLOT", cmd_ACE_SET_SLOT,
      "Set slot: T=<tool> or INSTANCE= INDEX=, COLOR=<name>|R,G,B MATERIAL= TEMP= or EMPTY=1"),
@@ -2468,12 +2625,12 @@ ACE_COMMANDS = [
     ("ACE_DEBUG", cmd_ACE_DEBUG, "Send debug request to device. INSTANCE= METHOD= [PARAMS=]"),
     ("ACE_DEBUG_SENSORS", cmd_ACE_DEBUG_SENSORS, "Print all sensor states (toolhead, RDM, path-free)"),
     ("ACE_DEBUG_STATE", cmd_ACE_DEBUG_STATE, "Print manager and instance state information"),
-    ("ACE_RESET_PERSISTENT_INVENTORY", cmd_ACE_RESET_PERSISTENT_INVENTORY, "Reset inventory to empty. INSTANCE="),
+    ("ACE_RESET_PERSISTENT_INVENTORY", cmd_ACE_RESET_PERSISTENT_INVENTORY, "Reset inventory to empty. [INSTANCE=] (omit for all)"),
     ("ACE_RESET_SHARED_BUS_BINDINGS", cmd_ACE_RESET_SHARED_BUS_BINDINGS,
      "Clear persisted ACE2 shared-bus bindings. [RECONNECT=1|0] [DELAY=2.0]"),
     ("ACE_CLEANUP_STALE_VARS", cmd_ACE_CLEANUP_STALE_VARS,
      "List stale ACE saved variables; CONFIRM=1 deletes them (incl. old inventories)"),
-    ("ACE_RESET_ACTIVE_TOOLHEAD", cmd_ACE_RESET_ACTIVE_TOOLHEAD, "Reset active toolhead state. INSTANCE="),
+    ("ACE_RESET_ACTIVE_TOOLHEAD", cmd_ACE_RESET_ACTIVE_TOOLHEAD, "Reset feed assist on all instances, clear current and target tool, filament position to bowden"),
     ("ACE_DEBUG_SET_CURRENT_INDEX", cmd_ACE_DEBUG_SET_CURRENT_INDEX,
      "Override saved tool index. TOOL=<n> (0-based) or TOOL=-1 for no tool loaded"),
     ("ACE_DEBUG_SET_TARGET_INDEX", cmd_ACE_DEBUG_SET_TARGET_INDEX,
@@ -2497,6 +2654,9 @@ ACE_COMMANDS = [
      "Show resolved config for ACE instance(s). [INSTANCE=<num>]"),
     ("ACE_FLUSH", cmd_ACE_FLUSH,
      "Persist any pending variable changes to disk immediately"),
+    ("ACE_FIRMWARE_UPDATE", cmd_ACE_FIRMWARE_UPDATE,
+     "Flash an ACE2 box. INSTANCE= FILE=ACE2_V<x.y.z>_<date>.bin (relative to the config dir); "
+     "CONFIRM=1 to flash, else dry run"),
     ("ACE_TANGLE_DETECTION", cmd_ACE_TANGLE_DETECTION,
      "Toggle tangle detection live.  ENABLE=0/1 (no arg → query state)"),
     ("_ACE_TANGLE_DISABLE_AND_RESUME", cmd__ACE_TANGLE_DISABLE_AND_RESUME,

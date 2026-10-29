@@ -43,6 +43,7 @@ ACE_SMART_UNLOAD                           # Unload current tool (defaults to cu
 
 # Smart load - load all non-empty slots to RDM sensor
 ACE_SMART_LOAD                             # Load all slots to RDM sensor for verification
+ACE_CHECK_TOOL TOOL=0                      # One spool to the toolhead sensor and back to park
 
 # Full unload - completely empty a slot
 ACE_FULL_UNLOAD TOOL=0                     # Full unload tool 0
@@ -191,9 +192,6 @@ ACE_DEBUG_SENSORS                          # Show: toolhead sensor, RDM sensor, 
 
 # Print manager/instance state
 ACE_DEBUG_STATE                            # Show: tool mapping, filament position, loaded tool
-
-# Check spool ready
-ACE_DEBUG_CHECK_SPOOL_READY TOOL=0         # Test spool ready check for tool 0
 
 # Inject sensor state (testing)
 ACE_DEBUG_INJECT_SENSOR_STATE TOOLHEAD=1 RDM=0
