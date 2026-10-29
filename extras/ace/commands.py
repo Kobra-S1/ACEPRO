@@ -1283,13 +1283,8 @@ def cmd_ACE_RESET_ACTIVE_TOOLHEAD(gcmd):
         ace.reset_feed_assist_state()
 
     manager = ace_get_manager()
-    manager.state.set("ace_current_index", -1)
-    manager.state.set("ace_target_index", -1)
+    manager.record_no_tool()
     manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_BOWDEN)
-
-    manager.gcode.run_script_from_command(
-        "SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1"
-    )
 
     gcmd.respond_info(f"ACE[{ace.instance_num}]: Active toolhead state reset")
 
@@ -1682,7 +1677,7 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             raise gcmd.error(f"ACE: {what} of T{current_tool} failed: {e}")
         if not success:
             raise gcmd.error(f"ACE: {what} of T{current_tool} failed")
-        manager.state.set("ace_current_index", -1)
+        manager.record_no_tool()
         return
 
     printer = get_printer()

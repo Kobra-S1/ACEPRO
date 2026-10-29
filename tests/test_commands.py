@@ -1491,8 +1491,7 @@ class TestDryingCommands:
         """Test ACE_RESET_ACTIVE_TOOLHEAD."""
         ace.commands.cmd_ACE_RESET_ACTIVE_TOOLHEAD(mock_gcmd)
         assert mock_gcmd.respond_info.called
-        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
-        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_target_index", -1)
+        INSTANCE_MANAGERS[0].record_no_tool.assert_called_once_with()
 
     def test_cmd_ACE_DEBUG_SENSORS(self, mock_gcmd, setup_mocks):
         """Test ACE_DEBUG_SENSORS basic functionality."""
@@ -2019,7 +2018,7 @@ class TestAceChangeTool:
         manager.state.get = Mock(return_value=3)
         ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, tool_index=-1)
         manager.smart_unload.assert_called_once_with(3)
-        manager.state.set.assert_any_call("ace_current_index", -1)
+        manager.record_no_tool.assert_called_once_with()
 
     def test_change_tool_perform_success_with_homing(self, mock_gcmd, setup_mocks):
         manager = INSTANCE_MANAGERS[0]
@@ -2203,7 +2202,7 @@ class TestToolChangeIntegration:
 
         INSTANCE_MANAGERS[0].park_tool.assert_called_once_with(2)
         INSTANCE_MANAGERS[0].smart_unload.assert_not_called()
-        INSTANCE_MANAGERS[0].state.set.assert_any_call("ace_current_index", -1)
+        INSTANCE_MANAGERS[0].record_no_tool.assert_called_once_with()
 
     def test_an_unload_of_an_unrecorded_tool_asks_what_is_at_the_toolhead(
             self, mock_gcmd, setup_mocks):
@@ -2269,7 +2268,7 @@ class TestToolChangeIntegration:
         INSTANCE_MANAGERS[0].smart_unload.assert_called_with(0)
         
         # Verify state was cleared
-        assert INSTANCE_MANAGERS[0].state.set.called
+        INSTANCE_MANAGERS[0].record_no_tool.assert_called_once_with()
 
     def test_cmd_ACE_CHANGE_TOOL_unload_failure(self, mock_gcmd, setup_mocks):
         """A failed unload is a G-code error to the caller."""

@@ -235,6 +235,7 @@ def test_an_unload_that_reports_failure_is_an_error(park):
         ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(park), -1)
 
     manager.state.set.assert_not_called()
+    manager.record_no_tool.assert_not_called()
 
 
 @pytest.mark.parametrize("park", [0, 1])
@@ -245,6 +246,7 @@ def test_an_unload_that_raises_is_an_error_naming_the_cause(park):
         ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(park), -1)
 
     manager.state.set.assert_not_called()
+    manager.record_no_tool.assert_not_called()
 
 
 def test_a_successful_unload_records_no_tool():
@@ -252,4 +254,4 @@ def test_a_successful_unload_records_no_tool():
 
     ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(), -1)
 
-    manager.state.set.assert_any_call("ace_current_index", -1)
+    manager.record_no_tool.assert_called_once_with()
