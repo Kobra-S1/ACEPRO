@@ -687,6 +687,39 @@ class TestReader:
         assert any("UNSOLICITED" in args[0] and "ID=55" in args[0]
                   for args, _ in self.mock_gcode.respond_info.call_args_list)
 
+    def test_a_reply_that_breaks_its_handling_does_not_escape_the_timer(self):
+        # An exception out of a reactor timer shuts Klipper down.
+        self.manager._serial.read.return_value = (
+            self._make_frame({"id": 1}) + self._make_frame({"id": 2}))
+        handled = []
+
+        def dispatch(response):
+            if response["id"] == 1:
+                raise TypeError("unhashable")
+            handled.append(response["id"])
+            return None, False
+        self.manager.dispatch_response = Mock(side_effect=dispatch)
+        self.manager.unsolicited_response_callback = Mock(return_value=True)
+
+        ret = self.manager._reader(eventtime=7.0)
+
+        assert ret == 7.0 + 0.05
+        assert handled == [2]
+        assert any("dropped a reply" in args[0]
+                   for args, _ in self.mock_gcode.respond_info.call_args_list)
+
+    def test_an_unsolicited_reply_with_bytes_is_logged(self):
+        # ACE2 GET_INFO replies carry raw protobuf fields as bytes.
+        self.manager.protocol.extract_responses = Mock(return_value=(
+            [{"id": 3, "result": {"raw_fields": {1: [(2, b"1.2.3")]}}}],
+            bytearray(), []))
+        self.manager._serial.read.return_value = b"x"
+
+        self.manager._reader(eventtime=8.0)
+
+        assert any("UNSOLICITED" in args[0] and "1.2.3" in args[0]
+                   for args, _ in self.mock_gcode.respond_info.call_args_list)
+
     def test_invalid_crc_resets_frame(self):
         payload = b'{"ok":1}'
         payload_len = len(payload)

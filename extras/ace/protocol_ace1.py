@@ -132,9 +132,14 @@ class AceJsonProtocolAdapter(AceProtocolAdapter):
                 continue
 
             try:
-                responses.append(json.loads(payload.decode("utf-8")))
+                response = json.loads(payload.decode("utf-8"))
             except (UnicodeDecodeError, ValueError) as exc:
                 notices.append(f"JSON decode error: {exc}")
+                continue
+            if isinstance(response, dict):
+                responses.append(response)
+            else:
+                notices.append(f"Reply is not a JSON object, dropped: {response!r}")
 
         return responses, working, notices
 

@@ -852,6 +852,18 @@ class TestAceJsonExtractResponses:
         assert (responses, notices) == ([], [])
         assert remaining == bytearray(b"\xFF\xAA\x05")
 
+    @pytest.mark.parametrize("payload", [b"[1, 2]", b"null", b'"x"', b"7"])
+    def test_a_payload_that_is_no_object_is_dropped_with_a_notice(self, payload):
+        # Every consumer reads a reply as a dict (response.get).
+        frame = (b"\xFF\xAA" + struct.pack("<H", len(payload)) + payload
+                 + struct.pack("<H", _calc_crc(payload)) + b"\xFE")
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(frame), _calc_crc)
+
+        assert (responses, remaining) == ([], bytearray())
+        assert any("not a JSON object" in notice for notice in notices)
+
 
 def _ace2_frame(command_code, payload, request_id=1, flags=0x80):
     """Build a valid ACE2 response frame around a protobuf payload."""
@@ -943,6 +955,28 @@ class TestAceProtoExtractResponses:
         )
 
         assert responses[0]["result"]["colors"] == [[0x11, 0x22, 0x33, 0x44]]
+
+    GET_INFO = 7
+
+    @pytest.mark.parametrize("command_code, payload", [
+        # GET_INFO version as a varint instead of a string
+        (GET_INFO, _pb_uint(1, 5)),
+        # GET_STATUS slot as a varint instead of a message
+        (GET_STATUS, _pb_uint(1, 1) + _pb_uint(9, 3)),
+        # GET_FILAMENT_INFO colour as bytes instead of a varint
+        (GET_FILAMENT_INFO, _pb_uint(1, 0) + _pb_bytes(5, _pb_bytes(1, b"x"))),
+    ])
+    def test_a_field_of_the_wrong_wire_type_drops_the_frame_with_a_notice(
+            self, command_code, payload):
+        good = _ace2_frame(self.GET_STATUS, _pb_uint(1, 1), request_id=42)
+        frames = _ace2_frame(command_code, payload, request_id=41) + good
+
+        responses, remaining, notices = self.adapter.extract_responses(
+            bytearray(frames), _calc_crc)
+
+        assert [r["id"] for r in responses] == [42]
+        assert remaining == bytearray()
+        assert any("cannot decode" in notice for notice in notices), notices
 
 
 class TestAceProtoRequestBuilders:
