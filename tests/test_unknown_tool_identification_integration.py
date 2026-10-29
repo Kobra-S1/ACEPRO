@@ -35,6 +35,7 @@ from ace.manager import AceManager
 from ace.config import (
     FILAMENT_STATE_BOWDEN,
     FILAMENT_STATE_NOZZLE,
+    set_tool_base,
 )
 
 GEAR_EXIT = 40.0
@@ -154,6 +155,7 @@ class TestUnknownToolIdentification(unittest.TestCase):
         self.mock_save_vars.allVariables = self.variables
 
         self.sim = None  # set per test before _create_manager
+        self.tool_base = 0
         self.gcode_commands = []
         self.respond_messages = []
         self.mock_gcode.run_script_from_command.side_effect = self._run_gcode
@@ -223,7 +225,7 @@ class TestUnknownToolIdentification(unittest.TestCase):
                 patch('ace.manager.RunoutMonitor'):
             instance = Mock()
             instance.instance_num = 0
-            instance.tool_offset = 0
+            instance.tool_offset = self.tool_base
             instance.SLOT_COUNT = 4
             instance.filament_runout_sensor_name_nozzle = 'filament_runout_nozzle'
             instance.filament_runout_sensor_name_rdm = 'filament_runout_rdm'
@@ -341,6 +343,37 @@ class TestUnknownToolIdentification(unittest.TestCase):
         # The RDM pass really pulled the loaded filament out
         self.assertGreaterEqual(self.sim.tip, RDM_POS)
 
+
+
+    def _ace_after_three_tools(self):
+        """Kobra X: three direct inlets take T0-T2, the ACE's slot 0 is T3.
+        Cycling knows no tool when it starts, so it must not ask for the
+        config of a tool number the ACE does not have."""
+        self.tool_base = 3
+        set_tool_base(3)
+        self.addCleanup(set_tool_base, 0)
+
+    def test_after_a_tool_changer_filament_past_the_rdm_is_identified(self):
+        # Hardware 2026-10-29: a failed load left slot 0 in the tube, past
+        # the RDM, short of the toolhead sensor.
+        self._ace_after_three_tools()
+        self.sim = FilamentPathSimulator(loaded_tool=3, tip=300.0)
+        manager = self._create_manager()
+
+        result = manager.smart_unload(tool_index=-1, keep_heater=True)
+
+        self.assertTrue(result, self._messages())
+        self.assertGreaterEqual(self.sim.tip, RDM_POS)
+
+    def test_after_a_tool_changer_filament_at_the_toolhead_is_identified(self):
+        self._ace_after_three_tools()
+        self.sim = FilamentPathSimulator(loaded_tool=3, tip=0.0)
+        manager = self._create_manager()
+
+        result = manager.smart_unload(tool_index=-1, keep_heater=True)
+
+        self.assertTrue(result, self._messages())
+        self.assertIn('T3 identified', self._messages())
 
 if __name__ == '__main__':
     unittest.main()
