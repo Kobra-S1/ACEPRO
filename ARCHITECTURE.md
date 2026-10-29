@@ -1283,6 +1283,7 @@ create_status_dict(slot_count)                       # Create ACE status dict
 | `rfid_inventory_sync_enabled` | True | Auto-sync RFID data to inventory |
 | `rfid_temp_mode` | `"average"` | RFID temp calculation: `"average"`, `"min"`, or `"max"` |
 | `feed_assist_active_after_ace_connect` | True | Restore feed assist after reconnect |
+| `feed_assist_off_when_idle` | True | Klipper's idle timeout stops the loaded tool's feed assist; the next toolhead activity restores it (`idle_assist.py`) |
 | `register_tool_macros` | True | Register `T<n>` for every ACE slot. False when a printer-side tool changer owns `T<n>` and calls `ACE_CHANGE_TOOL` with printer tool numbers (Kobra X `[kx_toolchanger]`); it also owns the recovery of a failed change, see "Failure reported to a printer-side tool changer" |
 | `stop_ace_on_shutdown` | True | On `klippy:shutdown` (M112 / fatal error) stop feed assist and any running feed/retract on every connected ACE, and do not restore feed assist after the restart |
 | `stop_dryer_on_shutdown` | False | Also stop a running dryer on `klippy:shutdown` (needs `stop_ace_on_shutdown`) |
@@ -1983,6 +1984,7 @@ pre_cut_retract_length: 2
 heartbeat_interval: 1.0
 max_dryer_temperature: 55
 feed_assist_active_after_ace_connect: True   # Restore feed assist after ACE reconnect (deferred until first successful heartbeat)
+feed_assist_off_when_idle: True              # Stop feed assist on Klipper's idle timeout, restore it on the next toolhead activity
 stop_ace_on_shutdown: True                   # Stop feed assist / running feed+retract on M112 or fatal shutdown
 stop_dryer_on_shutdown: False                # Also stop the dryer on M112 or fatal shutdown
 runout_debounce_count: 1                     # Consecutive absent sensor readings before confirming runout (1 = no debounce)

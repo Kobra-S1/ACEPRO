@@ -331,7 +331,8 @@ class AceManager:
         )
 
         self.toolchange_in_progress = False
-        self.idle_feed_assist = IdleFeedAssist(self.printer, self)
+        if self.ace_config.get("feed_assist_off_when_idle", True):
+            IdleFeedAssist(self.printer, self)
         # True from klippy:ready until startup validation has confirmed or
         # reset the persisted tool; feed-assist restores wait for it.
         self.startup_validation_in_progress = False

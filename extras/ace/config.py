@@ -168,6 +168,11 @@ def read_ace_config(config):
     ace_config["feed_assist_active_after_ace_connect"] = config.getboolean(
         "feed_assist_active_after_ace_connect", True
     )
+    # Klipper's idle timeout stops the loaded tool's feed assist, the next
+    # toolhead activity restores it (idle_assist.py).
+    ace_config["feed_assist_off_when_idle"] = config.getboolean(
+        "feed_assist_off_when_idle", True
+    )
     # False when a printer-side tool changer owns T<n> and reaches the ACE
     # through ACE_CHANGE_TOOL (Kobra X: [kx_toolchanger] maps its tools onto
     # turret inlets; behind three direct ones T3 is the first ACE slot).

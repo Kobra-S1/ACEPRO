@@ -1522,7 +1522,7 @@ When ACE reconnects (after power cycle or USB disconnect), feed assist is automa
 # ACE[0]: Feed assist restored on slot 2
 ```
 
-Feed assist also pauses while the printer is idle. When Klipper's `[idle_timeout]` fires, the loaded tool's assist is stopped, so the ACE motor does not keep pushing a standing filament. The next toolhead activity (`idle_timeout` back to Printing) re-enables it, provided the same tool is still loaded; a tool change in between arms the new tool's assist itself.
+Feed assist also pauses while the printer is idle. When Klipper's `[idle_timeout]` fires, the loaded tool's assist is stopped, so the ACE motor does not keep pushing a standing filament. The next toolhead activity (`idle_timeout` back to Printing) re-enables it, provided the same tool is still loaded; a tool change in between arms the new tool's assist itself. To keep the assist running while idle, set `feed_assist_off_when_idle: False` in `[ace]`.
 
 To disable automatic feed assist restoration:
 

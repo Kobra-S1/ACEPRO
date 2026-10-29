@@ -152,3 +152,39 @@ def test_no_restore_once_another_tool_was_loaded():
         assert manager.verified == []
     finally:
         _teardown()
+
+
+def _idle_events_registered_by_manager(mock_config, **options):
+    """Build an AceManager with [ace] `options` set; return the events it
+    registered handlers for."""
+    from ace.manager import AceManager
+
+    getboolean = mock_config.getboolean
+    mock_config.getboolean = lambda key, default=None: options.get(
+        key, getboolean(key, default))
+    printer = mock_config.get_printer()
+    save_vars = Mock(allVariables={})
+    printer.lookup_object = Mock(side_effect=lambda name, default=None: {
+        "gcode": Mock(),
+        "save_variables": save_vars,
+        "output_pin ACE_Pro": Mock(get_status=Mock(return_value={"value": 1})),
+    }.get(name, default))
+    events = []
+    printer.register_event_handler = Mock(
+        side_effect=lambda event, handler: events.append(event))
+    try:
+        AceManager(mock_config, dummy_ace_count=1)
+    finally:
+        ACE_INSTANCES.clear()
+    return [event for event in events if event.startswith("idle_timeout:")]
+
+
+def test_manager_pauses_assist_on_idle_by_default(mock_config):
+    events = _idle_events_registered_by_manager(mock_config)
+    assert events == ["idle_timeout:idle", "idle_timeout:printing"]
+
+
+def test_feed_assist_off_when_idle_false_keeps_assist_on(mock_config):
+    events = _idle_events_registered_by_manager(
+        mock_config, feed_assist_off_when_idle=False)
+    assert events == []
