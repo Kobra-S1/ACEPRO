@@ -698,7 +698,15 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
 
             command_spec = ACE2_COMMANDS_BY_CODE.get(command_code)
             command_name = command_spec.name if command_spec else f"CMD_{command_code}"
-            decoded = self._decode_response_payload(command_name, payload)
+            try:
+                decoded = self._decode_response_payload(command_name, payload)
+            except (AttributeError, TypeError, ValueError, IndexError) as exc:
+                # A field of another wire type than the decoder expects
+                # (a firmware revision changing a field) costs this frame,
+                # not the reader.
+                notices.append(f"{command_name}: cannot decode the reply, "
+                               f"dropped ({type(exc).__name__}: {exc})")
+                continue
             response = {"id": request_id, "command": command_name, "flags": flags}
             device_id = flags & ACE2_FLAG_DEVICE_ID_MASK
             if device_id:

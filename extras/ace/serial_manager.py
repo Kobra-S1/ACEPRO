@@ -197,8 +197,8 @@ class AceSerialManager:
         self._comm_duplicate_timestamps = []    # Duplicate reply times (health stats)
         self._last_duplicate_warn_time = None
 
-    def enable_ace_pro(self):
-        """Enable ACE Pro and reconnect if not connected."""
+    def enable_ace_pro(self, baud):
+        """Enable ACE Pro and reconnect at baud if it was disabled."""
         was_disabled = not self._ace_pro_enabled
         self._ace_pro_enabled = True
 
@@ -207,7 +207,6 @@ class AceSerialManager:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: ACE Pro enabled - reconnecting"
             )
-            baud = self._baud if self._baud else 115200
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Using baud rate: {baud}"
             )
@@ -1539,31 +1538,45 @@ class AceSerialManager:
             self.gcode.respond_info(f"ACE[{self.instance_num}]: {notice}")
 
         for ret in responses:
-            if self._status_debug_logging:
-                self._status_update_callback(ret)
-
-            cb, _ = self.dispatch_response(ret)
-            if cb:
-                try:
-                    cb(response=ret)
-                except Exception as e:
-                    self.gcode.respond_info(f"ACE[{self.instance_num}]: Callback error: {e}")
-            else:
-                # A second reply to an already-answered request must never be
-                # routed anywhere (device_id collision - sender unknowable)
-                if self._handle_duplicate_response(ret):
-                    continue
-                # Try unsolicited callback first
-                if self.unsolicited_response_callback and self.unsolicited_response_callback(ret):
-                    continue
-                # Log unsolicited messages (no matching callback found)
-                response_id = ret.get('id', 'no-id')
-                response_str = json.dumps(ret)
-                self.gcode.respond_info(f"ACE[{self.instance_num}]: UNSOLICITED (ID={response_id}, current_id={self._request_id}): {response_str}")
-                # Track unsolicited message for communication health supervision
-                self._track_comm_unsolicited()
+            try:
+                self._handle_response(ret)
+            except Exception as e:
+                # Device bytes are external input: an exception out of this
+                # reactor timer would shut Klipper down.
+                logging.exception("ACE[%d]: reply handling failed", self.instance_num)
+                self.gcode.respond_info(
+                    f"ACE[{self.instance_num}]: dropped a reply that could not "
+                    f"be handled ({type(e).__name__}: {e})")
 
         return eventtime + 0.05
+
+    def _handle_response(self, ret):
+        """Route one decoded reply: its request's callback, else the
+        unsolicited handlers, else the UNSOLICITED log."""
+        if self._status_debug_logging:
+            self._status_update_callback(ret)
+
+        cb, _ = self.dispatch_response(ret)
+        if cb:
+            try:
+                cb(response=ret)
+            except Exception as e:
+                self.gcode.respond_info(f"ACE[{self.instance_num}]: Callback error: {e}")
+            return
+        # A second reply to an already-answered request must never be
+        # routed anywhere (device_id collision - sender unknowable)
+        if self._handle_duplicate_response(ret):
+            return
+        # Try unsolicited callback first
+        if self.unsolicited_response_callback and self.unsolicited_response_callback(ret):
+            return
+        # Log unsolicited messages (no matching callback found); ACE2
+        # replies carry raw protobuf fields as bytes.
+        response_id = ret.get('id', 'no-id')
+        response_str = json.dumps(ret, default=str)
+        self.gcode.respond_info(f"ACE[{self.instance_num}]: UNSOLICITED (ID={response_id}, current_id={self._request_id}): {response_str}")
+        # Track unsolicited message for communication health supervision
+        self._track_comm_unsolicited()
 
     def _get_status_debug_state(self, device_id):
         """Return the change-detection state holder for one status stream.

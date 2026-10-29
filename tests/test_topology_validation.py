@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from extras.ace.serial_manager import AceSerialManager
 from extras.ace.instance import AceInstance
+from extras.ace.config import INSTANCE_MANAGERS
 
 
 class TestUSBTopologyPositionCalculation:
@@ -218,12 +219,16 @@ class TestFeedAssistTopologyTracking:
         """Test that topology position is stored when feed assist is enabled."""
         # Mock serial manager to return a topology position
         mock_instance.serial_mgr.get_usb_topology_position = Mock(return_value=2)
-        mock_instance.serial_mgr.send_request = Mock()
+        # The ACE accepts the start.
+        mock_instance.serial_mgr.send_request = Mock(
+            side_effect=lambda request, callback: callback({"code": 0}))
         mock_instance.serial_mgr.is_ready = Mock(return_value=True)
         mock_instance.reactor.pause = Mock()
+        mock_instance.reactor.monotonic = Mock(return_value=0.0)
         
         # Enable feed assist
-        mock_instance._enable_feed_assist(0)
+        with patch.dict(INSTANCE_MANAGERS, {mock_instance.instance_num: Mock()}):
+            mock_instance._enable_feed_assist(0)
         
         assert mock_instance._feed_assist_index == 0
         assert mock_instance._feed_assist_topology_position == 2

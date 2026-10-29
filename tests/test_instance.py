@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch, PropertyMock, call, ANY
 import time
 
 from ace.ace2_bus import Ace2BusSession
-from ace.instance import AceInstance
+from ace.instance import AceInstance, FEED_ASSIST_START_ATTEMPTS
 from ace.config import (
     ACE_INSTANCES,
     FeedAbortedByFirmware,
@@ -1457,8 +1457,9 @@ class TestFeedAssist(unittest.TestCase):
         self.assertEqual(instance.wait_ready.call_count, 2)
 
     @patch('ace.instance.AceSerialManager')
-    def test_enable_feed_assist_logs_failure_without_persist(self, mock_serial_mgr_class):
-        """Failure path should not persist feed assist variable."""
+    def test_a_refused_enable_raises_and_records_no_assist(self, mock_serial_mgr_class):
+        # A load reporting success with no assist leaves the print without
+        # it, and nothing re-arms an assist the driver believes is on.
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         INSTANCE_MANAGERS[0] = Mock()
         instance._info['status'] = 'ready'
@@ -1466,12 +1467,81 @@ class TestFeedAssist(unittest.TestCase):
         instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 1, 'msg': 'oops'}))
         instance.wait_ready = Mock()
 
+        with self.assertRaisesRegex(ValueError, "oops"):
+            instance._enable_feed_assist(1)
+
+        self.assertEqual(instance._feed_assist_index, -1)
+        self.assertIsNone(instance._feed_assist_topology_position)
+        INSTANCE_MANAGERS[0].state.set.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_start_refused_for_a_moment_is_retried(self, mock_serial_mgr_class):
+        # A refusal that passes (the ACE still switching modes) must not
+        # fail the load and pull the filament back.
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._info['status'] = 'ready'
+        answers = iter([{'code': 1, 'msg': 'busy'}, {'code': 1, 'msg': 'busy'},
+                        {'code': 0}])
+        instance.send_request = Mock(side_effect=lambda req, cb: cb(next(answers)))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+
         instance._enable_feed_assist(1)
 
+        self.assertEqual(instance.send_request.call_count, 3)
         self.assertEqual(instance._feed_assist_index, 1)
-        instance.serial_mgr.get_usb_topology_position.assert_called_once()
-        INSTANCE_MANAGERS[0].state.set.assert_not_called()
-        self.assertEqual(instance.wait_ready.call_count, 2)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_start_refused_every_time_gives_up_after_the_retries(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._info['status'] = 'ready'
+        instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 1, 'msg': 'busy'}))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+
+        with self.assertRaisesRegex(ValueError, "busy"):
+            instance._enable_feed_assist(1)
+
+        self.assertEqual(instance.send_request.call_count,
+                         FEED_ASSIST_START_ATTEMPTS)
+        self.assertEqual(instance._feed_assist_index, -1)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_an_unanswered_enable_raises(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._info['status'] = 'ready'
+        instance.send_request = Mock()
+        instance.wait_ready = Mock()
+        clock = iter(range(1000))
+        instance.reactor.monotonic = Mock(side_effect=lambda: float(next(clock)))
+
+        with self.assertRaisesRegex(ValueError, "no answer"):
+            instance._enable_feed_assist(1)
+
+        self.assertEqual(instance._feed_assist_index, -1)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_enabling_another_slot_stops_the_assisted_one_first(self, mock_serial_mgr_class):
+        # One unit assists one slot; an ACE2 stays busy until the old
+        # assist is stopped.
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._info['status'] = 'ready'
+        instance._feed_assist_index = 0
+        sent = []
+        instance.send_request = Mock(
+            side_effect=lambda req, cb: (sent.append(req), cb({'code': 0})))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+
+        instance._enable_feed_assist(2)
+
+        self.assertEqual([r["method"] for r in sent],
+                         ["stop_feed_assist", "start_feed_assist"])
+        self.assertEqual(instance._feed_assist_index, 2)
 
     @patch('ace.instance.AceSerialManager')
     def test_disable_feed_assist_happy_path(self, mock_serial_mgr_class):

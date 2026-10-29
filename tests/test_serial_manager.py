@@ -687,6 +687,39 @@ class TestReader:
         assert any("UNSOLICITED" in args[0] and "ID=55" in args[0]
                   for args, _ in self.mock_gcode.respond_info.call_args_list)
 
+    def test_a_reply_that_breaks_its_handling_does_not_escape_the_timer(self):
+        # An exception out of a reactor timer shuts Klipper down.
+        self.manager._serial.read.return_value = (
+            self._make_frame({"id": 1}) + self._make_frame({"id": 2}))
+        handled = []
+
+        def dispatch(response):
+            if response["id"] == 1:
+                raise TypeError("unhashable")
+            handled.append(response["id"])
+            return None, False
+        self.manager.dispatch_response = Mock(side_effect=dispatch)
+        self.manager.unsolicited_response_callback = Mock(return_value=True)
+
+        ret = self.manager._reader(eventtime=7.0)
+
+        assert ret == 7.0 + 0.05
+        assert handled == [2]
+        assert any("dropped a reply" in args[0]
+                   for args, _ in self.mock_gcode.respond_info.call_args_list)
+
+    def test_an_unsolicited_reply_with_bytes_is_logged(self):
+        # ACE2 GET_INFO replies carry raw protobuf fields as bytes.
+        self.manager.protocol.extract_responses = Mock(return_value=(
+            [{"id": 3, "result": {"raw_fields": {1: [(2, b"1.2.3")]}}}],
+            bytearray(), []))
+        self.manager._serial.read.return_value = b"x"
+
+        self.manager._reader(eventtime=8.0)
+
+        assert any("UNSOLICITED" in args[0] and "1.2.3" in args[0]
+                   for args, _ in self.mock_gcode.respond_info.call_args_list)
+
     def test_invalid_crc_resets_frame(self):
         payload = b'{"ok":1}'
         payload_len = len(payload)
@@ -808,10 +841,9 @@ class TestConnectionLifecycle:
 
     def test_enable_disable_toggle(self):
         self.manager._ace_pro_enabled = False
-        self.manager._baud = 57600
         self.manager.connect_to_ace = Mock()
 
-        self.manager.enable_ace_pro()
+        self.manager.enable_ace_pro(57600)
 
         self.manager.connect_to_ace.assert_called_once()
         assert self.manager._ace_pro_enabled is True
@@ -821,11 +853,21 @@ class TestConnectionLifecycle:
         self.manager.disconnect.assert_called_once()
         assert self.manager._ace_pro_enabled is False
 
+    def test_enabling_after_a_disabled_start_connects_at_the_given_baud(self):
+        # Disabled at startup, connect_to_ace returned before storing a baud.
+        self.manager._ace_pro_enabled = False
+        self.manager.connect_to_ace(230400)
+        self.manager.connect_to_ace = Mock()
+
+        self.manager.enable_ace_pro(230400)
+
+        self.manager.connect_to_ace.assert_called_once_with(230400)
+
     def test_enable_ace_pro_when_already_enabled_no_reconnect(self):
         self.manager._ace_pro_enabled = True
         self.manager.connect_to_ace = Mock()
 
-        self.manager.enable_ace_pro()
+        self.manager.enable_ace_pro(115200)
 
         self.manager.connect_to_ace.assert_not_called()
 

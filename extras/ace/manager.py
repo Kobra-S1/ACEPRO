@@ -2856,7 +2856,7 @@ class AceManager:
 
             # Enable reconnection attempts in all serial managers
             for instance in self.instances:
-                instance.serial_mgr.enable_ace_pro()
+                instance.serial_mgr.enable_ace_pro(instance.baud)
             self.runout_monitor.start_monitoring()
 
             self.gcode.respond_info(
