@@ -1900,11 +1900,13 @@ class AceManager:
         rdm_triggered = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
 
         # Distances for completing unload after identification
-        park_to_toolhead_len = self._get_config_for_tool(
-            0, "parkposition_to_toolhead_length"
+        park_to_toolhead_len = self._cycling_config(
+            current_tool_index, attempted_tool_index,
+            "parkposition_to_toolhead_length"
         )
         park_to_rdm_len = (
-            self._get_config_for_tool(0, "parkposition_to_rdm_length")
+            self._cycling_config(current_tool_index, attempted_tool_index,
+                                 "parkposition_to_rdm_length")
             if self.has_rdm_sensor() else park_to_toolhead_len
         )
 
@@ -1923,6 +1925,17 @@ class AceManager:
             retract_speed * 60,
             full_unload_length
         )
+
+    def _cycling_config(self, current_tool_index, attempted_tool_index,
+                        param_name):
+        """Config for cycling, which starts without knowing the loaded tool:
+        the attempted tool's ACE, else the current tool's, else the first
+        ACE (tool numbers may start past 0, after a tool changer's own)."""
+        tool = (attempted_tool_index if attempted_tool_index >= 0
+                else current_tool_index)
+        if tool < 0:
+            return getattr(self.instances[0], param_name)
+        return self._get_config_for_tool(tool, param_name)
 
     def _identify_and_unload_by_cycling(
         self,
@@ -1989,22 +2002,18 @@ class AceManager:
         # monitor RDM during ACE-only retraction
         if rdm_triggered and self.has_rdm_sensor():
             # Get RDM-specific config
-            tool_for_config = attempted_tool_index if attempted_tool_index >= 0 else current_tool_index
-            if tool_for_config < 0:
-                parkposition_to_rdm_length = self.instances[0].parkposition_to_rdm_length
-                parkposition_to_toolhead_length = self.instances[0].parkposition_to_toolhead_length
-                rdm_retract_speed = self.instances[0].feed_speed  # Use faster feed_speed for long RDM retraction
-            else:
-                parkposition_to_rdm_length = self._get_config_for_tool(
-                    tool_for_config, "parkposition_to_rdm_length"
-                )
-                parkposition_to_toolhead_length = self._get_config_for_tool(
-                    tool_for_config, "parkposition_to_toolhead_length"
-                )
-
-                rdm_retract_speed = self._get_config_for_tool(
-                    tool_for_config, "feed_speed"
-                )
+            parkposition_to_rdm_length = self._cycling_config(
+                current_tool_index, attempted_tool_index,
+                "parkposition_to_rdm_length"
+            )
+            parkposition_to_toolhead_length = self._cycling_config(
+                current_tool_index, attempted_tool_index,
+                "parkposition_to_toolhead_length"
+            )
+            # The faster feed_speed for the long RDM retraction
+            rdm_retract_speed = self._cycling_config(
+                current_tool_index, attempted_tool_index, "feed_speed"
+            )
             # Filament could be just before toolhead - ensure full unload length covers toolhead to rdm sensor
             full_unload_length = parkposition_to_toolhead_length
 

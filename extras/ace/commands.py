@@ -1752,6 +1752,10 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         except Exception:
             filament_pos = None
 
+        # perform_tool_change itself recorded the requested tool as loaded,
+        # and a later step (the purge) failed: its filament is in the nozzle.
+        load_confirmed = manager.state.get("ace_current_index", -1) == tool_index
+
         if is_printing and not is_startup:
             # Mid-print failure. Pinning the REQUESTED tool as current is only
             # valid when the sequence got past the unload (target filament may
@@ -1764,9 +1768,7 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
             # the "already loaded" reselection path, which trusts the poisoned
             # index, skips the real toolchange, and enables a second feed
             # assist in parallel with the still-loaded previous tool's.
-            # The exception: perform_tool_change itself recorded the
-            # requested tool as loaded, and a later step (the purge) failed.
-            load_confirmed = manager.state.get("ace_current_index", -1) == tool_index
+            # The exception: a confirmed load.
             if (filament_pos in (FILAMENT_STATE_NOZZLE, FILAMENT_STATE_SPLITTER)
                     and not load_confirmed):
                 active_tool = fallback_tool
@@ -1774,7 +1776,9 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
                 active_tool = tool_index
         else:
             # Idle/startup failure. Decide which tool is physically in the path.
-            if filament_pos == FILAMENT_STATE_BOWDEN:
+            if load_confirmed:
+                active_tool = tool_index
+            elif filament_pos == FILAMENT_STATE_BOWDEN:
                 # The unload of the previous tool completed (filament_pos only
                 # becomes "bowden" after a successful retract). If the sensors
                 # still report filament, the tool we just tried to LOAD is stuck
