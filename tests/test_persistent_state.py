@@ -1,7 +1,11 @@
 """Direct unit tests for PersistentState branch coverage."""
 
+import ast
 import configparser
+import shlex
 from unittest.mock import Mock, patch
+
+import pytest
 
 from ace.persistent_state import PersistentState
 
@@ -61,6 +65,40 @@ class TestPersistentStateImmediateMode:
         assert not state.has_pending
 
 
+def _klipper_saved_value(command):
+    """The value SAVE_VARIABLE stores for *command*, parsed as Klipper does:
+    gcode.py _get_extended_params (shlex, posix, commenters '#;') and
+    save_variables.py (ast.literal_eval)."""
+    params = shlex.shlex(command.split(" ", 1)[1], posix=True)
+    params.whitespace_split = True
+    params.commenters = "#;"
+    values = dict(arg.split("=", 1) for arg in params)
+    return ast.literal_eval(values["VALUE"])
+
+
+class TestPersistentStateRoundTrip:
+    """What a flush writes is what Klipper reads back."""
+
+    @pytest.mark.parametrize("value", [
+        2, -1, 2.5, None, True, False, "",
+        "Bob's PLA",
+        "ConsTrue nullified",
+        'say "hi"; # not a comment',
+        "two\nlines",
+        [3, 4],
+        {"brand": "Bob's true", "sku": "null", "temp": None, "rfid": True},
+        [{"status": "ready", "material": "PLA; matte", "color": [255, 0, 0]}],
+    ])
+    def test_the_value_survives_klippers_parsing(self, value):
+        state, _printer, gcode, _save_vars = _make_state()
+
+        state._write_to_disk("ace_var", value)
+
+        command = gcode.run_script_from_command.call_args[0][0]
+        assert "\n" not in command
+        assert _klipper_saved_value(command) == value
+
+
 class TestPersistentStateFlushErrorHandling:
     """Covers flush() exception logging branch."""
 
@@ -81,10 +119,11 @@ class TestPersistentStateFlushErrorHandling:
             with patch.object(state, "_write_to_disk", side_effect=fail_one) as write_mock:
                 state.flush()
 
-        # flush attempts both writes and does not re-raise
+        # flush attempts both writes and does not re-raise; the failed one
+        # stays pending, so a later flush writes it
         assert write_mock.call_count == 2
         log_exc.assert_called_once()
-        assert not state.has_pending
+        assert state._dirty == {"bad_var"}
 
 
 class TestPersistentStateFlushDirect:

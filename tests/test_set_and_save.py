@@ -13,6 +13,7 @@ import pytest
 from unittest.mock import Mock
 from ace.manager import AceManager
 from ace.config import FILAMENT_STATE_SPLITTER, FILAMENT_STATE_NOZZLE
+from tests.test_persistent_state import _klipper_saved_value
 
 
 class TestSetAndSaveVariable:
@@ -111,15 +112,16 @@ class TestSetAndSaveVariable:
     # ------------------------------------------------------------------
 
     def test_flush_string_variable(self, manager, mock_gcode):
-        """String values are single-quote + double-quote wrapped on flush."""
+        """Written on flush, not on set."""
         manager.set_and_save_variable("ace_filament_pos", FILAMENT_STATE_NOZZLE)
         # Not yet written to disk
         mock_gcode.run_script_from_command.assert_not_called()
 
         manager.state.flush()
 
-        expected_cmd = f'SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE=\'"{FILAMENT_STATE_NOZZLE}"\''
-        mock_gcode.run_script_from_command.assert_called_with(expected_cmd)
+        command = mock_gcode.run_script_from_command.call_args[0][0]
+        assert command.startswith("SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE=")
+        assert _klipper_saved_value(command) == FILAMENT_STATE_NOZZLE
 
     def test_flush_integer_variable(self, manager, mock_gcode):
         manager.set_and_save_variable("ace_current_index", 0)
@@ -133,15 +135,9 @@ class TestSetAndSaveVariable:
         manager.set_and_save_variable("ace_inventory_0", test_dict)
         manager.state.flush()
 
-        import json
-        expected_payload = (
-            json.dumps(test_dict)
-            .replace("true", "True")
-            .replace("false", "False")
-            .replace("null", "None")
-        )
-        expected_cmd = f"SAVE_VARIABLE VARIABLE=ace_inventory_0 VALUE='{expected_payload}'"
-        mock_gcode.run_script_from_command.assert_called_with(expected_cmd)
+        command = mock_gcode.run_script_from_command.call_args[0][0]
+        assert command.startswith("SAVE_VARIABLE VARIABLE=ace_inventory_0 VALUE=")
+        assert _klipper_saved_value(command) == test_dict
 
     def test_flush_special_characters_in_string(self, manager, mock_gcode):
         special_value = "test\"value'with\\quotes"
@@ -150,8 +146,9 @@ class TestSetAndSaveVariable:
 
         manager.state.flush()
 
-        expected_cmd = f'SAVE_VARIABLE VARIABLE=test_var VALUE=\'"{special_value}"\''
-        mock_gcode.run_script_from_command.assert_called_with(expected_cmd)
+        command = mock_gcode.run_script_from_command.call_args[0][0]
+        assert command.startswith("SAVE_VARIABLE VARIABLE=test_var VALUE=")
+        assert _klipper_saved_value(command) == special_value
 
     def test_flush_boolean_variable(self, manager, mock_gcode):
         manager.set_and_save_variable("ace_global_enabled", True)
@@ -169,15 +166,9 @@ class TestSetAndSaveVariable:
 
         manager.state.flush()
 
-        import json
-        expected_payload = (
-            json.dumps(test_list)
-            .replace("true", "True")
-            .replace("false", "False")
-            .replace("null", "None")
-        )
-        expected_cmd = f"SAVE_VARIABLE VARIABLE=test_list VALUE='{expected_payload}'"
-        mock_gcode.run_script_from_command.assert_called_with(expected_cmd)
+        command = mock_gcode.run_script_from_command.call_args[0][0]
+        assert command.startswith("SAVE_VARIABLE VARIABLE=test_list VALUE=")
+        assert _klipper_saved_value(command) == test_list
 
     def test_flush_empty_string(self, manager, mock_gcode):
         manager.set_and_save_variable("test_var", "")
@@ -185,8 +176,9 @@ class TestSetAndSaveVariable:
 
         manager.state.flush()
 
-        expected_cmd = 'SAVE_VARIABLE VARIABLE=test_var VALUE=\'""\''
-        mock_gcode.run_script_from_command.assert_called_with(expected_cmd)
+        command = mock_gcode.run_script_from_command.call_args[0][0]
+        assert command.startswith("SAVE_VARIABLE VARIABLE=test_var VALUE=")
+        assert _klipper_saved_value(command) == ""
 
     def test_flush_none_value(self, manager, mock_gcode):
         manager.set_and_save_variable("test_var", None)
