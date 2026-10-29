@@ -20,7 +20,7 @@ extras/ace/
 │                           #   ACE2_COMMAND_CATALOG (name/code/tier/message types), response decoders
 ├── ace2_bus.py             # ACE2 shared-bus session — UID discovery, device-id binding,
 │                           #   deterministic assignment planning
-├── ace2_ota.py             # ACE2 firmware update — image checks, chunk plan,
+├── ace2_ota.py             # ACE2 firmware update: image checks, chunk plan,
 │                           #   transport-free IAP state machine (Ace2FirmwareUpdater)
 ├── serial_manager.py       # Serial transport — connect/reconnect, frame I/O, sliding-
 │                           #   window request queue, heartbeat, CRC, timeout tracking
@@ -257,7 +257,9 @@ _check_fast_disconnect_pause(eventtime)     # Pause quickly when the ACTIVE tool
                                             #   (4 reconnects/180s) runs separately and covers
                                             #   flaky-cable alerting for all instances.
 _resolve_disconnect_pause_timeout(instance) # Config value if >= 0, else protocol default
-_handle_connection_issue(instances, time)   # Pause print (if printing) and show dialog
+_handle_connection_issue(instances, time)   # Pause print (if printing, queued as
+                                            #   _ACE_CONNECTION_PAUSE, connection_pause.py)
+                                            #   and show dialog
 _show_connection_issue_dialog(instances, is_printing)  # Mainsail dialog with details
 _close_connection_dialog()                  # Close dialog when connection restored
 
@@ -412,7 +414,7 @@ Tangle detection is blind in that state (no pumping → no
    slot itself is excluded: enabling assist makes ACE1 report it
    `shifting` for about a second, and its return to `ready` is that
    enable (`test_the_assisted_slots_own_gear_shift_queues_no_restore`).
-   Triggers on any `* → ready` transition — the 1 Hz heartbeat almost always samples the
+   Triggers on any `* → ready` transition: the 1 Hz heartbeat almost always samples the
    intermediate `preload`/`identifying` states, so the previous
    `empty → ready`-only condition virtually never matched. The restore
    goes through the retrying pending-restore queue rather than a direct
@@ -572,9 +574,10 @@ The monitor's timer runs no G-code for an event: on a runout, a tangle or a
 resume without filament it stops the print file (`send_pause_command`) and
 queues `_ACE_MONITOR_EVENT EVENT=runout|tangle|dry_resume TOOL=n`
 (`monitor_events.py`), which runs once the G-code command executing then has
-ended, and only while the print is printing or paused - run inline with
-`run_script_from_command`, PAUSE and the swap ran inside a running command
-(a CANCEL_PRINT, a tool change). Proof: `tests/test_monitor_events.py`.
+ended, and only while the print is printing or paused: a timer that runs
+G-code inline (`run_script_from_command`) interleaves it with the command
+running at the time (a CANCEL_PRINT, a tool change). Proof:
+`tests/test_monitor_events.py`.
 
 On a confirmed runout the queued command runs `_handle_runout_detected`:
 - Pauses the print and disables the runout tool's feed assist
@@ -1159,14 +1162,14 @@ state.flush()
 ```
 
 **Where flushed:**
-- `_handle_shutdown()` in AceManager — `flush_direct()` on `klippy:shutdown`
-- `_handle_disconnect()` in AceManager — on Klipper disconnect (`flush_direct()`
+- `_handle_shutdown()` in AceManager: `flush_direct()` on `klippy:shutdown`
+- `_handle_disconnect()` in AceManager: on Klipper disconnect (`flush_direct()`
   when already shut down)
 - `ACE_FLUSH` gcode command — on user request
 - `_flush_if_idle()` timer callback — background idle-time flush
 - `_ACE_HANDLE_PRINT_END`, `ACE_FULL_UNLOAD`, `ACE_RESET_PERSISTENT_INVENTORY`,
-  `ACE_RESET_SHARED_BUS_BINDINGS` — after their writes
-- `ACE_CLEANUP_STALE_VARS CONFIRM=1` — `remove_keys()`
+  `ACE_RESET_SHARED_BUS_BINDINGS`: after their writes
+- `ACE_CLEANUP_STALE_VARS CONFIRM=1`: `remove_keys()`
 
 ### 8. Configuration (`config.py`)
 
@@ -2159,10 +2162,9 @@ sensor. Decided once per printer in the ACE config.
   cannot hold a parked filament out of the next one's way. Proof:
   `tests/test_intake_parking.py`.
 - Rollback assist (`extras/ace/rollback_assist.py`): an ACE2 clamps the
-  filament while idle, so the extruder-only retract of unload and park
-  slipped against it (Kobra X: 100 mm retracted, about 40 mm moved, the
-  toolhead sensor never cleared). Both run that retract inside
-  `rollback_assist()`: `FEED_OR_ROLLBACK` mode 3, length and speed 0, then
+  filament while idle, so an extruder-only retract slips against it and
+  moves the filament only part of the way. Unload and park run that
+  retract inside `rollback_assist()`: `FEED_OR_ROLLBACK` mode 3, length and speed 0, then
   `STOP_FEED_OR_ROLLBACK` and `wait_ready` however the retract ends - the
   sequence Anycubic's firmware runs (avata_main 2.0.2.2, 0x01257778). The
   protocol decides: `build_start_rollback_assist_request` is None for an
@@ -2204,8 +2206,8 @@ know the paths; it announces the tool and the printer config acts.
   `toolhead_load_retries` times (default 0): 150 mm back, `FEEDER=ACE`
   routed again, feed again. A feed the ACE aborted itself (slot
   `gear_err`, `FeedAbortedByFirmware`) is retried without the pull-back:
-  the filament is still in the gears and a pull-back after an early stall
-  took it out of their reach.
+  the filament is still in the gears, and a pull-back after an early stall
+  takes it out of their reach.
 - `toolchange_homing_axes` (default `xyz`): the axes `ACE_CHANGE_TOOL` homes
   first when they are unhomed (`commands.toolchange_homing_script`);
   `_ACE_PRE_TOOLCHANGE` skips its Z lift while Z is unhomed. Kobra X: `x`.

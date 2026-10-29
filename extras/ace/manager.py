@@ -3642,6 +3642,13 @@ class AceManager:
     # ========== Status and Reporting ==========
 
     def get_status(self, eventtime=None):
+        # For the panel and the macros, which number the tools and ask the
+        # tool changer by this name; in the fallback too, as the panel
+        # refuses slot taps until it has the base.
+        tool_numbering = {
+            "tool_changer": self.ace_config.get("tool_changer") or "",
+            "tool_base": get_tool_base(),
+        }
         try:
             # Sensor states: True/False when sensor is registered, None when unavailable.
             toolhead_sensor = (
@@ -3671,10 +3678,7 @@ class AceManager:
                 "lane_sync_enabled": bool(self._moonraker_lane_sync.enabled),
                 "toolchange_in_progress": bool(self.toolchange_in_progress),
                 "box_tag_tools": self._box_tag_tools(),
-                # For the panel and the macros, which number the tools
-                # and ask the tool changer by this name.
-                "tool_changer": self.ace_config.get("tool_changer") or "",
-                "tool_base": get_tool_base(),
+                **tool_numbering,
             }
         except Exception:
             return {
@@ -3691,6 +3695,7 @@ class AceManager:
                 "toolchange_in_progress": bool(
                     getattr(self, "toolchange_in_progress", False)),
                 "box_tag_tools": [],
+                **tool_numbering,
             }
 
     def _box_tag_tools(self):

@@ -288,6 +288,16 @@ class TestManagerWiring:
 
         assert (status["tool_changer"], status["tool_base"]) == ("my_changer", 3)
 
+    def test_the_status_keeps_the_base_when_a_field_fails(self):
+        # The panel refuses slot taps until it has the base.
+        manager, _ = self._connect(
+            {"my_changer": self._tool_changer(3)}, "my_changer")
+        manager._box_tag_tools = Mock(side_effect=RuntimeError("no state"))
+
+        status = manager.get_status()
+
+        assert (status["tool_changer"], status["tool_base"]) == ("my_changer", 3)
+
     def test_the_status_without_a_tool_changer(self):
         manager, _ = self._connect({})
 

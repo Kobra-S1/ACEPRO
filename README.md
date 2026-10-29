@@ -136,6 +136,9 @@ extras/ace/
 ├── serial_manager.py     # Serial transport: connect, frame I/O, request queue
 ├── endless_spool.py      # Automatic filament switching logic
 ├── runout_monitor.py     # Filament runout & tangle detection during printing
+├── monitor_events.py     # Runout/tangle/dry-resume handling queued as a G-code command
+├── connection_pause.py   # Connection-issue pause queued as a G-code command
+├── print_tools.py        # Tools a G-code file uses vs usable ACE slots
 ├── idle_assist.py        # Feed assist paused while the printer is idle
 ├── intake_gated.py       # Load/unload for an extruder gear between two sensors
 ├── rollback_assist.py    # ACE follows an extruder retract (ACE2 clamps otherwise)
@@ -669,12 +672,14 @@ driven by the Kobra Klipper fork, not by this driver.
   measured `sensor_to_nozzle` and is never overwritten. Compare it against the
   fork's copy after updating the fork.
 - **`[kx_toolchanger]` owns `T0..Tn`.** It maps each tool to a turret inlet
-  and calls `ACE_CHANGE_TOOL` with the ACE's own tool number for the inlets
-  `kx_multimaterial.cfg` marks `ace` (with one ACE on inlet 4, printer `T3` is
-  ACE `T0`). `ace_KX.cfg` therefore sets `register_tool_macros: False`;
+  and calls `ACE_CHANGE_TOOL` with the printer tool number for the inlets
+  `kx_multimaterial.cfg` marks `ace` (see "ACE tools use printer tool
+  numbers" below). `ace_KX.cfg` therefore sets `register_tool_macros: False`;
   without it Klipper stops at startup with `gcode command T0 already
   registered`. `PRINT_END` and `CANCEL_PRINT` unload through
-  `KX_CHANGE_TOOL TOOL=-1` for the same reason.
+  `KX_CHANGE_TOOL TOOL=-1` for the same reason. The start macro checks the
+  print's tools with the fork's `KX_CHECK_PRINT_TOOLS`, not
+  `ACE_CHECK_PRINT_TOOLS`.
 - **One ACE, a tube per inlet.** Set `topology: combo` in
   `kx_multimaterial.cfg`; printer `T0`-`T3` are ACE slots 0-3, and a second
   ACE unit is refused. No RDM in that path: the tool changer tells this
@@ -1166,7 +1171,7 @@ For detailed command examples with config parameters, see [example_cmds.txt](exa
 
 **For complete command documentation with examples, see [example_cmds.txt](example_cmds.txt)**
 
-This driver registers **50 GCode commands** (plus the `T<n>` tool macros) organized by category:
+This driver registers these G-code commands (plus the `T<n>` tool macros), organized by category:
 
 A command that fails (`T<n>`, `ACE_CHANGE_TOOL`, `ACE_FEED`, `ACE_RETRACT`, `ACE_STOP_FEED`, `ACE_STOP_RETRACT`, `ACE_SET_SLOT`, ...) answers with a G-code error, so a macro calling it stops at that line. A start macro whose initial tool change fails therefore aborts the print instead of printing without filament.
 
@@ -1232,7 +1237,7 @@ Behavior notes:
 | `ACE_ENABLE_FEED_ASSIST` | Enable auto-push on spool detection | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
 | `ACE_DISABLE_FEED_ASSIST` | Disable auto-push | `T=<tool>` or `INSTANCE=<0-3> INDEX=<0-3>` |
 
-### Inventory Management (4 commands)
+### Inventory Management
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
@@ -1265,7 +1270,7 @@ The integration handles three ways of identifying spools:
 
 *Note: The included T-macros (T0-T7) are pre-configured to trigger these Spoolman lookups automatically during tool changes.*
 
-### RFID Inventory Sync (3 commands)
+### RFID Inventory Sync
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
@@ -1273,7 +1278,7 @@ The integration handles three ways of identifying spools:
 | `ACE_DISABLE_RFID_SYNC` | Disable RFID-driven inventory updates | `[INSTANCE=<0-3>]` omit for all |
 | `ACE_RFID_SYNC_STATUS` | Show RFID sync enablement state | `[INSTANCE=<0-3>]` omit for all |
 
-### Endless Spool Feature (5 commands)
+### Endless Spool Feature
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
@@ -1284,7 +1289,7 @@ The integration handles three ways of identifying spools:
 | `ACE_GET_ENDLESS_SPOOL_MODE` | Query current match mode | - |
 
 
-### Dryer Control (2 commands)
+### Dryer Control
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
@@ -1299,8 +1304,10 @@ The integration handles three ways of identifying spools:
 | `ACE_RESET_ACTIVE_TOOLHEAD` | Reset feed assist on all instances, clear current and target tool (-1), filament position to bowden | - |
 | `ACE_TANGLE_DETECTION` | Toggle tangle detection live | `[ENABLE=0\|1]` omit to query |
 | `_ACE_TANGLE_DISABLE_AND_RESUME` | Internal: tangle prompt button, disables tangle detection and resumes | - |
+| `_ACE_MONITOR_EVENT` | Internal: runs a runout, tangle or dryer-resume event behind the G-code command running when it was detected | - |
+| `_ACE_CONNECTION_PAUSE` | Internal: the connection-issue pause, queued the same way | - |
 
-### System & Diagnostics (12 commands)
+### System & Diagnostics
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
@@ -1491,14 +1498,14 @@ Monitors ACE connection stability and automatically pauses prints if connection 
 1. **Reconnect Tracking** → Each connection loss and each failed connection attempt is timestamped
 2. **Health Monitoring** → Connection status checked every 2 seconds (low overhead)
 3. **Instability Detection** → If 4+ reconnects occur within 3 minutes, connection is flagged as unstable
-4. **During Print** → If the unstable ACE feeds the loaded tool, the print is paused and a dialog asks the user to fix the issue. The pause is queued behind the G-code command running at the time and dropped if the print is no longer printing by then (a cancel in progress finishes first). A paused print only gets the dialog
+4. **During Print** → If the unstable ACE feeds the loaded tool, the print is paused and a dialog asks the user to fix the issue. The pause is queued (`_ACE_CONNECTION_PAUSE`) behind the G-code command running at the time and dropped if the print is no longer printing by then (a cancel in progress finishes first). A paused print only gets the dialog
 5. **Otherwise** → Informational dialog shown (no pause): when idle, or when the print runs on another unit's tool or a printer tool changer's own tool
 6. **Recovery** → Dialog auto-closes when connection stabilizes (connected for 30+ seconds)
 
 ### Retry Backoff
 
 Failed connection attempts use exponential backoff to avoid log spam:
-- **Pattern**: 5s → 8s → 11s → 17s → 25s → 5s (factor 1.5, cyclic; it starts over instead of reaching 30s)
+- **Pattern**: 5s → 7.5s → 11.25s → 16.9s → 25.3s → 5s (factor 1.5, cyclic; it starts over instead of reaching 30s; the log rounds to whole seconds)
 - Once the ACE's USB location is known the floor is 1s instead of 5s
 - Backoff resets to the floor after a successful connection
 
@@ -1831,8 +1838,9 @@ KlipperScreen ships with a dedicated ACE Pro panel. The panel stays usable on sm
 - **Endless spool + match mode**: Toggle endless spool for all instances and pick match mode (exact/material/next). Match mode selection is disabled while endless spool is off.
 - **Instance cycling**: A shuffle button cycles ACE instances and shows the active one (e.g., "ACE 1 (2 of 3)").
 - **Refresh & utilities**: A refresh button pulls inventory + active tool; a Utilities button opens feed/retract controls.
-- **Slots UI**: Gear button runs load/unload; tapping a slot opens config. RFID-tagged slots display “(RFID)”. If RFID sync is enabled and a slot has an RFID tag, material/color editing is locked. Saving requires a material and temperature; “Empty” is not saved as ready. Material picks auto-fill a default temperature; color picker offers sliders and presets.
+- **Slots UI**: Gear button runs load/unload; tapping a slot opens config. RFID-tagged slots display “(RFID)”. If RFID sync is enabled and a slot has an RFID tag, material/color editing is locked. Saving requires a material and temperature; whether a slot is empty is the ACE's to report, not a material to pick. The Load and Unload dialogs also offer **Force Unload** (`ACE_SMART_UNLOAD TOOL=<n>`), for a filament the driver lost track of. Slot taps wait for the first status reply, which carries the printer's tool numbering. Material picks auto-fill a default temperature; color picker offers sliders and presets.
 - **Utilities panel**: Tool selector disables empty slots. Actions include feed/retract with keypad amount, stop feed/retract, smart load all, smart unload (optional tool), full unload (selected tool), feed-assist on/off, RFID sync on/off, and ACE reconnect.
+- **Small screens**: Landscape screens narrower than the full control row (480x320) get the same controls with shorter labels.
 - **Dryer control**: Per-instance controls with temp slider (25–55°C, default 45°C) and duration slider (30–480 min, default 240). Buttons: start/stop per instance, toggle current instance, start all dryers, stop all dryers.
 
 ### Panel Screenshots
@@ -1926,7 +1934,6 @@ Set target temperature and duration for the ACE Pro's built-in filament dryer. C
 **Inventory Management:**
 - View all loaded materials and colors
 - Set material/color/temperature for each slot
-- Mark slots as empty
 - Persist inventory to `saved_variables.cfg`
 
 **Tool Control:**
