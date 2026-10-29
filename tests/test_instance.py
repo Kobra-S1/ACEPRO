@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch, PropertyMock, call, ANY
 import time
 
 from ace.ace2_bus import Ace2BusSession
-from ace.instance import AceInstance
+from ace.instance import AceInstance, FEED_ASSIST_START_ATTEMPTS
 from ace.config import (
     ACE_INSTANCES,
     FeedAbortedByFirmware,
@@ -1473,6 +1473,40 @@ class TestFeedAssist(unittest.TestCase):
         self.assertEqual(instance._feed_assist_index, -1)
         self.assertIsNone(instance._feed_assist_topology_position)
         INSTANCE_MANAGERS[0].state.set.assert_not_called()
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_start_refused_for_a_moment_is_retried(self, mock_serial_mgr_class):
+        # A refusal that passes (the ACE still switching modes) must not
+        # fail the load and pull the filament back.
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._info['status'] = 'ready'
+        answers = iter([{'code': 1, 'msg': 'busy'}, {'code': 1, 'msg': 'busy'},
+                        {'code': 0}])
+        instance.send_request = Mock(side_effect=lambda req, cb: cb(next(answers)))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+
+        instance._enable_feed_assist(1)
+
+        self.assertEqual(instance.send_request.call_count, 3)
+        self.assertEqual(instance._feed_assist_index, 1)
+
+    @patch('ace.instance.AceSerialManager')
+    def test_a_start_refused_every_time_gives_up_after_the_retries(self, mock_serial_mgr_class):
+        instance = AceInstance(0, self.ace_config, self.mock_printer)
+        INSTANCE_MANAGERS[0] = Mock()
+        instance._info['status'] = 'ready'
+        instance.send_request = Mock(side_effect=lambda req, cb: cb({'code': 1, 'msg': 'busy'}))
+        instance.wait_ready = Mock()
+        instance.dwell = Mock()
+
+        with self.assertRaisesRegex(ValueError, "busy"):
+            instance._enable_feed_assist(1)
+
+        self.assertEqual(instance.send_request.call_count,
+                         FEED_ASSIST_START_ATTEMPTS)
+        self.assertEqual(instance._feed_assist_index, -1)
 
     @patch('ace.instance.AceSerialManager')
     def test_an_unanswered_enable_raises(self, mock_serial_mgr_class):

@@ -39,8 +39,12 @@ from .intake_gated import STRATEGY_SENSOR_PUSH
 # After a stop_feed_assist the ACE's reported status is trusted only this
 # much later.
 FEED_ASSIST_STOP_SETTLE_S = 1.0
-# How long the ACE has to answer a feed assist start.
+# How long the ACE has to answer a feed assist start, and how often a
+# refused or unanswered start is tried before the load fails (a refusal can
+# pass: the ACE still switching from feeding).
 FEED_ASSIST_ACK_TIMEOUT_S = 5.0
+FEED_ASSIST_START_ATTEMPTS = 3
+FEED_ASSIST_START_RETRY_S = 1.0
 # Poll interval while waiting for a reply.
 REPLY_POLL_S = 0.1
 
@@ -641,18 +645,26 @@ class AceInstance:
     def _enable_feed_assist(self, slot_index):
         """Enable feed assist on slot_index, stopping this unit's assist on
         another slot first. Recorded only once the ACE accepted it; raises
-        ValueError when it refused or did not answer."""
+        ValueError when it refused or did not answer every attempt."""
         if 0 <= self._feed_assist_index != slot_index:
             self._disable_feed_assist(self._feed_assist_index)
-        self.wait_ready()
-        response = self._request_reply(
-            self.protocol.build_start_feed_assist_request(slot_index),
-            FEED_ASSIST_ACK_TIMEOUT_S)
-        if not response or response.get("code") != 0:
+        for attempt in range(1, FEED_ASSIST_START_ATTEMPTS + 1):
+            self.wait_ready()
+            response = self._request_reply(
+                self.protocol.build_start_feed_assist_request(slot_index),
+                FEED_ASSIST_ACK_TIMEOUT_S)
+            if response and response.get("code") == 0:
+                break
             detail = response.get("msg", "no message") if response else "no answer"
-            raise ValueError(
-                f"ACE[{self.instance_num}]: Feed assist on slot {slot_index} "
-                f"was not started ({detail})")
+            if attempt == FEED_ASSIST_START_ATTEMPTS:
+                raise ValueError(
+                    f"ACE[{self.instance_num}]: Feed assist on slot {slot_index} "
+                    f"was not started after {attempt} attempts ({detail})")
+            logging.info(
+                f"ACE[{self.instance_num}]: Feed assist start on slot "
+                f"{slot_index} refused ({detail}), attempt {attempt} of "
+                f"{FEED_ASSIST_START_ATTEMPTS}")
+            self.dwell(FEED_ASSIST_START_RETRY_S)
         self._feed_assist_index = slot_index
         self._feed_assist_topology_position = self.serial_mgr.get_usb_topology_position()
         self.state.set(f"ace_feed_assist_index_{self.instance_num}", slot_index)
