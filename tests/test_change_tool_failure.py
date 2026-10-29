@@ -12,7 +12,14 @@ from unittest.mock import Mock, patch
 import pytest
 
 import ace.commands
-from ace.config import INSTANCE_MANAGERS
+from ace.config import ACE_INSTANCES, INSTANCE_MANAGERS
+
+
+@pytest.fixture(autouse=True)
+def two_aces():
+    """T0-T7 exist: ACE_CHANGE_TOOL refuses a tool no ACE has."""
+    with patch.dict(ACE_INSTANCES, {0: Mock(), 1: Mock()}, clear=True):
+        yield
 
 
 class CommandError(Exception):
@@ -255,3 +262,30 @@ def test_a_successful_unload_records_no_tool():
     ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(), -1)
 
     manager.record_no_tool.assert_called_once_with()
+
+
+# A tool number the ACEs do not have is refused before anything heats or
+# moves: it used to start the change and fail deep inside it.
+
+@pytest.mark.parametrize("base, tool", [
+    (3, 1),     # Kobra X: T1 is a direct inlet
+    (3, 7),     # past the one ACE's T3-T6
+    (0, 99),
+    (0, -2),
+])
+def test_a_tool_the_aces_do_not_have_is_refused_before_anything_moves(base, tool):
+    from ace.config import set_tool_base
+    manager = _manager(owned_by_tool_changer=True)
+    printer, gcode = _printer("standby")
+    set_tool_base(base)
+    try:
+        with patch.dict(ACE_INSTANCES, {0: Mock()}, clear=True), \
+                patch("ace.commands.get_printer", return_value=printer):
+            with pytest.raises(CommandError, match=f"TOOL={tool}"):
+                ace.commands.cmd_ACE_CHANGE_TOOL(manager, _gcmd(), tool)
+    finally:
+        set_tool_base(0)
+
+    manager.perform_tool_change.assert_not_called()
+    manager.smart_unload.assert_not_called()
+    assert _scripts(gcode) == []

@@ -1647,6 +1647,9 @@ def toolchange_homing_script(needed_axes, homed_axes):
 
 def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     """Handle tool change command."""
+    # Before anything heats or moves: an unknown tool failed deep inside
+    # the change, after the loaded tool's unload.
+    _check_ace_tool(gcmd, tool_index)
     if not manager.get_ace_global_enabled():
         if getattr(manager, "tool_changer_owns_tools", False) is True:
             # Ignoring it would let the tool changer record a tool that

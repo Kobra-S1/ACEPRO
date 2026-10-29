@@ -2122,7 +2122,7 @@ class TestToolChangeFailureDuringResume:
         mock_gcmd.error = RuntimeError
         with patch('ace.commands.get_printer', return_value=printer):
             with pytest.raises(RuntimeError, match="aborting resume"):
-                ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 5)
+                ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 2)
         # The Retry prompt was still shown before the raise
         prompts = [
             c for c in gcode.run_script_from_command.call_args_list
@@ -2137,7 +2137,7 @@ class TestToolChangeFailureDuringResume:
         manager = self._make_manager()
         printer, gcode = self._make_printer("printing")
         with patch('ace.commands.get_printer', return_value=printer):
-            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 5)  # no raise
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, mock_gcmd, 2)  # no raise
         gcode.run_script_from_command.assert_any_call('PAUSE')
 
 
