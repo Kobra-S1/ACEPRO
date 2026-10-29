@@ -444,16 +444,16 @@ def _bare_instance(pending_slot=2, attempts=0):
     inst._feed_assist_index = -1
     inst.send_request = Mock()
     inst.wait_ready = Mock()
+    inst._info = {"status": "ready", "slots": []}
     return inst
 
 
 class TestFeedAssistRestoreRetry:
     def test_busy_requeues_for_retry(self):
         inst = _bare_instance(pending_slot=2)
-        inst.wait_ready.side_effect = TimeoutError
+        inst._info["status"] = "busy"
         inst._maybe_restore_pending_feed_assist()
-        # Previously the pending flag was cleared and the promised retry
-        # never happened — now the slot must be re-queued.
+        # A busy device keeps the restore queued for the next heartbeat.
         assert inst._pending_feed_assist_restore == 2
         assert inst._feed_assist_restore_attempts == 1
         inst.send_request.assert_not_called()

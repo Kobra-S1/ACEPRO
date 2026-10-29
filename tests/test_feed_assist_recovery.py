@@ -275,6 +275,18 @@ class TestEmptySlotAssistRestoreSkip(unittest.TestCase):
         inst._maybe_restore_pending_feed_assist()
         assert inst.send_request.called
 
+    def test_a_busy_device_requeues_without_waiting(self):
+        # The restore runs in the serial reader's callback: a wait there
+        # stops the reader, so the status it waits for cannot arrive.
+        inst = self._bare_restore("ready")
+        inst._info["status"] = "busy"
+
+        inst._maybe_restore_pending_feed_assist()
+
+        assert not inst.wait_ready.called
+        assert not inst.send_request.called
+        assert inst._pending_feed_assist_restore == 1
+
     def test_initialized_default_empty_not_trusted(self):
         # Before the first real heartbeat, _info is the initialized
         # default (all slots 'empty') — restores must NOT be suppressed.

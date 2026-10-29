@@ -50,8 +50,9 @@ class AceInstance:
     DEFAULT_TEMP = 0
 
     # Feed assist restore retries: a freshly powered ACE spends time in RFID
-    # identification (busy) - retry once per heartbeat (~1 Hz) up to this cap
-    FEED_ASSIST_RESTORE_MAX_ATTEMPTS = 30
+    # identification (busy) - retry once per heartbeat (~1 Hz) up to this
+    # cap, about three minutes
+    FEED_ASSIST_RESTORE_MAX_ATTEMPTS = 180
 
     # Consecutive FORBIDDEN rejections tolerated per incremental feed step
     # before aborting (FORBIDDEN = previous feed still executing; a long
@@ -2521,25 +2522,23 @@ class AceInstance:
             f"ACE[{self.instance_num}]: Restoring feed assist on slot {slot} "
             f"(chain position: {current_position})"
         )
-        try:
-            # Use short timeout - if ACE is busy (e.g., RFID read/preload), skip restoration
-            # Feed assist can be restored later or manually if needed
-            self.wait_ready(timeout_s=5.0)
-            request = self.protocol.build_start_feed_assist_request(slot)
-            self.send_request(
-                request,
-                lambda response: self._on_feed_assist_restore_response(response, slot)
-            )
-        except TimeoutError:
-            # ACE busy (likely RFID read/preload) - re-queue so the next
-            # heartbeat actually retries (previously this message promised a
-            # retry that never happened: the pending flag was already cleared)
+        if not self.is_ready():
+            # Busy (RFID identification, preload): retried on the next
+            # heartbeat. No wait here - this runs in the serial reader's
+            # callback, and the status a wait needs comes through that reader.
             self._pending_feed_assist_restore = slot
             logging.info(
                 f"ACE[{self.instance_num}]: Feed assist restoration on slot {slot} "
                 f"deferred (ACE busy) - retry "
                 f"{self._feed_assist_restore_attempts}/{self.FEED_ASSIST_RESTORE_MAX_ATTEMPTS} "
                 f"on next status update"
+            )
+            return
+        try:
+            request = self.protocol.build_start_feed_assist_request(slot)
+            self.send_request(
+                request,
+                lambda response: self._on_feed_assist_restore_response(response, slot)
             )
         except Exception as e:
             self.gcode.respond_info(
