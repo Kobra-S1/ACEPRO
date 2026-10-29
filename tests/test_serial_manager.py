@@ -841,10 +841,9 @@ class TestConnectionLifecycle:
 
     def test_enable_disable_toggle(self):
         self.manager._ace_pro_enabled = False
-        self.manager._baud = 57600
         self.manager.connect_to_ace = Mock()
 
-        self.manager.enable_ace_pro()
+        self.manager.enable_ace_pro(57600)
 
         self.manager.connect_to_ace.assert_called_once()
         assert self.manager._ace_pro_enabled is True
@@ -854,11 +853,21 @@ class TestConnectionLifecycle:
         self.manager.disconnect.assert_called_once()
         assert self.manager._ace_pro_enabled is False
 
+    def test_enabling_after_a_disabled_start_connects_at_the_given_baud(self):
+        # Disabled at startup, connect_to_ace returned before storing a baud.
+        self.manager._ace_pro_enabled = False
+        self.manager.connect_to_ace(230400)
+        self.manager.connect_to_ace = Mock()
+
+        self.manager.enable_ace_pro(230400)
+
+        self.manager.connect_to_ace.assert_called_once_with(230400)
+
     def test_enable_ace_pro_when_already_enabled_no_reconnect(self):
         self.manager._ace_pro_enabled = True
         self.manager.connect_to_ace = Mock()
 
-        self.manager.enable_ace_pro()
+        self.manager.enable_ace_pro(115200)
 
         self.manager.connect_to_ace.assert_not_called()
 

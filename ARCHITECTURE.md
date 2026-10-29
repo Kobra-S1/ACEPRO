@@ -986,7 +986,7 @@ dispatch_response(response)              # Route response to callback
                                          # Returns (callback, was_solicited) tuple
 
 # ACE Enable/Disable Support
-enable_ace_pro()                         # Enable reconnection attempts
+enable_ace_pro(baud)                     # Enable reconnection attempts at baud
 disable_ace_pro()                        # Disable reconnection attempts
 is_ace_pro_enabled()                     # Check if ACE Pro is enabled
 ```

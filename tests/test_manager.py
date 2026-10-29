@@ -5076,7 +5076,9 @@ class TestUpdateAceSupportActiveState(unittest.TestCase):
         self.manager._setup_sensors.assert_called_once()
         self.manager._disable_all_sensor_detection.assert_called_once()
         self.manager.set_ace_global_enabled.assert_called_once_with(True)
-        self.instance.serial_mgr.enable_ace_pro.assert_called_once()
+        # At the instance's baud: an ACE2 bus does not answer at 115200.
+        self.instance.serial_mgr.enable_ace_pro.assert_called_once_with(
+            self.instance.baud)
         self.assertTrue(self.manager._ace_pro_enabled)
 
     def test_sync_inventory_single_instance(self):

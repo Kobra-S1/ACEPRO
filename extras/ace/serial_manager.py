@@ -197,8 +197,8 @@ class AceSerialManager:
         self._comm_duplicate_timestamps = []    # Duplicate reply times (health stats)
         self._last_duplicate_warn_time = None
 
-    def enable_ace_pro(self):
-        """Enable ACE Pro and reconnect if not connected."""
+    def enable_ace_pro(self, baud):
+        """Enable ACE Pro and reconnect at baud if it was disabled."""
         was_disabled = not self._ace_pro_enabled
         self._ace_pro_enabled = True
 
@@ -207,7 +207,6 @@ class AceSerialManager:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: ACE Pro enabled - reconnecting"
             )
-            baud = self._baud if self._baud else 115200
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Using baud rate: {baud}"
             )
