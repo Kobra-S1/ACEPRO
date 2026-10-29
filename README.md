@@ -995,6 +995,8 @@ Link `extras/temperature_ace.py` into Klipper extras (see installation) and rest
 
 ### Other `[ace]` options worth knowing
 
+The Kobra X options (`toolhead_strategy`, `toolhead_paths`, `filament_intake_sensor_name`, `intake_*`, `toolhead_load_retries`, `runout_reload_length`, `toolhead_clear_length`, `toolchange_homing_axes`) are explained where they are set, in `config/ace_KX.cfg`; ARCHITECTURE.md describes the load strategies behind them.
+
 - `tangle_detection` / `tangle_pump_time` / `tangle_verify_time` / `tangle_pump_time_hard`: Enable ACE-side tangle detection (ACE 1 and ACE 2; **enabled by default in the shipped printer configs**, including a Mainsail/Fluidd dashboard slider — the bare code default is off for configs that don't set it). Reads the firmware-reported `cont_assist_time` field (ACE 2 reports milliseconds — normalized internally), so it only works while feed assist is active on the printing unit; it also runs inside the runout monitor loop and is therefore suspended whenever runout detection is (paused, toolchange, detection disabled). ACE 2's own firmware only detects blocked *commanded* feeds (slot LED flashes, `gear_err`); during printing it would pump against a tangle forever — hence host-side detection covers both generations.
   A spool running out **at the ACE** pumps exactly like a tangle ("nothing left to push" vs "can't push"), so the slot presence state decides the verdict instead of pausing blindly:
   - Slot reports **empty** → spool runout: the print keeps running on the remaining filament until the toolhead sensor triggers normal runout/endless-spool handling — no false tangle pause.
@@ -1165,6 +1167,8 @@ For detailed command examples with config parameters, see [example_cmds.txt](exa
 **For complete command documentation with examples, see [example_cmds.txt](example_cmds.txt)**
 
 This driver registers **50 GCode commands** (plus the `T<n>` tool macros) organized by category:
+
+A command that fails (`T<n>`, `ACE_CHANGE_TOOL`, `ACE_FEED`, `ACE_RETRACT`, `ACE_STOP_FEED`, `ACE_STOP_RETRACT`, `ACE_SET_SLOT`, ...) answers with a G-code error, so a macro calling it stops at that line. A start macro whose initial tool change fails therefore aborts the print instead of printing without filament.
 
 ### Tool Selection
 

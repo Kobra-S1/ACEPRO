@@ -442,8 +442,8 @@ class AceProtoProtocolAdapter(AceProtocolAdapter):
                         "state_code": dry_state_code,
                         "target_temp": _pb_first(dry_status_fields, 2, 0),
                         # ACE2 takes the duration in minutes but reports it
-                        # in seconds; ACE1 reports minutes.  Normalize to
-                        # minutes like cont_assist_time below.
+                        # in seconds; ACE1 reports minutes.  Normalized to
+                        # ACE1's unit, as cont_assist_time below is.
                         "duration": round(_pb_first(dry_status_fields, 3, 0) / 60),
                         "remain_time": _pb_first(dry_status_fields, 4, 0),
                     },

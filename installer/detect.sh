@@ -59,7 +59,7 @@ printer_maturity_warning() {
             echo "switch during the first homing, first cut and first purge."
             ;;
         KX)
-            echo "The Kobra X (KX) config is ALPHA, dont use it!"
+            echo "The Kobra X (KX) config is ALPHA, do not use it!"
             ;;
     esac
 }

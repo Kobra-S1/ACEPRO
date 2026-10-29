@@ -598,10 +598,12 @@ class AceInstance:
     def _get_slot_feed_error(self, slot_index):
         """Return the firmware-reported slot error detail, or None.
 
-        Both generations report a per-slot error state ("gear_err") when a
-        feed cannot make progress; ACE2 additionally distinguishes the fault
-        via status_detail (feed_error/rollback_error/assist_error/
-        preload_error/stuck_error/tangled_error/motor_error).
+        ACE2 reports a per-slot error state ("gear_err") when a commanded
+        feed cannot make progress, with the fault in status_detail
+        (feed_error/rollback_error/assist_error/preload_error/stuck_error/
+        tangled_error/motor_error).  The state list has gear_err for ACE1
+        too, but no ACE1 has been seen reporting it; there a blocked feed
+        runs into the sensor timeout instead.
         On ACE2 the firmware aborts a blocked feed by itself after ~18 s —
         polling this during sensor waits turns a minutes-long blind timeout
         into a fast, precise failure.
