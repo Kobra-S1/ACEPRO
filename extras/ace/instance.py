@@ -39,6 +39,10 @@ from .intake_gated import STRATEGY_SENSOR_PUSH
 # After a stop_feed_assist the ACE's reported status is trusted only this
 # much later.
 FEED_ASSIST_STOP_SETTLE_S = 1.0
+# How long the ACE has to answer a feed assist start.
+FEED_ASSIST_ACK_TIMEOUT_S = 5.0
+# Poll interval while waiting for a reply.
+REPLY_POLL_S = 0.1
 
 
 class AceInstance:
@@ -635,34 +639,43 @@ class AceInstance:
             return False
 
     def _enable_feed_assist(self, slot_index):
-        """Enable feed assist for smooth filament loading."""
+        """Enable feed assist on slot_index, stopping this unit's assist on
+        another slot first. Recorded only once the ACE accepted it; raises
+        ValueError when it refused or did not answer."""
+        if 0 <= self._feed_assist_index != slot_index:
+            self._disable_feed_assist(self._feed_assist_index)
+        self.wait_ready()
+        response = self._request_reply(
+            self.protocol.build_start_feed_assist_request(slot_index),
+            FEED_ASSIST_ACK_TIMEOUT_S)
+        if not response or response.get("code") != 0:
+            detail = response.get("msg", "no message") if response else "no answer"
+            raise ValueError(
+                f"ACE[{self.instance_num}]: Feed assist on slot {slot_index} "
+                f"was not started ({detail})")
         self._feed_assist_index = slot_index
         self._feed_assist_topology_position = self.serial_mgr.get_usb_topology_position()
-
-        def callback(response):
-            if response and response.get("code") == 0:
-                self.gcode.respond_info(
-                    f"ACE[{self.instance_num}]: Feed assist enabled on slot {slot_index}"
-                )
-                self.state.set(
-                    f"ace_feed_assist_index_{self.instance_num}",
-                    slot_index
-                )
-            else:
-                msg = response.get("msg", "Unknown") if response else ""
-                logging.warning(
-                    f"ACE[{self.instance_num}]: Feed assist enable failed: {msg}"
-                )
-
-        self.wait_ready()
-        request = self.protocol.build_start_feed_assist_request(slot_index)
-        self.send_request(request, callback)
+        self.state.set(f"ace_feed_assist_index_{self.instance_num}", slot_index)
+        self.gcode.respond_info(
+            f"ACE[{self.instance_num}]: Feed assist enabled on slot {slot_index}"
+        )
         # ACE1: stays 'ready' during feed assist, so wait confirms the command was processed.
         # ACE2: transitions to 'busy' the moment feed assist starts and never returns to
         # 'ready' until STOP_FEED_ASSIST is received.  Calling wait_ready() here on ACE2
         # would block forever.
         if not self.protocol.feed_assist_causes_busy():
             self.wait_ready()
+
+    def _request_reply(self, request, timeout_s):
+        """Send request and return its reply, or None when none came within
+        timeout_s. Pauses the reactor: never from a reactor timer or the
+        serial reader's callbacks."""
+        reply = {}
+        self.send_request(request, lambda response: reply.setdefault("r", response))
+        deadline = self.reactor.monotonic() + timeout_s
+        while "r" not in reply and self.reactor.monotonic() < deadline:
+            self.reactor.pause(self.reactor.monotonic() + REPLY_POLL_S)
+        return reply.get("r")
 
     def _disable_feed_assist(self, slot_index):
         """Disable feed assist and wait until the ACE has stopped."""

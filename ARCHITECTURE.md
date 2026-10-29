@@ -325,7 +325,7 @@ _smart_unload_slot(slot, length)             # Unload with sensor validation and
 rmd_triggered_unload_slot(...)               # RDM-triggered unload with callback-driven early stop + overshoot
 
 # Feed Assist
-_enable_feed_assist(slot)                    # Auto-push filament on detection
+_enable_feed_assist(slot)                    # Recorded once the ACE accepts; raises otherwise
                                              # Contains protocol-aware post-send wait_ready():
                                              # runs on ACE1 (stays ready); skipped on ACE2
                                              # (transitions to busy — see Protocol Layer)
