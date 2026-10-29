@@ -188,3 +188,18 @@ def test_an_idle_failure_before_the_unload_keeps_the_previous_tool():
 
     assert state["ace_current_index"] == 1
     assert _active_macro_value(gcode) == 1
+
+
+def test_an_idle_failure_after_a_confirmed_load_pins_the_requested_tool():
+    # Hardware 2026-10-29: T3 loaded, then the purge failed; the record
+    # fell back to no tool while T3's filament sat in the nozzle.
+    manager, state = _manager_with_state(
+        previous_tool=-1, filament_pos="nozzle", confirm_load_of=4)
+    printer, gcode = _printer("standby")
+
+    with patch("ace.commands.get_printer", return_value=printer):
+        with pytest.raises(CommandError, match="T4"):
+            ace.commands.cmd_ACE_CHANGE_TOOL(manager, _gcmd(), 4)
+
+    assert state["ace_current_index"] == 4
+    assert _active_macro_value(gcode) == 4

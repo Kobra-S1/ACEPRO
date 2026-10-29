@@ -128,6 +128,7 @@ When a tool change fails while the printer is idle or starting up, the error han
 
 | `ace_filament_pos` after failure | Path sensor | `ace_current_index` set to |
 |---|---|---|
+| any, load already confirmed (a later step such as the purge failed) | any | `tool_index` (new tool in the nozzle) |
 | `"bowden"` (old tool unloaded OK) | **clear** | `-1` (no tool in path) |
 | `"bowden"` (old tool unloaded OK) | **blocked** | `tool_index` (new tool stuck in path) |
 | `"nozzle"` or `"splitter"` (unload failed) | any | `fallback_tool` (old tool still in path) |
