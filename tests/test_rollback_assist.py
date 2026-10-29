@@ -130,6 +130,37 @@ def test_the_rollback_assist_is_stopped_when_the_retract_fails():
     assert instance.ready_waits >= 1
 
 
+class StopUnanswered(Ace2Instance):
+    """Starts the assist, then stops answering (a USB drop mid-unload)."""
+
+    def send_request(self, request, callback):
+        if "start rollback assist" in request:
+            super().send_request(request, callback)
+            return
+        self.steps.append("rollback assist off")
+        callback(None)
+
+
+def test_a_failed_retract_keeps_its_error_when_the_stop_fails_too():
+    # The stop's "no answer" replaced the cause and sent the diagnosis to
+    # the ACE link.
+    instance = StopUnanswered(ClampedFilament(tip=30.0))
+
+    with pytest.raises(ValueError, match="still sees filament"):
+        unload(instance, extruder_limit=20.0)
+
+    assert any("stop rollback assist" in m for m in instance.messages), \
+        instance.messages
+
+
+def test_a_stop_that_fails_after_a_good_retract_is_an_error():
+    # The ACE may still be assisting: the next command must not run on it.
+    instance = StopUnanswered(ClampedFilament(tip=30.0))
+
+    with pytest.raises(ValueError, match="stop rollback assist"):
+        park(instance)
+
+
 def test_a_refused_rollback_assist_stops_before_the_extruder_pulls():
     instance = Ace2Instance(ClampedFilament(tip=30.0))
     instance.answer = {"code": 1, "msg": "FORBIDDEN"}
