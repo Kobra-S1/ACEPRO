@@ -203,3 +203,53 @@ def test_an_idle_failure_after_a_confirmed_load_pins_the_requested_tool():
 
     assert state["ace_current_index"] == 4
     assert _active_macro_value(gcode) == 4
+
+
+# TOOL=-1: a failed unload or park is an error to the caller (the panel's
+# unload button, kx_toolchanger, a macro), not a console line. The tool
+# stays recorded: the next change retries its unload.
+
+def _unloading_manager(result):
+    manager = _manager(owned_by_tool_changer=False)
+    manager.state.get = Mock(side_effect=lambda key, default=None: (
+        3 if key == "ace_current_index" else default))
+    outcome = Mock(side_effect=result) if isinstance(result, Exception) \
+        else Mock(return_value=result)
+    manager.smart_unload = outcome
+    manager.park_tool = outcome
+    return manager
+
+
+def _unload_gcmd(park=0):
+    gcmd = _gcmd(tool=-1)
+    gcmd.get_int = Mock(side_effect=lambda name, default=None, **kw:
+                        park if name == "PARK" else -1)
+    return gcmd
+
+
+@pytest.mark.parametrize("park", [0, 1])
+def test_an_unload_that_reports_failure_is_an_error(park):
+    manager = _unloading_manager(False)
+
+    with pytest.raises(CommandError, match="T3"):
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(park), -1)
+
+    manager.state.set.assert_not_called()
+
+
+@pytest.mark.parametrize("park", [0, 1])
+def test_an_unload_that_raises_is_an_error_naming_the_cause(park):
+    manager = _unloading_manager(RuntimeError("Path still blocked"))
+
+    with pytest.raises(CommandError, match="Path still blocked"):
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(park), -1)
+
+    manager.state.set.assert_not_called()
+
+
+def test_a_successful_unload_records_no_tool():
+    manager = _unloading_manager(True)
+
+    ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(), -1)
+
+    manager.state.set.assert_any_call("ace_current_index", -1)

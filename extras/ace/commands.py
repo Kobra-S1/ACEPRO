@@ -1663,8 +1663,6 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         gcmd.respond_info("ACE: Global ACE Pro support disabled - tool change ignored")
         return
 
-    printer = get_printer()
-
     if tool_index == -1:
         current_tool = manager.state.get("ace_current_index", -1)
         if current_tool < 0:
@@ -1672,19 +1670,19 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
 
         # PARK=1: out of the hotend only, parked at the toolhead's intake.
         park = gcmd.get_int("PARK", 0) and current_tool >= 0
+        what = "Park" if park else "Unload"
+        # A failure reaches the caller (a panel, a tool changer, a macro);
+        # the tool stays recorded, so the next change retries its unload.
         try:
             if park:
                 success = manager.park_tool(current_tool)
             else:
                 success = manager.smart_unload(current_tool)
-            if success:
-                # gcmd.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
-                manager.state.set("ace_current_index", -1)
-            else:
-                gcmd.respond_info(f"ACE: Smart unload of tool {current_tool} failed")
         except Exception as e:
-            gcmd.respond_info(f"ACE: Smart unload error: {e}")
-
+            raise gcmd.error(f"ACE: {what} of T{current_tool} failed: {e}")
+        if not success:
+            raise gcmd.error(f"ACE: {what} of T{current_tool} failed")
+        manager.state.set("ace_current_index", -1)
         return
 
     printer = get_printer()

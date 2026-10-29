@@ -2272,19 +2272,18 @@ class TestToolChangeIntegration:
         assert INSTANCE_MANAGERS[0].state.set.called
 
     def test_cmd_ACE_CHANGE_TOOL_unload_failure(self, mock_gcmd, setup_mocks):
-        """Test tool unload failure - error handling."""
+        """A failed unload is a G-code error to the caller."""
         mock_gcmd.get_int = Mock(return_value=0)
-        
+
         # Mock smart_unload to fail
         INSTANCE_MANAGERS[0].smart_unload = Mock(return_value=False)
         INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
-        
-        ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
-        
-        # Verify failure message was sent
-        assert mock_gcmd.respond_info.called
-        call_args = [call[0][0] for call in mock_gcmd.respond_info.call_args_list]
-        assert any("failed" in msg.lower() for msg in call_args)
+
+        with pytest.raises(Exception):
+            ace.commands.cmd_ACE_CHANGE_TOOL(INSTANCE_MANAGERS[0], mock_gcmd, -1)
+
+        message = mock_gcmd.error.call_args[0][0]
+        assert "T0" in message and "failed" in message
 
     def test_cmd_ACE_CHANGE_TOOL_successful_change(self, mock_gcmd, setup_mocks):
         """Test successful tool change - happy path."""
