@@ -3607,15 +3607,21 @@ class AceManager:
         gcode_move.reset_last_position()
 
         if target_tool == -1:
-            self.state.set("ace_current_index", -1)
             # Unload-only change confirmed complete -- nothing left in flight.
-            self.state.set("ace_target_index", -1)
-            self.gcode.run_script_from_command(
-                "SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1"
-            )
+            self.record_no_tool()
             self.gcode.respond_info("ACE: State updated - no tool currently loaded")
 
         return status
+
+    def record_no_tool(self):
+        """Record that no tool is loaded and none is in flight: the current
+        and target index and the _ACE_STATE macro's `active`, which the
+        printer macros read. Runs G-code: call it from a command."""
+        self.state.set("ace_current_index", -1)
+        self.state.set("ace_target_index", -1)
+        self.gcode.run_script_from_command(
+            "SET_GCODE_VARIABLE MACRO=_ACE_STATE VARIABLE=active VALUE=-1"
+        )
 
     def register_tool_macros(self, instance_num):
         """

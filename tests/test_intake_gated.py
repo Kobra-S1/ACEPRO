@@ -289,6 +289,35 @@ def test_a_pull_through_whose_filament_stops_moving_raises():
     assert instance.extruder_travel() <= 20.0 + 5.0 + 15.0 + 1.0
 
 
+
+class ExtruderFails(FakeInstance):
+    """The extruder refuses after `moves_ok` moves ("Extrude below minimum
+    temp", a shutdown) while the ACE is still feeding."""
+    def __init__(self, filament, moves_ok):
+        FakeInstance.__init__(self, filament)
+        self.moves_ok = moves_ok
+
+    def _extruder_move(self, length, speed, wait_for_move_end=False):
+        if self.moves_ok == 0:
+            raise RuntimeError("Extrude below minimum temp")
+        self.moves_ok -= 1
+        FakeInstance._extruder_move(self, length, speed, wait_for_move_end)
+
+
+@pytest.mark.parametrize("moves_ok, push_through", [
+    (0, 0.0),       # on the pull to the toolhead sensor
+    (60, 55.0),     # on the pull through after a runout
+])
+def test_an_extruder_that_fails_mid_load_stops_the_ace_feed(moves_ok, push_through):
+    instance = ExtruderFails(FakeFilament(tip=-20.0), moves_ok)
+
+    with pytest.raises(RuntimeError, match="minimum temp"):
+        transfer_for(instance).load(SLOT, push_through=push_through)
+
+    assert not instance.feeding, instance.steps
+    assert "assist on" not in instance.steps
+
+
 # --- unload -------------------------------------------------------------
 
 def unload(instance, extruder_limit=100.0):

@@ -12,7 +12,14 @@ from unittest.mock import Mock, patch
 import pytest
 
 import ace.commands
-from ace.config import INSTANCE_MANAGERS
+from ace.config import ACE_INSTANCES, INSTANCE_MANAGERS
+
+
+@pytest.fixture(autouse=True)
+def two_aces():
+    """T0-T7 exist: ACE_CHANGE_TOOL refuses a tool no ACE has."""
+    with patch.dict(ACE_INSTANCES, {0: Mock(), 1: Mock()}, clear=True):
+        yield
 
 
 class CommandError(Exception):
@@ -203,3 +210,82 @@ def test_an_idle_failure_after_a_confirmed_load_pins_the_requested_tool():
 
     assert state["ace_current_index"] == 4
     assert _active_macro_value(gcode) == 4
+
+
+# TOOL=-1: a failed unload or park is an error to the caller (the panel's
+# unload button, kx_toolchanger, a macro), not a console line. The tool
+# stays recorded: the next change retries its unload.
+
+def _unloading_manager(result):
+    manager = _manager(owned_by_tool_changer=False)
+    manager.state.get = Mock(side_effect=lambda key, default=None: (
+        3 if key == "ace_current_index" else default))
+    outcome = Mock(side_effect=result) if isinstance(result, Exception) \
+        else Mock(return_value=result)
+    manager.smart_unload = outcome
+    manager.park_tool = outcome
+    return manager
+
+
+def _unload_gcmd(park=0):
+    gcmd = _gcmd(tool=-1)
+    gcmd.get_int = Mock(side_effect=lambda name, default=None, **kw:
+                        park if name == "PARK" else -1)
+    return gcmd
+
+
+@pytest.mark.parametrize("park", [0, 1])
+def test_an_unload_that_reports_failure_is_an_error(park):
+    manager = _unloading_manager(False)
+
+    with pytest.raises(CommandError, match="T3"):
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(park), -1)
+
+    manager.state.set.assert_not_called()
+    manager.record_no_tool.assert_not_called()
+
+
+@pytest.mark.parametrize("park", [0, 1])
+def test_an_unload_that_raises_is_an_error_naming_the_cause(park):
+    manager = _unloading_manager(RuntimeError("Path still blocked"))
+
+    with pytest.raises(CommandError, match="Path still blocked"):
+        ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(park), -1)
+
+    manager.state.set.assert_not_called()
+    manager.record_no_tool.assert_not_called()
+
+
+def test_a_successful_unload_records_no_tool():
+    manager = _unloading_manager(True)
+
+    ace.commands.cmd_ACE_CHANGE_TOOL(manager, _unload_gcmd(), -1)
+
+    manager.record_no_tool.assert_called_once_with()
+
+
+# A tool number the ACEs do not have is refused before anything heats or
+# moves: it used to start the change and fail deep inside it.
+
+@pytest.mark.parametrize("base, tool", [
+    (3, 1),     # Kobra X: T1 is a direct inlet
+    (3, 7),     # past the one ACE's T3-T6
+    (0, 99),
+    (0, -2),
+])
+def test_a_tool_the_aces_do_not_have_is_refused_before_anything_moves(base, tool):
+    from ace.config import set_tool_base
+    manager = _manager(owned_by_tool_changer=True)
+    printer, gcode = _printer("standby")
+    set_tool_base(base)
+    try:
+        with patch.dict(ACE_INSTANCES, {0: Mock()}, clear=True), \
+                patch("ace.commands.get_printer", return_value=printer):
+            with pytest.raises(CommandError, match=f"TOOL={tool}"):
+                ace.commands.cmd_ACE_CHANGE_TOOL(manager, _gcmd(), tool)
+    finally:
+        set_tool_base(0)
+
+    manager.perform_tool_change.assert_not_called()
+    manager.smart_unload.assert_not_called()
+    assert _scripts(gcode) == []

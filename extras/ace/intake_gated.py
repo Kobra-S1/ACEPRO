@@ -71,6 +71,19 @@ class IntakeGatedTransfer:
     def __init__(self, instance, intake):
         self.instance = instance
         self.intake = intake
+        # The slot a load's ACE feed runs on, None while none runs.
+        self._feeding_slot = None
+
+    def _start_feed(self, local_slot, length, speed):
+        self.instance.execute_feed_with_retries(local_slot, length, speed)
+        self._feeding_slot = local_slot
+
+    def _stop_feed(self):
+        """Stop the load's ACE feed if it still runs; once only."""
+        if self._feeding_slot is None:
+            return
+        self.instance._stop_feed(self._feeding_slot)
+        self._feeding_slot = None
 
     def _at_toolhead_sensor(self):
         return self.instance.manager.get_switch_state(SENSOR_TOOLHEAD)
@@ -117,11 +130,17 @@ class IntakeGatedTransfer:
             return
         if parked and self._resume(local_slot):
             return
-        self._feed_to_intake(local_slot)
-        self._pull_to_toolhead_sensor(local_slot)
-        if push_through > 0.:
-            self._pull_through(local_slot, push_through)
-        instance._stop_feed(local_slot)
+        try:
+            self._feed_to_intake(local_slot)
+            self._pull_to_toolhead_sensor(local_slot)
+            if push_through > 0.:
+                self._pull_through(local_slot, push_through)
+        finally:
+            # An extruder that refuses ("Extrude below minimum temp", a
+            # shutdown) would leave the ACE pushing for the rest of
+            # toolchange_load_length; the phases stop it earlier where the
+            # order matters.
+            self._stop_feed()
         instance.wait_ready()
         instance._enable_feed_assist(local_slot)
 
@@ -167,7 +186,7 @@ class IntakeGatedTransfer:
         length = instance.toolchange_load_length
         speed = instance.intake_feed_speed
         mark = self.intake.intake_edges()
-        instance.execute_feed_with_retries(local_slot, length, speed)
+        self._start_feed(local_slot, length, speed)
         timeout_s = length / speed * instance.timeout_multiplier
         waited = 0.0
         while self.intake.intake_edges() == mark and not self._at_toolhead_sensor():
@@ -182,7 +201,7 @@ class IntakeGatedTransfer:
                 error = (f"{name}: Filament of slot {local_slot} did not reach "
                          f"the intake sensor within {length:.0f}mm of feed.")
             if error is not None:
-                instance._stop_feed(local_slot)
+                self._stop_feed()
                 if slot_error is not None:
                     raise FeedAbortedByFirmware(error)
                 raise ValueError(error)
@@ -194,7 +213,7 @@ class IntakeGatedTransfer:
             if instance._change_feed_speed(local_slot, slow):
                 return
             instance.dwell(0.2)
-        instance._stop_feed(local_slot)
+        self._stop_feed()
         raise ValueError(
             f"{name}: Failed to change feed speed to {slow}mm/s for the "
             f"extruder to take the filament over"
@@ -207,7 +226,7 @@ class IntakeGatedTransfer:
         pulled = self._extruder_until(self._at_toolhead_sensor, 1, speed, limit)
         if self._at_toolhead_sensor():
             return
-        instance._stop_feed(local_slot)
+        self._stop_feed()
         # Out of the gear again, or the ACE could not take the filament back.
         instance._extruder_move(-pulled, speed, wait_for_move_end=True)
         raise ValueError(
@@ -236,7 +255,7 @@ class IntakeGatedTransfer:
             quiet += stretch
             if quiet >= instance.intake_clear_length:
                 instance.manager._wait_toolhead_move_finished()
-                instance._stop_feed(local_slot)
+                self._stop_feed()
                 raise ValueError(
                     f"ACE[{instance.instance_num}]: The filament of slot "
                     f"{local_slot} stopped moving through the intake "

@@ -147,7 +147,9 @@ only the rest. With `register_tool_macros: False`
 the state decision above and without `PAUSE` or the Retry prompt: the tool
 changer holds the print and offers its own retry, and records the tool only
 when the call succeeded. A change asked for while ACE support is disabled
-raises there too instead of being ignored. Rejected: the tool changer
+raises there too instead of being ignored. So does a failed unload or
+park (`TOOL=-1`), with the tool left recorded so the next change retries
+it. Rejected: the tool changer
 checking `ace_current_index` after every call - the failure belongs to the
 command that failed, and a check per caller is skipped by the next caller.
 
