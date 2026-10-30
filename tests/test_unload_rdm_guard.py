@@ -59,6 +59,7 @@ class TestSmartUnloadRdmEarlyStopGuard:
         mgr.has_rdm_sensor = Mock(return_value=True)
         mgr._get_config_for_tool = Mock(return_value=800.0)
         mgr._extruder_move = Mock()
+        mgr._start_queued_toolhead_moves = Mock()
         mgr._wait_toolhead_move_finished = Mock()
         mgr.is_filament_path_free_instant = Mock(return_value=True)
         mgr._restore_heater_if_idle = Mock()
