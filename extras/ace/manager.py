@@ -41,6 +41,7 @@ from .intake_gated import (
 )
 
 from .instance import AceInstance
+from .extruder_move import extruder_move
 from .ace2_bus import Ace2BusSession
 from .endless_spool import EndlessSpool
 from .runout_monitor import RunoutMonitor
@@ -1397,32 +1398,8 @@ class AceManager:
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.wait_moves()
 
-    def _start_queued_toolhead_moves(self):
-        """Hand every queued move to the steppers now. Klipper otherwise
-        holds the newest ones back for its look-ahead, up to a second's
-        worth after an idle toolhead."""
-        self.printer.lookup_object('toolhead').get_last_move_time()
-
     def _extruder_move(self, length, speed, wait_for_move_end=False):
-        """Move extruder (relative) via motion planner, synchronously."""
-        if length == 0:
-            self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: _extruder_move() -> Skipping zero-length move"
-            )
-            return
-
-        toolhead = self.printer.lookup_object('toolhead')
-        cur_pos = list(toolhead.get_position())  # [X, Y, Z, E]
-
-        new_pos = cur_pos[:]
-        new_pos[3] += length
-
-        toolhead.move(new_pos, speed)
-        # This move bypasses G-code: without the reset the next G1 drives
-        # the extruder back to the E position G-code still remembers.
-        self.printer.lookup_object('gcode_move').reset_last_position()
-        if wait_for_move_end:
-            toolhead.wait_moves()
+        extruder_move(self.printer, self.gcode, length, speed, wait_for_move_end)
 
     def route_to_tool(self, tool_index, feeder=FEEDER_EXTRUDER):
         """Announce which tool's filament is about to move in the toolhead.
@@ -1788,11 +1765,8 @@ class AceManager:
                         extruder_speed=retract_speed, park=park
                     )
                 else:
-                    # Start extruder retraction (10% faster for slack). Started
-                    # at once: left in the look-ahead it would only run after
-                    # the ACE retract below, which pulls against the gears.
+                    # Start extruder retraction (10% faster for slack).
                     self._extruder_move(-abs(retract_length), retract_speed * 1.10, wait_for_move_end=False)
-                    self._start_queued_toolhead_moves()
 
                     # Start ACE retraction — use the RDM early stop only when the
                     # RDM actually sees filament right now.  Its callback stops the

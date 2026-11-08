@@ -141,6 +141,7 @@ extras/ace/
 ├── print_tools.py        # Tools a G-code file uses vs usable ACE slots
 ├── idle_assist.py        # Feed assist paused while the printer is idle
 ├── intake_gated.py       # Load/unload for an extruder gear between two sensors
+├── extruder_move.py      # The driver's own extruder moves, straight to the planner
 ├── rollback_assist.py    # ACE follows an extruder retract (ACE2 clamps otherwise)
 ├── tool_base.py          # What a printer-side tool changer tells the driver
 ├── version.py            # Driver version line for klippy.log
