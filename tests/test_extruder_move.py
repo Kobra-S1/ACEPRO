@@ -58,3 +58,19 @@ def test_the_gcode_position_follows_the_move():
     extruder_move(printer_with(toolhead, gcode_move), Mock(), -80, 15)
 
     assert [c[0] for c in order.mock_calls] == ["move", "reset"]
+
+
+def test_a_move_not_waited_for_is_handed_to_the_steppers_at_once():
+    # Klipper parks a queued move in its look-ahead, up to a second's worth
+    # after an idle toolhead. A caller that then blocks on the ACE (a
+    # retract, a sensor poll) would run against an extruder that has not
+    # started: the ACE pulls against the gears, a sensor stop overshoots.
+    toolhead = Mock()
+    toolhead.get_position.return_value = [1, 2, 3, 4]
+    order = Mock()
+    toolhead.move = order.move
+    toolhead.get_last_move_time = order.flush
+
+    extruder_move(printer_with(toolhead, Mock()), Mock(), 5, 50)
+
+    assert [c[0] for c in order.mock_calls] == ["move", "flush"]

@@ -104,12 +104,9 @@ class IntakeGatedTransfer:
         return travelled
 
     def _extruder_stretch(self, length, speed):
-        """Queue one stretch of a sensor-stopped move and wait its time.
-        Started at once: left in the planner's look-ahead it would run
-        that much later, on past the sensor."""
+        """Queue one stretch of a sensor-stopped move and wait its time."""
         instance = self.instance
         instance._extruder_move(length, speed)
-        instance.manager._start_queued_toolhead_moves()
         instance.dwell(abs(length) / speed)
 
     # --- load ------------------------------------------------------------

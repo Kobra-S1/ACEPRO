@@ -5,8 +5,9 @@
 def extruder_move(printer, gcode, length, speed, wait_for_move_end=False):
     """Move the extruder by `length` mm (relative) at `speed` mm/s.
 
-    A zero-length move is skipped with a console note. Without
-    `wait_for_move_end` the call returns as soon as the move is queued.
+    A zero-length move is skipped with a console note. The move is handed
+    to the steppers before this returns; only `wait_for_move_end` also
+    waits for it to finish.
     """
     if length == 0:
         gcode.respond_info("ACE: Skipping zero-length extruder move")
@@ -24,3 +25,9 @@ def extruder_move(printer, gcode, length, speed, wait_for_move_end=False):
     printer.lookup_object('gcode_move').reset_last_position()
     if wait_for_move_end:
         toolhead.wait_moves()
+    else:
+        # Klipper otherwise holds the newest moves back for its look-ahead,
+        # up to a second's worth after an idle toolhead: a caller that then
+        # blocks on the ACE would run against an extruder that has not
+        # started (the ACE pulls against the gears, a sensor stop overshoots).
+        toolhead.get_last_move_time()
