@@ -6948,6 +6948,7 @@ class TestSmartUnloadCyclingFallback(_ManagerCycleFixture):
         manager.is_filament_path_free_instant = Mock(return_value=False)
         manager.get_switch_state = Mock(return_value=True)
         manager._extruder_move = Mock()
+        manager._start_queued_toolhead_moves = Mock()
         manager._wait_toolhead_move_finished = Mock()
         instance.protocol.feed_assist_causes_busy = Mock(return_value=True)
 

@@ -1788,8 +1788,11 @@ class AceManager:
                         extruder_speed=retract_speed, park=park
                     )
                 else:
-                    # Start extruder retraction (10% faster for slack)
+                    # Start extruder retraction (10% faster for slack). Started
+                    # at once: left in the look-ahead it would only run after
+                    # the ACE retract below, which pulls against the gears.
                     self._extruder_move(-abs(retract_length), retract_speed * 1.10, wait_for_move_end=False)
+                    self._start_queued_toolhead_moves()
 
                     # Start ACE retraction — use the RDM early stop only when the
                     # RDM actually sees filament right now.  Its callback stops the

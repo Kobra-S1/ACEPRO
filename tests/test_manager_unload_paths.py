@@ -46,6 +46,8 @@ def coordinated_unload(fixture, feed_assist_slot):
         side_effect=lambda slot, **kw: events.append(("ace_retract", slot)) or True)
     manager._extruder_move = Mock(
         side_effect=lambda *a, **kw: events.append(("extruder_retract", None)))
+    manager._start_queued_toolhead_moves = Mock(
+        side_effect=lambda: events.append(("start_queued_moves", None)))
     manager._wait_toolhead_move_finished = Mock()
     manager.get_instant_switch_state = Mock(side_effect=lambda name: name == SENSOR_TOOLHEAD)
     manager.is_filament_path_free_instant = Mock(return_value=True)
@@ -61,6 +63,16 @@ def test_coordinated_retract_stops_feed_assist_on_the_unloaded_slot_first(fixtur
     assert events[0] == ("disable_feed_assist", 0)
     assert ("extruder_retract", None) in events
     assert ("ace_retract", 0) in events
+
+
+def test_coordinated_retract_starts_the_extruder_before_the_ace_pulls(fixture):
+    # Mid-print the queued extruder retract stays in the look-ahead while the
+    # driver waits on the ACE: the ACE pulls against the stationary gears.
+    events = coordinated_unload(fixture, feed_assist_slot=1)
+
+    assert events.index(("extruder_retract", None)) \
+        < events.index(("start_queued_moves", None)) \
+        < events.index(("ace_retract", 0))
 
 
 def test_coordinated_retract_leaves_feed_assist_on_another_slot(fixture):
