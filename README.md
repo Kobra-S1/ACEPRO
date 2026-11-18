@@ -158,6 +158,7 @@ config/
 ├── printer_K3.cfg        # Kobra 3 printer macros
 ├── printer_K3M.cfg       # Kobra K3M printer macros (BETA)
 ├── printer_KS1.cfg       # Kobra S1 printer macros
+├── chamber_light_KS1.cfg # Kobra S1 chamber light switch (optional, on-printer Klipper)
 ├── printer_KS1M.cfg      # Kobra S1 Max printer macros (ALPHA - UNTESTED)
 ├── printer_KX.cfg        # Kobra X printer macros (ALPHA, needs the Kobra Klipper fork)
 ├── printer_generic_macros.cfg # Shared pause/resume/velocity/purge macros
@@ -565,6 +566,7 @@ config/
 ├── printer_K3.cfg              # Kobra 3 printer macros & settings
 ├── printer_K3M.cfg             # Kobra K3M printer macros & settings (BETA)
 ├── printer_KS1.cfg             # Kobra S1 printer macros & settings
+├── chamber_light_KS1.cfg       # Kobra S1 chamber light switch (optional, on-printer Klipper with Rinkhals)
 ├── printer_KS1M.cfg            # Kobra S1 Max printer macros & settings (ALPHA - UNTESTED)
 ├── printer_KX.cfg              # Kobra X printer macros & settings (ALPHA)
 └── spoolman_logic.cfg          # Optional Spoolman ID mapping and tool hooks
