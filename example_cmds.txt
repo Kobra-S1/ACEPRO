@@ -47,7 +47,7 @@ ACE_CHECK_TOOL TOOL=0                      # One spool to the toolhead sensor an
 
 # Full unload - completely empty a slot
 ACE_FULL_UNLOAD TOOL=0                     # Full unload tool 0
-ACE_FULL_UNLOAD TOOL=ALL                   # Full unload all tools
+ACE_FULL_UNLOAD TOOL=ALL                   # Full unload all slots except the tool loaded at the nozzle
 ACE_FULL_UNLOAD                            # Full unload current tool
 
 # ========== INVENTORY MANAGEMENT ==========
