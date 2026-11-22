@@ -2318,11 +2318,38 @@ class Panel(ScreenPanel):
         self._screen.show_popup_message("Smart load all slots", 1)
 
     def spool_full_unload(self, widget):
-        tool = self._spool_selected_tool_or_popup()
+        """Full unload of the selected slot; with none selected, of every slot
+        after a confirmation (the screen has no way to select all)."""
+        tool = self._spool_selected_tool_optional()
         if tool is None:
+            self._confirm_full_unload_all()
             return
         self._send_gcode(f"ACE_FULL_UNLOAD TOOL={tool}")
         self._screen.show_popup_message(f"Full unload T{tool}", 1)
+
+    def _confirm_full_unload_all(self):
+        label = Gtk.Label(
+            label="Full unload ALL slots?\n\n"
+                  "Every loaded slot on every ACE is retracted until it is empty.\n"
+                  "A tool loaded at the nozzle is skipped."
+        )
+        label.set_line_wrap(True)
+        label.set_justify(Gtk.Justification.CENTER)
+        buttons = [
+            {"name": "Cancel", "response": Gtk.ResponseType.CANCEL},
+            {"name": "Unload all", "response": Gtk.ResponseType.OK},
+        ]
+
+        def full_unload_all_response(dialog, response_id):
+            self._gtk.remove_dialog(dialog)
+            if response_id != Gtk.ResponseType.OK:
+                return
+            if self._send_gcode("ACE_FULL_UNLOAD TOOL=ALL"):
+                self._screen.show_popup_message("Full unload all slots", 1)
+            else:
+                self._screen.show_popup_message("Failed to send full unload", 2)
+
+        self._gtk.Dialog("Full Unload", buttons, label, full_unload_all_response)
 
     def spool_enable_feed_assist(self, widget):
         tool = self._spool_selected_tool_or_popup()
