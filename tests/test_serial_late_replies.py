@@ -14,6 +14,7 @@ reader injected bytes; the reactor clock is set by the test.
 import json
 import os
 import struct
+import termios
 from unittest.mock import Mock, patch
 
 import pytest
@@ -105,11 +106,11 @@ class Rig:
             self.now = round(self.now + 0.1, 3)
 
     def reply(self, rid, result=None, msg="success"):
-        payload = json.dumps({
-            "id": rid, "code": 0, "msg": msg,
-            "result": result if result is not None else {"status": "busy",
-                                                          "action": "preload"},
-        }).encode()
+        if result is None:
+            result = {"status": "busy", "action": "preload"}
+        payload = json.dumps(
+            {"id": rid, "code": 0, "msg": msg, "result": result}
+        ).encode()
         crc = struct.pack('<H', self.mgr._calc_crc(payload))
         self.port.rx += (b'\xFF\xAA' + struct.pack('<H', len(payload))
                          + payload + crc + b'\xFE')
@@ -266,3 +267,49 @@ class TestLateReplies:
         assert len(rig.mgr._comm_timeout_timestamps) == 3
         assert rig.mgr._comm_unsolicited_timestamps == []
         assert not any("UNSOLICITED" in m for m in rig.console())
+
+
+class TestHupcl:
+    """cdc-acm drops DTR on the last close while HUPCL is set; the ACE
+    resets on that edge. A pty carries the same termios flag."""
+
+    @pytest.fixture
+    def pty_port(self):
+        master, slave = os.openpty()
+        attrs = termios.tcgetattr(slave)
+        attrs[2] |= termios.HUPCL
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        port = Mock()
+        port.fileno.return_value = slave
+        port.is_open = True
+        yield port, slave
+        os.close(master)
+        os.close(slave)
+
+    @staticmethod
+    def _hupcl(fd):
+        return bool(termios.tcgetattr(fd)[2] & termios.HUPCL)
+
+    def test_connect_clears_hupcl(self, rig, pty_port):
+        port, slave = pty_port
+        with patch('ace.serial_manager.serial.Serial', return_value=port):
+            assert rig.mgr.connect('/dev/fake', 115200)
+
+        assert not self._hupcl(slave)
+
+    def test_disconnect_clears_hupcl_before_close(self, rig, pty_port):
+        port, slave = pty_port
+        seen = []
+        port.close.side_effect = lambda: seen.append(self._hupcl(slave))
+        rig.mgr._serial = port
+
+        rig.mgr.disconnect()
+
+        assert seen == [False]
+
+    def test_port_without_termios_still_connects(self, rig):
+        port = Mock()
+        port.fileno.side_effect = OSError("not a tty")
+        port.is_open = True
+        with patch('ace.serial_manager.serial.Serial', return_value=port):
+            assert rig.mgr.connect('/dev/fake', 115200)

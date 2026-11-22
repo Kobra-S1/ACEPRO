@@ -11,6 +11,7 @@ Responsibilities:
 
 import select
 import serial
+import termios
 import json
 import threading
 import queue
@@ -751,6 +752,7 @@ class AceSerialManager:
                 write_timeout=0
             )
             if self._serial.is_open:
+                self._clear_hupcl()
                 self._connected = True
                 self.connection_state = "connected"
                 # Found and opened a port -> clear any sustained-miss tracking.
@@ -822,12 +824,34 @@ class AceSerialManager:
             self._serial = None
         return False
 
+    def _clear_hupcl(self):
+        """Clear the termios HUPCL flag on the open port.
+
+        With HUPCL set (the default) cdc-acm drops DTR when the last
+        descriptor closes, and the ACE has been seen to reset and
+        re-enumerate under a new ttyACM number right after such a close.
+        Cleared after open and again before close (a port reconfiguration
+        may rewrite the flags). Best effort: a failure only logs a warning
+        and never fails the connect or disconnect.
+        """
+        try:
+            fd = self._serial.fileno()
+            attrs = termios.tcgetattr(fd)
+            attrs[2] &= ~termios.HUPCL
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except Exception as e:
+            logging.warning(
+                "ACE[%s]: could not clear HUPCL on the serial port: %s",
+                self.instance_num, e,
+            )
+
     def disconnect(self):
         """Close serial connection and stop all timers."""
         self.stop_heartbeat()
 
         if self._serial and self._serial.is_open:
             try:
+                self._clear_hupcl()
                 self._serial.close()
             except Exception as e:
                 logging.error(f"ACE[{self.instance_num}]: Error closing serial: {e}")
