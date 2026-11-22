@@ -263,6 +263,7 @@ class AceManager:
                 protocol=protocol,
                 active_protocol_name=instance_config["active_protocol_name"],
                 target_usb_location=topology_entry.get("target_location"),
+                reserved_usb_locations=self._reserved_usb_locations(instance_num),
                 **shared_kwargs,
             )
 
@@ -3962,10 +3963,12 @@ class AceManager:
         # listed yet, so binding instance 0 to it can permanently pin instance
         # 0 to the wrong physical unit for the whole session (there is no
         # re-resolution). Defer entirely instead - each serial manager then
-        # uses claim-protected, location-learning index fallback, which orders
-        # by the same physical position and self-corrects once the full chain
-        # is up. A shared-bus unit legitimately backs all remaining instances,
-        # so its presence already makes the mapping complete.
+        # uses claim-protected, location-learning index fallback. That
+        # fallback has the same blind spot: an instance that connects while
+        # an earlier unit is invisible binds and learns its sibling's unit
+        # for the session (open; ARCHITECTURE.md, topology step 4). A shared-bus unit legitimately
+        # backs all remaining instances, so its presence already makes the
+        # mapping complete.
         if len(resolution) < self.ace_count:
             if resolution:
                 self.gcode.respond_info(
@@ -3977,6 +3980,14 @@ class AceManager:
             return {}
 
         return resolution
+
+    def _reserved_usb_locations(self, instance_num):
+        """USB locations the topology bound to the other dedicated instances."""
+        return frozenset(
+            entry["target_location"]
+            for num, entry in self._topology_resolution.items()
+            if num != instance_num and not entry.get("shared_bus")
+        )
 
     def _create_instance_protocol(self, instance_config):
         """Create protocol adapter for this instance."""
@@ -4786,6 +4797,7 @@ class AceManager:
             serial_mgr=None,
             bus_session=None,
             target_usb_location=target,
+            reserved_usb_locations=self._reserved_usb_locations(instance.instance_num),
         )
         # Old manager here is the shared ACE2 one - only torn down if no other
         # instance still shares it (guarded inside the helper).

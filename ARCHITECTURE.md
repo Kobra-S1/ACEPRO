@@ -1705,10 +1705,27 @@ addressed afterward by `device_id` — so port count can be less than
    first shared-bus candidate found backs *every remaining* instance slot
    (one physical port, N logical instances via device_id).
 4. Fewer instances placed than `ace_count`: no mapping at all; each serial
-   manager falls back to claim-protected, location-learning port detection
-   until the full chain is up. An instance left on `ace1_json` by a late ACE2
-   adapter is re-typed by `redetect_transports()` (automatic pass, or
+   manager falls back to claim-protected index detection and keeps the
+   location of its first connect as its known location. If an earlier unit
+   is invisible at that connect, the instance binds its sibling's unit for
+   the session; this is open, not yet fixed. An instance left on `ace1_json` by a late
+   ACE2 adapter is re-typed by `redetect_transports()` (automatic pass, or
    `ACE_REDETECT`).
+
+**Known location invisible (`find_connection_port`):** an instance whose
+known location is not listed (unit in a watchdog reset gap, or moved to
+another USB port) falls back to index matching. That fallback skips ports
+opened by other instances (`_CONNECTED_PORTS`) and the locations the
+topology bound to the other dedicated instances (`reserved_usb_locations`,
+from `AceManager._reserved_usb_locations`), and counts both as chain
+positions. The reservation is needed because a claim only exists once the
+owner has opened its port: at boot an instance can look while its own unit
+is in a reset gap and its sibling's unit is visible but not yet opened, and
+would otherwise take it (ks1-cm4, two ACE1 units). Shared-bus locations are
+not reserved: every instance on the bus uses that port. Proof:
+`test_fallback_never_takes_the_unit_reserved_for_another_instance`,
+`test_fallback_still_finds_a_unit_moved_to_an_unreserved_port`,
+`test_a_reserved_unit_keeps_its_place_in_the_chain`.
 
 **Why the scan retries (`_scan_ace_candidate_ports_with_retry`):** USB
 enumeration is async relative to Klipper startup — a physically-present

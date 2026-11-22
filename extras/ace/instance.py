@@ -103,6 +103,7 @@ class AceInstance:
         serial_mgr=None,
         bus_session=None,
         target_usb_location=None,
+        reserved_usb_locations=(),
     ):
         """
         Initialize ACE instance.
@@ -116,6 +117,9 @@ class AceInstance:
                 bound to, as resolved from daisy-chain topology order by
                 AceManager. Ignored when `serial_mgr` is already provided
                 (shared-bus instances build their AceSerialManager elsewhere).
+            reserved_usb_locations: Locations bound to the other dedicated
+                instances, never taken by this instance's port fallback.
+                Ignored with `serial_mgr`, like `target_usb_location`.
         """
         self.variables = {}
         self.SLOT_COUNT = SLOTS_PER_ACE
@@ -222,6 +226,7 @@ class AceInstance:
             supervision_enabled=self.supervision_enabled,
             protocol=self.protocol,
             target_usb_location=target_usb_location,
+            reserved_usb_locations=reserved_usb_locations,
         )
         if not self.transport_spec.shared_bus:
             self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)
@@ -251,6 +256,7 @@ class AceInstance:
         serial_mgr=None,
         bus_session=None,
         target_usb_location=None,
+        reserved_usb_locations=(),
     ):
         """Swap this instance's protocol/transport in place.
 
@@ -287,6 +293,7 @@ class AceInstance:
             supervision_enabled=self.supervision_enabled,
             protocol=self.protocol,
             target_usb_location=target_usb_location,
+            reserved_usb_locations=reserved_usb_locations,
         )
         if not self.transport_spec.shared_bus:
             self.serial_mgr.set_heartbeat_callback(self._on_heartbeat_response)

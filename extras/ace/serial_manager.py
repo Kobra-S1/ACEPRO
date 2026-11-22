@@ -58,7 +58,8 @@ class AceSerialManager:
             status_debug_logging=False,
             supervision_enabled=True,
             protocol=None,
-            target_usb_location=None):
+            target_usb_location=None,
+            reserved_usb_locations=()):
         """
         Initialize serial manager.
 
@@ -77,10 +78,14 @@ class AceSerialManager:
                 (e.g. direct/unit-tested construction), legacy index-based
                 matching is used, and the location is learned automatically
                 after the first successful connect.
+            reserved_usb_locations: USB locations the topology bound to
+                other dedicated instances. The index fallback never selects
+                a port there, even before its owner has opened it.
         """
         self._port = None
         self._usb_location = None
         self._target_usb_location = target_usb_location
+        self._reserved_usb_locations = frozenset(reserved_usb_locations)
         self._port_description = None
         self._baud = None
         self.serial_name = None
@@ -308,14 +313,6 @@ class AceSerialManager:
             if not transport_description_matches(device_name, portinfo.description):
                 continue
 
-            if portinfo.device in claimed_elsewhere:
-                claimed_count += 1
-                logging.info(
-                    f"ACE[{self.instance_num}] Skipping {portinfo.device} - "
-                    f"already claimed by another instance"
-                )
-                continue
-
             # Extract USB location from hwid
             location = None
             m = re.search(r'LOCATION=([-\w\.]+)', portinfo.hwid)
@@ -328,6 +325,25 @@ class AceSerialManager:
                     location = f"acm.{m2.group(1)}"
                 else:
                     location = portinfo.device
+
+            if portinfo.device in claimed_elsewhere:
+                claimed_count += 1
+                logging.info(
+                    f"ACE[{self.instance_num}] Skipping {portinfo.device} - "
+                    f"already claimed by another instance"
+                )
+                continue
+
+            # A claim only exists once the owner has opened its port; at boot
+            # an instance can look while its own unit is in a watchdog reset
+            # gap and its sibling's unit is visible but not yet opened.
+            if location in self._reserved_usb_locations:
+                claimed_count += 1
+                logging.info(
+                    f"ACE[{self.instance_num}] Skipping {portinfo.device} - "
+                    f"location {location} is reserved for another instance"
+                )
+                continue
 
             location_key = parse_usb_location(location)
             sort_key = (len(location_key), location_key)
@@ -413,8 +429,9 @@ class AceSerialManager:
                         return None
                 return port
             # The known physical location isn't visible right now (e.g. the
-            # unit is mid-reset/re-enumerating) - fall back to legacy
-            # index+description matching rather than refusing to connect.
+            # unit is mid-reset/re-enumerating, or was moved to another USB
+            # port) - fall back to index+description matching, which skips
+            # ports claimed by or reserved for other instances.
 
         port_index = 0 if transport.shared_bus else instance
         return self.find_com_port(transport.port_description, port_index, ports=ports)
