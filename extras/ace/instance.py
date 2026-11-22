@@ -371,7 +371,11 @@ class AceInstance:
             return
 
         request = self.protocol.build_get_status_request()
-        self.send_high_prio_request(request, self._on_heartbeat_response)
+        self.serial_mgr.send_poll_request(
+            self.instance_num,
+            self._prepare_request(request),
+            self._on_heartbeat_response,
+        )
 
     def _shared_bus_heartbeat_tick(self, eventtime):
         """Periodically poll one ACE2 logical instance on shared transport."""

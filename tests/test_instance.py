@@ -367,7 +367,8 @@ class TestAceInstance(unittest.TestCase):
 
         instance.start_shared_bus_heartbeat()
 
-        instance.serial_mgr.send_high_prio_request.assert_called_once_with(
+        instance.serial_mgr.send_poll_request.assert_called_once_with(
+            0,
             {'command': 'GET_STATUS', 'params': {}, 'target_device_id': 7},
             instance._on_heartbeat_response,
         )
@@ -391,11 +392,11 @@ class TestAceInstance(unittest.TestCase):
 
         instance.set_firmware_update_active(True)
         instance._send_shared_bus_heartbeat_request()
-        instance.serial_mgr.send_high_prio_request.assert_not_called()
+        instance.serial_mgr.send_poll_request.assert_not_called()
 
         instance.set_firmware_update_active(False)
         instance._send_shared_bus_heartbeat_request()
-        instance.serial_mgr.send_high_prio_request.assert_called_once()
+        instance.serial_mgr.send_poll_request.assert_called_once()
 
     @patch('ace.instance.AceSerialManager')
     def test_iap_requests_are_addressed_to_the_bound_device(self, mock_serial_mgr_class):

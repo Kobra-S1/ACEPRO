@@ -44,6 +44,9 @@ class AceSerialManager:
     DEFAULT_TIMEOUT_S = 5.0
     # A connected port that takes no output for this long is reconnected.
     TX_STALL_LIMIT_S = 2.0
+    # send_poll_request key of the transport heartbeat (shared-bus instances
+    # poll under their instance number instead)
+    TRANSPORT_POLL_KEY = "transport"
 
     def __init__(
             self,
@@ -105,6 +108,8 @@ class AceSerialManager:
 
         self._hp_queue = queue.Queue(maxsize=self.QUEUE_MAXSIZE)
         self._queue = queue.Queue(maxsize=self.QUEUE_MAXSIZE)
+        # Poll keys with a status poll queued or in flight (send_poll_request)
+        self._outstanding_polls = set()
 
         self.read_buffer = bytearray()
         # Frames not yet taken by the port, and since when it takes nothing.
@@ -1114,12 +1119,15 @@ class AceSerialManager:
         Args:
             request: Dict with JSON-serializable request
             callback: Callable as in send_request
+
+        Returns:
+            bool: True if the request was queued
         """
         if not self._ace_pro_enabled:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: Dropping high-priority request — ACE Pro is disabled"
             )
-            return
+            return False
         try:
             normalized_request = self.protocol.normalize_request(request)
             self._hp_queue.put([normalized_request, callback], timeout=1)
@@ -1127,6 +1135,33 @@ class AceSerialManager:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: High-priority queue full!"
             )
+            return False
+        return True
+
+    def send_poll_request(self, key, request, callback):
+        """Queue a periodic status poll unless the last one for `key` is open.
+
+        An unanswered poll must not be followed by more: an ACE that stalls
+        (filament preload, 6-7 s) answers every queued poll late, and each
+        one becomes a timeout plus a reply without a callback. `key` names
+        the poller (the transport heartbeat, or one shared-bus device). A
+        poll is open until its callback runs (reply or timeout) or
+        clear_queues() drops it. Reactor thread only.
+
+        Returns:
+            bool: True if the poll was queued
+        """
+        if key in self._outstanding_polls:
+            return False
+
+        def _release_then_call(response=None):
+            self._outstanding_polls.discard(key)
+            callback(response)
+
+        queued = self.send_high_prio_request(request, _release_then_call)
+        if queued:
+            self._outstanding_polls.add(key)
+        return bool(queued)
 
     def clear_queues(self):
         """Clear all pending requests."""
@@ -1135,6 +1170,7 @@ class AceSerialManager:
         with self._lock:
             self._callback_map.clear()
             self.inflight.clear()
+            self._outstanding_polls.clear()
 
     def _clear_queue(self, q):
         """Remove all items from queue."""
@@ -1436,7 +1472,7 @@ class AceSerialManager:
                         f"ACE[{self.instance_num}]: Heartbeat callback error: {e}"
                     )
 
-        self.send_high_prio_request(request, _heartbeat_response)
+        self.send_poll_request(self.TRANSPORT_POLL_KEY, request, _heartbeat_response)
 
     def _writer(self, eventtime):
         """Timer callback: send requests from queue, handle timeouts, fill window."""
