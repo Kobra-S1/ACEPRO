@@ -21,6 +21,30 @@ WIDE_UTILITIES_MIN_WIDTH = 544
 RESP_FORCE_UNLOAD = 100
 
 
+def slot_label_text(slot, portrait):
+    """Material/temperature text of one slot card.
+
+    The only formatter: used when the card is built (switching ACE units)
+    and on every status update, so both show the same text. A temperature
+    of 0 means unknown (no RFID data) and is not shown. Landscape cards
+    keep two lines so rows stay aligned; portrait rows are one line.
+    """
+    status = slot.get('status', 'empty')
+    if status in ("empty", ""):
+        first, second = "Empty", ""
+    else:
+        material = (slot.get('material') or '').strip()
+        temp = slot.get('temp', 0)
+        first = material or status.replace("_", " ").title()
+        temp_text = f"{temp}°C" if temp else ""
+        # The status suffix only accompanies a real material name
+        suffix = f" ({status.replace('_', ' ').title()})" if status != "ready" and material else ""
+        second = f"{temp_text}{suffix}".strip()
+    if portrait:
+        return f"{first}  {second}" if second else first
+    return f"{first}\n{second or ' '}"
+
+
 class Panel(ScreenPanel):
     FILAMENT_TEMP_DEFAULTS = {
         "PLA": 200,
@@ -1230,10 +1254,7 @@ class Panel(ScreenPanel):
 
             slot_label = Gtk.Label()
             slot_label.set_halign(Gtk.Align.START)
-            if slot_data['status'] == 'ready' and slot_data['material']:
-                slot_label.set_text(f"{slot_data['material']}  {slot_data['temp']}°C")
-            else:
-                slot_label.set_text("Empty")
+            slot_label.set_text(slot_label_text(slot_data, portrait=True))
             info_box.pack_start(slot_label, False, False, 0)
 
             slot_box.pack_start(info_box, False, False, 0)
@@ -1288,12 +1309,7 @@ class Panel(ScreenPanel):
             slot_label.set_line_wrap(True)
             slot_label.set_justify(Gtk.Justification.CENTER)
 
-            # Set initial text from inventory
-            if slot_data['status'] == 'ready' and slot_data['material']:
-                slot_label.set_text(f"{slot_data['material']}\n{slot_data['temp']}°C")
-            else:
-                # Keep two lines so rows stay aligned with loaded slots
-                slot_label.set_text("Empty\n ")
+            slot_label.set_text(slot_label_text(slot_data, portrait=False))
 
             slot_box.pack_start(slot_label, False, False, 0)
 
@@ -1829,19 +1845,10 @@ class Panel(ScreenPanel):
                         )
                     )
 
+                instance['slot_labels'][i].set_text(
+                    slot_label_text(slot, portrait=self._is_portrait())
+                )
                 if has_valid_data:
-                    material_stripped = material.strip()
-                    display_material = material_stripped or status.replace("_", " ").title()
-                    temp_text = f"{temp}°C" if temp else ""
-                    status_suffix = ""
-                    # Only show status suffix if we're showing actual material (not status fallback)
-                    if status not in ("ready", "", "empty") and material_stripped:
-                        status_suffix = f" ({status.replace('_', ' ').title()})"
-                    second_line = f"{temp_text}{status_suffix}".strip()
-                    if not second_line:
-                        second_line = " "
-                    label_text = f"{display_material}\n{second_line}"
-                    instance['slot_labels'][i].set_text(label_text)
                     self.set_slot_color(
                         instance['slot_color_boxes'][i], color
                     )
@@ -1851,8 +1858,7 @@ class Panel(ScreenPanel):
                         f"{material} {temp}°C"
                     )
                 else:
-                    # Keep two-line text and gray color for empty slots
-                    instance['slot_labels'][i].set_text("Empty\n ")
+                    # Gray color for empty slots
                     self.set_slot_color(
                         instance['slot_color_boxes'][i], [0, 0, 0]
                     )
