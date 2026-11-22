@@ -65,7 +65,18 @@ fewer, so the surplus unit kept a stale id from an earlier session).
    sustained collision still forces the reconnection recovery path.
 
 A late reply for a request that **timed out** (id never dispatched) is *not*
-a duplicate — it keeps the normal `UNSOLICITED` handling described above.
+a duplicate. Requests whose callback was dropped while on the wire (timeout,
+write error, `clear_queues`) are remembered for 30 s (`LATE_REPLY_WINDOW_S`);
+a reply to one of them is a **late reply**, not unsolicited, and does not
+count toward the Layer-1 unsolicited threshold (its timeout already counted).
+A late status reply goes to klippy.log only; a late reply to a command is
+shown on the console (`late reply to request ID=N (method) that was already
+reported as failed`), because the ACE carried out what the caller was told
+had failed.
+
+Status polls do not stack: while a poller's previous poll is unanswered
+(`send_poll_request`), the next heartbeat is skipped. An ACE that stalls for
+6-7 s during filament preload then costs one timeout, not one per heartbeat.
 
 **Broadcast exemption**: `DISCOVER_DEVICE` replies are never treated as
 duplicates. Discovery is a broadcast — every unit on the bus answers the

@@ -743,11 +743,28 @@ bus.
 - Callback invoked with `response=None` to signal failure
 - In-flight request removed from tracking
 
+**Late Replies and Polls:**
+- A request whose callback was dropped while on the wire (timeout, write
+  error, `clear_queues`) is remembered for `LATE_REPLY_WINDOW_S` (30 s);
+  request ids are never reused, so its reply is recognised as late
+- Late status reply: klippy.log only. Late reply to a command: console
+  warning, since the ACE carried out what the caller saw fail
+- Late replies are not unsolicited and do not count toward comm supervision
+- `send_poll_request(key, ...)`: at most one open status poll per poller
+  (transport heartbeat, or one key per shared-bus instance); proof:
+  `tests/test_serial_late_replies.py`
+
 **Unsolicited Message Handling:**
-- Responses without matching callback logged as "UNSOLICITED"
+- Responses without matching callback, not a duplicate, not claimed by the
+  unsolicited callback and not late are logged as "UNSOLICITED"
 - Log format: "UNSOLICITED (ID={response_id}, current_id={self._request_id}): {json}"
-- Helps diagnose timeout vs late-arrival issues
-- Not an error - ACE may respond slower than timeout window
+- Since abandoned ids are handled as late replies, a remaining UNSOLICITED
+  id was never sent in this process or was abandoned more than
+  `LATE_REPLY_WINDOW_S` ago
+
+**Port Open/Close:**
+- termios HUPCL is cleared after open and before close, so closing the port
+  does not drop DTR (the ACE was seen to reset on that edge)
 
 **Duplicate Response Handling (ACE2 identity collision):**
 - Request ids answered in the last 30 s are remembered
@@ -761,7 +778,7 @@ bus.
   warning pointing at an `ace_count` / physical-unit mismatch; counted
   toward Layer-1 comm supervision (see CONNECTION_SUPERVISION.md)
 - A late reply for a request that timed out (never dispatched) is NOT a
-  duplicate and keeps the normal UNSOLICITED handling
+  duplicate; it is handled as a late reply (see above)
 - `DISCOVER_DEVICE` replies are exempt: discovery is a broadcast, so a
   second reply with the same request id is the race loser's answer -
   expected discovery data that must reach the shared-bus demultiplexer
