@@ -170,3 +170,99 @@ class TestHeartbeatDoesNotStack:
         assert not rig.mgr.send_poll_request(1, {"method": "get_status"}, Mock())
         rig.mgr._ace_pro_enabled = True
         assert rig.mgr.send_poll_request(1, {"method": "get_status"}, Mock())
+
+
+class TestLateReplies:
+
+    def _stall_past_timeout(self, rig):
+        """The field case: the ACE says nothing until the poll timed out."""
+        rig.run_heartbeats(until_s=rig.mgr.timeout_s + 0.2)
+        rid = _ids(rig.sent_requests(), "get_status")[0]
+        assert any(f"Request ID={rid} TIMEOUT" in m for m in rig.console())
+        return rid
+
+    def test_late_status_reply_is_not_unsolicited(self, rig):
+        rid = self._stall_past_timeout(rig)
+        rig.reply(rid)
+
+        assert not any("UNSOLICITED" in m for m in rig.console())
+        assert rig.mgr._comm_unsolicited_timestamps == []
+
+    def test_late_reply_still_counts_its_timeout(self, rig):
+        rid = self._stall_past_timeout(rig)
+        rig.reply(rid)
+
+        assert len(rig.mgr._comm_timeout_timestamps) == 1
+
+    def test_late_reply_to_a_command_is_reported(self, rig):
+        """The ACE did what the driver already reported as failed."""
+        rig.mgr.send_request({"method": "start_feed_assist",
+                              "params": {"index": 1}}, Mock())
+        rig.run_heartbeats(until_s=rig.mgr.timeout_s + 0.2)
+        rid = _ids(rig.sent_requests(), "start_feed_assist")[0]
+        rig.reply(rid, result={})
+
+        late = [m for m in rig.console() if "late reply" in m]
+        assert len(late) == 1
+        assert "start_feed_assist" in late[0] and f"ID={rid}" in late[0]
+        assert not any("UNSOLICITED" in m for m in rig.console())
+        assert rig.mgr._comm_unsolicited_timestamps == []
+
+    def test_late_status_reply_stays_off_the_console(self, rig):
+        rid = self._stall_past_timeout(rig)
+        rig.reply(rid)
+
+        assert not any("late reply" in m for m in rig.console())
+
+    def test_reply_to_an_id_never_sent_is_still_unsolicited(self, rig):
+        rig.reply(4242)
+
+        assert any("UNSOLICITED (ID=4242" in m for m in rig.console())
+        assert len(rig.mgr._comm_unsolicited_timestamps) == 1
+
+    def test_second_late_reply_to_the_same_id_is_unsolicited(self, rig):
+        rid = self._stall_past_timeout(rig)
+        rig.reply(rid)
+        rig.reply(rid)
+
+        assert sum("UNSOLICITED" in m for m in rig.console()) == 1
+
+    def test_late_reply_after_the_memory_window_is_unsolicited(self, rig):
+        rid = self._stall_past_timeout(rig)
+        rig.now += rig.mgr.LATE_REPLY_WINDOW_S + 1.0
+        rig.reply(rid)
+
+        assert any(f"UNSOLICITED (ID={rid}" in m for m in rig.console())
+
+    def test_reply_to_a_request_dropped_by_clear_queues_is_late(self, rig):
+        """A reconnect forgets in-flight callbacks; ids are not reused."""
+        rig.run_heartbeats(until_s=0.0)
+        rid = _ids(rig.sent_requests(), "get_status")[0]
+        rig.mgr.clear_queues()
+        rig.reply(rid)
+
+        assert not any("UNSOLICITED" in m for m in rig.console())
+
+    def test_reply_to_a_request_failed_by_a_write_error_is_late(self, rig):
+        """Bytes before a write error may have reached the ACE."""
+        rig.run_heartbeats(until_s=0.0)
+        rid = _ids(rig.sent_requests(), "get_status")[0]
+        rig.mgr._fail_inflight()
+        rig.reply(rid)
+
+        assert not any("UNSOLICITED" in m for m in rig.console())
+
+    def test_field_stalls_cost_one_timeout_each_and_no_unsolicited(self, rig):
+        """Three 6.5 s preload stalls in a row, as in the field log: the
+        ACE then answers every request it was sent."""
+        replied = set()
+        for _ in range(3):
+            rig.run_heartbeats(until_s=rig.now + 6.5)
+            for rid in _ids(rig.sent_requests(), "get_status"):
+                if rid not in replied:
+                    rig.reply(rid)
+                    replied.add(rid)
+
+        assert len(rig.mgr._comm_timeout_timestamps) == 3
+        assert rig.mgr._comm_unsolicited_timestamps == []
+        assert not any("UNSOLICITED" in m for m in rig.console())

@@ -202,6 +202,14 @@ class AceSerialManager:
         self._comm_duplicate_timestamps = []    # Duplicate reply times (health stats)
         self._last_duplicate_warn_time = None
 
+        # Late replies: a request whose callback was dropped while it was on
+        # the wire (timeout, write error, clear_queues) can still be answered.
+        # Request ids are never reused, so such a reply is recognised as late
+        # instead of unsolicited.
+        self.LATE_REPLY_WINDOW_S = 30.0         # Remember abandoned ids this long
+        self._inflight_names = {}               # rid -> method/command name
+        self._abandoned_requests = {}           # rid -> (monotonic time, name)
+
     def enable_ace_pro(self, baud):
         """Enable ACE Pro and reconnect at baud if it was disabled."""
         was_disabled = not self._ace_pro_enabled
@@ -1168,9 +1176,56 @@ class AceSerialManager:
         self._clear_queue(self._queue)
         self._clear_queue(self._hp_queue)
         with self._lock:
+            now = self.reactor.monotonic()
+            for rid in list(self.inflight):
+                self._abandon(rid, now)
             self._callback_map.clear()
             self.inflight.clear()
             self._outstanding_polls.clear()
+
+    @staticmethod
+    def _request_name(request):
+        """ACE1 names a request by 'method', ACE2 by 'command'."""
+        return request.get('method') or request.get('command')
+
+    def _abandon(self, rid, now):
+        """Remember that in-flight request `rid` lost its callback."""
+        self._forget_old_abandoned(now)
+        self._abandoned_requests[rid] = (now, self._inflight_names.pop(rid, None))
+
+    def _forget_old_abandoned(self, now):
+        cutoff = now - self.LATE_REPLY_WINDOW_S
+        self._abandoned_requests = {
+            r: v for r, v in self._abandoned_requests.items() if v[0] > cutoff
+        }
+
+    def _handle_late_reply(self, response):
+        """Absorb a reply to an abandoned request. Returns True if it was one.
+
+        A late status reply only goes to klippy.log. A late reply to a
+        command is shown on the console: the ACE carried out something the
+        caller was already told had failed.
+        """
+        now = self.reactor.monotonic()
+        self._forget_old_abandoned(now)
+        entry = self._abandoned_requests.pop(response.get('id'), None)
+        if entry is None:
+            return False
+
+        abandoned_at, name = entry
+        rid = response.get('id')
+        if name == self._request_name(self.protocol.build_get_status_request()):
+            logging.info(
+                "ACE[%s]: late status reply ID=%s, %.1fs after its request was abandoned",
+                self.instance_num, rid, now - abandoned_at,
+            )
+        else:
+            self.gcode.respond_info(
+                f"ACE[{self.instance_num}]: late reply to request ID={rid} ({name}) "
+                f"that was already reported as failed - the ACE may have carried "
+                f"it out: {json.dumps(response, default=str)}"
+            )
+        return True
 
     def _clear_queue(self, q):
         """Remove all items from queue."""
@@ -1204,8 +1259,10 @@ class AceSerialManager:
     def _fail_inflight(self):
         """Answer every in-flight request with None and forget it."""
         with self._lock:
+            now = self.reactor.monotonic()
             for rid in list(self.inflight):
                 self.inflight.pop(rid, None)
+                self._abandon(rid, now)
                 cb = self._callback_map.pop(rid, None)
                 if cb:
                     try:
@@ -1311,6 +1368,7 @@ class AceSerialManager:
                 cb = self._callback_map.pop(rid, None)
                 if cb:
                     self.inflight.pop(rid, None)
+                    self._inflight_names.pop(rid, None)
 
         if cb is not None:
             now = self.reactor.monotonic()
@@ -1498,6 +1556,7 @@ class AceSerialManager:
                                     f"ACE[{self.instance_num}]: Callback error: {e}"
                                 )
                         self.inflight.pop(rid, None)
+                        self._abandon(rid, now)
 
             # Fill window with new requests
             while True:
@@ -1518,6 +1577,7 @@ class AceSerialManager:
                     req['id'] = rid
                     self._callback_map[rid] = cb
                     self.inflight[rid] = now
+                    self._inflight_names[rid] = self._request_name(req)
 
                 self._send_frame(req)
         except Exception as e:
@@ -1605,6 +1665,8 @@ class AceSerialManager:
             return
         # Try unsolicited callback first
         if self.unsolicited_response_callback and self.unsolicited_response_callback(ret):
+            return
+        if self._handle_late_reply(ret):
             return
         # Log unsolicited messages (no matching callback found); ACE2
         # replies carry raw protobuf fields as bytes.
