@@ -6634,7 +6634,8 @@ class TestExecuteCoordinatedRetraction(unittest.TestCase):
 
 
 class TestExtruderMove(unittest.TestCase):
-    """Coverage for _extruder_move helper on manager."""
+    """The manager's _extruder_move delegates to ace.extruder_move (tested
+    in test_extruder_move.py)."""
 
     def setUp(self):
         ACE_INSTANCES.clear()
@@ -6695,24 +6696,9 @@ class TestExtruderMove(unittest.TestCase):
         with patch('ace.manager.AceInstance'), \
              patch('ace.manager.EndlessSpool'), \
              patch('ace.manager.RunoutMonitor'):
-            mgr = AceManager(self.mock_config, dummy_ace_count=1)
-            mgr.instance_num = 0  # used in respond_info formatting
-            return mgr
+            return AceManager(self.mock_config, dummy_ace_count=1)
 
-    def test_skip_zero_length_move(self):
-        manager = self._build_manager()
-        self.mock_toolhead.move = Mock()
-
-        manager._extruder_move(0, 25, wait_for_move_end=True)
-
-        # Last respond_info call should be the skip message
-        self.assertIn(
-            "Skipping zero-length move",
-            self.mock_gcode.respond_info.call_args_list[-1][0][0],
-        )
-        self.mock_toolhead.move.assert_not_called()
-
-    def test_moves_without_wait(self):
+    def test_moves_the_extruder(self):
         manager = self._build_manager()
         self.mock_toolhead.get_position.return_value = [1, 2, 3, 4]
         self.mock_toolhead.move = Mock()
@@ -6722,33 +6708,6 @@ class TestExtruderMove(unittest.TestCase):
 
         self.mock_toolhead.move.assert_called_once_with([1, 2, 3, 9], 50)
         self.mock_toolhead.wait_moves.assert_not_called()
-
-    def test_moves_and_waits_when_requested(self):
-        manager = self._build_manager()
-        self.mock_toolhead.get_position.return_value = [10, 20, 30, 40]
-        self.mock_toolhead.move = Mock()
-        self.mock_toolhead.wait_moves = Mock()
-
-        manager._extruder_move(3, 15, wait_for_move_end=True)
-
-        self.mock_toolhead.move.assert_called_once_with([10, 20, 30, 43], 15)
-        self.mock_toolhead.wait_moves.assert_called_once()
-
-    def test_the_gcode_position_follows_the_move(self):
-        # The move bypasses G-code. Left behind, the next G1 "returns" the
-        # extruder to the old E: after an unload retract, a fast forward
-        # spin of the whole retract length with no filament in the gear.
-        manager = self._build_manager()
-        self.mock_toolhead.get_position.return_value = [1, 2, 3, 4]
-        order = Mock()
-        self.mock_toolhead.move = order.move
-        self.mock_gcode_move.reset_last_position = order.reset
-
-        manager._extruder_move(-80, 15)
-
-        self.assertEqual(
-            [call[0] for call in order.mock_calls], ["move", "reset"]
-        )
 
 class _ManagerCycleFixture(unittest.TestCase):
     """Shared manager + mock-instance fixture for cycling/smart-unload tests."""
@@ -6948,7 +6907,6 @@ class TestSmartUnloadCyclingFallback(_ManagerCycleFixture):
         manager.is_filament_path_free_instant = Mock(return_value=False)
         manager.get_switch_state = Mock(return_value=True)
         manager._extruder_move = Mock()
-        manager._start_queued_toolhead_moves = Mock()
         manager._wait_toolhead_move_finished = Mock()
         instance.protocol.feed_assist_causes_busy = Mock(return_value=True)
 

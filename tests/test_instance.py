@@ -4070,7 +4070,8 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
 
 
 class TestExtruderMove(unittest.TestCase):
-    """Test extruder move helper."""
+    """The instance's _extruder_move delegates to ace.extruder_move (tested
+    in test_extruder_move.py)."""
 
     def setUp(self):
         self.mock_printer = Mock()
@@ -4123,29 +4124,7 @@ class TestExtruderMove(unittest.TestCase):
     mock_gcode_move = Mock()
 
     @patch('ace.instance.AceSerialManager')
-    def test_the_gcode_position_follows_the_move(self, mock_serial_mgr_class):
-        instance = AceInstance(0, self.ace_config, self.mock_printer)
-        self.mock_toolhead.get_position.return_value = [1, 2, 3, 4]
-        order = Mock()
-        self.mock_toolhead.move = order.move
-        self.mock_gcode_move.reset_last_position = order.reset
-
-        instance._extruder_move(45, 4)
-
-        self.assertEqual([call[0] for call in order.mock_calls], ["move", "reset"])
-
-    @patch('ace.instance.AceSerialManager')
-    def test_skips_zero_length_move(self, mock_serial_mgr_class):
-        instance = AceInstance(0, self.ace_config, self.mock_printer)
-        self.mock_toolhead.move = Mock()
-
-        instance._extruder_move(0, 25, wait_for_move_end=True)
-
-        self.mock_gcode.respond_info.assert_called_once()
-        self.mock_toolhead.move.assert_not_called()
-
-    @patch('ace.instance.AceSerialManager')
-    def test_moves_without_wait_by_default(self, mock_serial_mgr_class):
+    def test_moves_the_extruder(self, mock_serial_mgr_class):
         instance = AceInstance(0, self.ace_config, self.mock_printer)
         self.mock_toolhead.get_position.return_value = [1, 2, 3, 4]
         self.mock_toolhead.move = Mock()
@@ -4155,33 +4134,6 @@ class TestExtruderMove(unittest.TestCase):
 
         self.mock_toolhead.move.assert_called_once_with([1, 2, 3, 9], 50)
         self.mock_toolhead.wait_moves.assert_not_called()
-
-    @patch('ace.instance.AceSerialManager')
-    def test_moves_and_waits_when_requested(self, mock_serial_mgr_class):
-        instance = AceInstance(0, self.ace_config, self.mock_printer)
-        self.mock_toolhead.get_position.return_value = [10, 20, 30, 40]
-        self.mock_toolhead.move = Mock()
-        self.mock_toolhead.wait_moves = Mock()
-
-        instance._extruder_move(3, 15, wait_for_move_end=True)
-
-        self.mock_toolhead.move.assert_called_once_with([10, 20, 30, 43], 15)
-        self.mock_toolhead.wait_moves.assert_called_once()
-
-    @patch('ace.instance.AceSerialManager')
-    def test_move_resyncs_gcode_position_for_filament_accounting(self, mock_serial_mgr_class):
-        instance = AceInstance(0, self.ace_config, self.mock_printer)
-        gcode_move = Mock()
-        self.mock_toolhead.get_position.return_value = [0, 0, 0, 0]
-        self.mock_toolhead.move = Mock()
-        base = self.mock_printer.lookup_object.side_effect
-        self.mock_printer.lookup_object.side_effect = (
-            lambda name, default=None: gcode_move if name == "gcode_move" else base(name, default))
-
-        instance._extruder_move(85, 5)
-
-        self.mock_toolhead.move.assert_called_once_with([0, 0, 0, 85], 5)
-        gcode_move.reset_last_position.assert_called_once()
 
 
 class TestSmartUnloadSlot(unittest.TestCase):

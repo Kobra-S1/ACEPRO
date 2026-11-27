@@ -35,6 +35,7 @@ from .config import (
 from .protocol import create_protocol_adapter, normalize_protocol_name, resolve_protocol_name
 from .serial_manager import AceSerialManager
 from .intake_gated import STRATEGY_SENSOR_PUSH
+from .extruder_move import extruder_move
 
 # After a stop_feed_assist the ACE's reported status is trusted only this
 # much later.
@@ -2805,25 +2806,7 @@ class AceInstance:
             )
 
     def _extruder_move(self, length, speed, wait_for_move_end=False):
-        """Move extruder (relative) via motion planner, synchronously."""
-        if length == 0:
-            self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: _extruder_move() -> Skipping zero-length move"
-            )
-            return
-
-        toolhead = self.printer.lookup_object('toolhead')
-        cur_pos = list(toolhead.get_position())  # [X, Y, Z, E]
-
-        new_pos = cur_pos[:]
-        new_pos[3] += length
-
-        toolhead.move(new_pos, speed)
-        # This move bypasses G-code: without the reset the next G1 drives
-        # the extruder back to the E position G-code still remembers.
-        self.printer.lookup_object('gcode_move').reset_last_position()
-        if wait_for_move_end:
-            toolhead.wait_moves()
+        extruder_move(self.printer, self.gcode, length, speed, wait_for_move_end)
 
     def reset_persistent_inventory(self):
         """Reset persistent inventory to empty slots."""

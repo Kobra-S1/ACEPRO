@@ -90,7 +90,6 @@ class FakeInstance:
         filament.intake = self.intake
         self.steps = []
         self.messages = []
-        self.started_moves = 0
         self.feeding = False
         self.slot_error = None
         self.speed_change_ok = True
@@ -108,9 +107,6 @@ class FakeInstance:
 
     def _wait_toolhead_move_finished(self):
         self.steps.append("wait moves")
-
-    def _start_queued_toolhead_moves(self):
-        self.started_moves += 1
 
     # --- instance ---
     def dwell(self, delay=1.0):
@@ -420,19 +416,6 @@ def test_a_park_stops_when_the_sensor_clears_and_the_ace_does_not_pull():
     # Still in the gear: the next load of this filament is a short pull.
     assert instance.filament.in_gear
     assert -30.0 - 1.5 - 1e-9 <= instance.extruder_travel() <= -30.0
-
-
-def test_every_queued_stretch_of_a_sensor_stop_is_started_at_once():
-    """White box: the property is that no stretch waits in the planner's
-    look-ahead, where it would run on - seconds' worth - after the sensor
-    has already answered."""
-    instance = FakeInstance(FakeFilament(tip=30.0))
-
-    park(instance)
-
-    stretches = [s for s in instance.steps if s.startswith("extruder")]
-    assert len(stretches) > 1
-    assert instance.started_moves == len(stretches)
 
 
 def test_a_park_reports_how_far_the_extruder_retracted():

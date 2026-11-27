@@ -2142,10 +2142,9 @@ sensor. Decided once per printer in the ACE config.
   `_await_feed_assist_stopped`); a failed cut turns it back on. Its next
   load is a short extruder pull with feed assist already on - no ACE feed
   command - (`IntakeGatedTransfer.load(parked=True)`), falling back to the
-  normal feed. Sensor-stopped extruder moves hand each queued stretch to
-  the steppers at once (`_start_queued_toolhead_moves`): Klipper's
-  look-ahead would hold them back and the filament would run on past the
-  sensor. Park and resume log the distance they moved. The printer side asks for a park; only it knows that its toolhead
+  normal feed. Every extruder move of the driver is handed to the steppers at once
+  (`extruder_move`): Klipper's look-ahead would hold it back, and a
+  sensor-stopped stretch would run on past the sensor. Park and resume log the distance they moved. The printer side asks for a park; only it knows that its toolhead
   can hold a filament out of the way (Kobra X: the turret leaves the
   inlet). `toolhead_paths` says whether a parked filament blocks other
   tools - literally, or as the name of a printer object asked through its
