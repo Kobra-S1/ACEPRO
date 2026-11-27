@@ -1247,9 +1247,8 @@ class TestConnectionLifecycle:
             mgr.on_connect_callback = Mock(side_effect=RuntimeError("boom"))
             mgr.connect("/dev/ttyACM0", 115200)
             assert mgr.on_connect_callback.called
-            mock_logging.warning.assert_called_once()
-            args, kwargs = mock_logging.warning.call_args
-            assert "on_connect callback error" in args[0]
+            assert any("on_connect callback error" in c.args[0]
+                       for c in mock_logging.warning.call_args_list)
 
     def test_connect_registers_timers_and_heartbeat(self):
         with patch('ace.serial_manager.serial') as mock_serial_mod:

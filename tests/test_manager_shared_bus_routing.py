@@ -108,3 +108,18 @@ def test_demoting_a_dedicated_instance_keeps_its_usb_location(manager):
 
     kwargs = instance.rebind_transport.call_args.kwargs
     assert kwargs["target_usb_location"] == "1-1.2"
+
+
+def test_a_demoted_instance_never_falls_back_onto_a_dedicated_siblings_unit(manager):
+    # Demoted without a known location, the instance finds its ACE1 by
+    # position; the other dedicated units' locations stay off-limits.
+    instance = manager.instances[0]
+    instance.rebind_transport = Mock()
+    manager._topology_resolution = {
+        0: {"target_location": "1-1.3.1", "shared_bus": True},
+        1: {"target_location": "1-1.4.3", "shared_bus": False}}
+
+    manager._retype_instance_to_ace1(instance)
+
+    kwargs = instance.rebind_transport.call_args.kwargs
+    assert set(kwargs["reserved_usb_locations"]) == {"1-1.4.3"}

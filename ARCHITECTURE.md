@@ -743,11 +743,28 @@ bus.
 - Callback invoked with `response=None` to signal failure
 - In-flight request removed from tracking
 
+**Late Replies and Polls:**
+- A request whose callback was dropped while on the wire (timeout, write
+  error, `clear_queues`) is remembered for `LATE_REPLY_WINDOW_S` (30 s);
+  request ids are never reused, so its reply is recognised as late
+- Late status reply: klippy.log only. Late reply to a command: console
+  warning, since the ACE carried out what the caller saw fail
+- Late replies are not unsolicited and do not count toward comm supervision
+- `send_poll_request(key, ...)`: at most one open status poll per poller
+  (transport heartbeat, or one key per shared-bus instance); proof:
+  `tests/test_serial_late_replies.py`
+
 **Unsolicited Message Handling:**
-- Responses without matching callback logged as "UNSOLICITED"
+- Responses without matching callback, not a duplicate, not claimed by the
+  unsolicited callback and not late are logged as "UNSOLICITED"
 - Log format: "UNSOLICITED (ID={response_id}, current_id={self._request_id}): {json}"
-- Helps diagnose timeout vs late-arrival issues
-- Not an error - ACE may respond slower than timeout window
+- Since abandoned ids are handled as late replies, a remaining UNSOLICITED
+  id was never sent in this process or was abandoned more than
+  `LATE_REPLY_WINDOW_S` ago
+
+**Port Open/Close:**
+- termios HUPCL is cleared after open and before close, so closing the port
+  does not drop DTR (the ACE was seen to reset on that edge)
 
 **Duplicate Response Handling (ACE2 identity collision):**
 - Request ids answered in the last 30 s are remembered
@@ -761,7 +778,7 @@ bus.
   warning pointing at an `ace_count` / physical-unit mismatch; counted
   toward Layer-1 comm supervision (see CONNECTION_SUPERVISION.md)
 - A late reply for a request that timed out (never dispatched) is NOT a
-  duplicate and keeps the normal UNSOLICITED handling
+  duplicate; it is handled as a late reply (see above)
 - `DISCOVER_DEVICE` replies are exempt: discovery is a broadcast, so a
   second reply with the same request id is the race loser's answer -
   expected discovery data that must reach the shared-bus demultiplexer
@@ -1688,10 +1705,27 @@ addressed afterward by `device_id` — so port count can be less than
    first shared-bus candidate found backs *every remaining* instance slot
    (one physical port, N logical instances via device_id).
 4. Fewer instances placed than `ace_count`: no mapping at all; each serial
-   manager falls back to claim-protected, location-learning port detection
-   until the full chain is up. An instance left on `ace1_json` by a late ACE2
-   adapter is re-typed by `redetect_transports()` (automatic pass, or
+   manager falls back to claim-protected index detection and keeps the
+   location of its first connect as its known location. If an earlier unit
+   is invisible at that connect, the instance binds its sibling's unit for
+   the session; this is open, not yet fixed. An instance left on `ace1_json` by a late
+   ACE2 adapter is re-typed by `redetect_transports()` (automatic pass, or
    `ACE_REDETECT`).
+
+**Known location invisible (`find_connection_port`):** an instance whose
+known location is not listed (unit in a watchdog reset gap, or moved to
+another USB port) falls back to index matching. That fallback skips ports
+opened by other instances (`_CONNECTED_PORTS`) and the locations the
+topology bound to the other dedicated instances (`reserved_usb_locations`,
+from `AceManager._reserved_usb_locations`), and counts both as chain
+positions. The reservation is needed because a claim only exists once the
+owner has opened its port: at boot an instance can look while its own unit
+is in a reset gap and its sibling's unit is visible but not yet opened, and
+would otherwise take it (seen on a CM4 host with two ACE1 units). Shared-bus locations are
+not reserved: every instance on the bus uses that port. Proof:
+`test_fallback_never_takes_the_unit_reserved_for_another_instance`,
+`test_fallback_still_finds_a_unit_moved_to_an_unreserved_port`,
+`test_a_reserved_unit_keeps_its_place_in_the_chain`.
 
 **Why the scan retries (`_scan_ace_candidate_ports_with_retry`):** USB
 enumeration is async relative to Klipper startup — a physically-present

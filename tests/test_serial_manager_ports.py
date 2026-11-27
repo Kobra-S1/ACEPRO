@@ -99,6 +99,55 @@ def test_known_location_claimed_by_this_instance_is_returned(reactor, isolated_p
     assert port == "/dev/ttyACM0"
 
 
+# Seen at boot on a CM4 host: both ACE1 units reboot every ~3.5 s until opened.
+# Instance 0 looked while its unit (1-1.1.1.3) was in a reset gap; the only
+# port visible was instance 1's unit, not yet opened, so no claim protected it.
+OWN_UNIT = "1-1.1.1.3"
+SIBLING_UNIT = "1-1.1.1.4.3"
+
+
+def test_fallback_never_takes_the_unit_reserved_for_another_instance(reactor):
+    manager = make_manager(reactor, instance_num=0, target_usb_location=OWN_UNIT,
+                           reserved_usb_locations={SIBLING_UNIT})
+
+    port = manager.find_connection_port(0, ports=[ace_port("/dev/ttyACM3", SIBLING_UNIT)])
+
+    assert port is None
+
+
+def test_own_unit_is_found_once_it_is_back(reactor):
+    manager = make_manager(reactor, instance_num=0, target_usb_location=OWN_UNIT,
+                           reserved_usb_locations={SIBLING_UNIT})
+
+    port = manager.find_connection_port(0, ports=[
+        ace_port("/dev/ttyACM3", SIBLING_UNIT), ace_port("/dev/ttyACM1", OWN_UNIT)])
+
+    assert port == "/dev/ttyACM1"
+
+
+def test_fallback_still_finds_a_unit_moved_to_an_unreserved_port(reactor):
+    manager = make_manager(reactor, instance_num=0, target_usb_location=OWN_UNIT,
+                           reserved_usb_locations={SIBLING_UNIT})
+
+    port = manager.find_connection_port(0, ports=[
+        ace_port("/dev/ttyACM3", SIBLING_UNIT), ace_port("/dev/ttyACM1", "1-1.2.3")])
+
+    assert port == "/dev/ttyACM1"
+
+
+def test_a_reserved_unit_keeps_its_place_in_the_chain(reactor):
+    # Instance 1's unit moved; instance 0's unit is visible but not yet opened.
+    # Counting the reserved port as a chain position makes instance 1 pick
+    # the next unit instead of finding nothing at index 1.
+    manager = make_manager(reactor, instance_num=1, target_usb_location=SIBLING_UNIT,
+                           reserved_usb_locations={OWN_UNIT})
+
+    port = manager.find_connection_port(1, ports=[
+        ace_port("/dev/ttyACM1", OWN_UNIT), ace_port("/dev/ttyACM4", "1-1.2.3")])
+
+    assert port == "/dev/ttyACM4"
+
+
 def test_known_location_on_a_shared_bus_ignores_a_siblings_claim(reactor, isolated_port_claims):
     manager = make_manager(
         reactor, instance_num=1, target_usb_location="1-1.3",

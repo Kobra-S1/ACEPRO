@@ -1219,7 +1219,7 @@ Behavior notes:
 - `ACE_FULL_UNLOAD TOOL=<index>` uses two flows:
    - Active tool (currently loaded): toolhead prep + extruder retract + ACE retract.
    - Non-active tool: ACE-only retract (no heating/cut path).
-- `ACE_FULL_UNLOAD TOOL=ALL` skips the currently loaded nozzle tool and processes other non-empty slots.
+- `ACE_FULL_UNLOAD TOOL=ALL` skips the currently loaded nozzle tool and processes other non-empty slots, so a bulk unload leaves the loaded toolhead alone. Every slot other than the current tool gets an ACE-only retract; the current tool, when its filament is not at the nozzle, gets the active-tool flow (heat, cut, extruder retract). To empty everything, unload the loaded tool first with `ACE_FULL_UNLOAD` (no `TOOL=`), then run `TOOL=ALL`. The KlipperScreen spool screen sends `TOOL=ALL` when Full Unload is pressed with no slot selected (after a confirmation).
 - Only unloading the loaded tool itself clears `ace_current_index` (done inside `full_unload_slot`). Unloading any other slot, or `TOOL=ALL` with the nozzle tool skipped, leaves it untouched.
 
 ### Manual Feed/Retract Operations

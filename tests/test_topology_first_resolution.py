@@ -356,6 +356,35 @@ class TestDaisyChainTopologyResolution(unittest.TestCase):
         kwargs_by_instance = {num: kwargs for num, _cfg, kwargs in self.captured_instance_kwargs}
         self.assertEqual(kwargs_by_instance[0]["target_usb_location"], "6-1.3")
 
+    def test_each_instance_gets_its_dedicated_siblings_locations_reserved(self):
+        first = _make_port("/dev/ttyACM1", "ACE", "6-1.3")
+        second = _make_port("/dev/ttyACM3", "ACE", "6-1.4.3")
+
+        self._build_manager([second, first])
+
+        kwargs_by_instance = {num: kwargs for num, _cfg, kwargs in self.captured_instance_kwargs}
+        self.assertEqual(set(kwargs_by_instance[0]["reserved_usb_locations"]), {"6-1.4.3"})
+        self.assertEqual(set(kwargs_by_instance[1]["reserved_usb_locations"]), {"6-1.3"})
+
+    def test_a_shared_bus_location_is_not_reserved(self):
+        # The ACE1 fallback only matches "ACE" ports, and the shared bus is
+        # used by every instance on it: reserving it would block nobody it
+        # should and could block a sibling on the same bus.
+        ace1_port = _make_port("/dev/ttyACM1", "ACE", "6-1.3")
+        ace2_port = _make_port("/dev/ttyACM0", "USB Single Serial", "6-1.3.1")
+
+        self._build_manager([ace2_port, ace1_port])
+
+        kwargs_by_instance = {num: kwargs for num, _cfg, kwargs in self.captured_instance_kwargs}
+        self.assertEqual(set(kwargs_by_instance[0]["reserved_usb_locations"]), set())
+
+    def test_deferred_mapping_reserves_nothing(self):
+        self._build_manager([_make_port("/dev/ttyACM0", "ACE", "6-1.4.3")])
+
+        kwargs_by_instance = {num: kwargs for num, _cfg, kwargs in self.captured_instance_kwargs}
+        for kwargs in kwargs_by_instance.values():
+            self.assertEqual(set(kwargs["reserved_usb_locations"]), set())
+
     def test_no_hardware_connected_yields_empty_resolution(self):
         manager = self._build_manager([])
         self.assertEqual(manager._topology_resolution, {})
@@ -376,9 +405,9 @@ class TestDaisyChainTopologyResolution(unittest.TestCase):
 
         Safe behaviour when fewer non-shared candidates than ace_count are
         visible: do NOT lock in a shifted mapping. Leave the non-shared
-        instances unresolved so the claim-protected index fallback (and a
-        future re-resolution once the full set appears) can place them without
-        risking a misbind. This mirrors ``test_no_hardware_connected_yields_
+        instances unresolved, so the claim-protected index fallback places
+        them instead (which has its own open gap, ARCHITECTURE.md topology
+        step 4). This mirrors ``test_no_hardware_connected_yields_
         empty_resolution`` for the partially-visible case.
         """
         # ace_count == 2, but only the *second* ACE1 unit has enumerated so far.
