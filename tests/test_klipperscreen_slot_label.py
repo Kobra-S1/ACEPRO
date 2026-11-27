@@ -37,7 +37,7 @@ def acepro():
     return module
 
 
-# Shapes seen in ace_instance_N.slots (192.168.1.20, 2026-11-22) plus an
+# Shapes seen in ace_instance_N.slots on a real printer, plus an
 # RFID spool and a slot busy feeding.
 SLOTS = {
     "no_rfid": {"status": "ready", "material": "Unknown", "temp": 0,

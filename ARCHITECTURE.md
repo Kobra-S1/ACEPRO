@@ -1721,7 +1721,7 @@ from `AceManager._reserved_usb_locations`), and counts both as chain
 positions. The reservation is needed because a claim only exists once the
 owner has opened its port: at boot an instance can look while its own unit
 is in a reset gap and its sibling's unit is visible but not yet opened, and
-would otherwise take it (ks1-cm4, two ACE1 units). Shared-bus locations are
+would otherwise take it (seen on a CM4 host with two ACE1 units). Shared-bus locations are
 not reserved: every instance on the bus uses that port. Proof:
 `test_fallback_never_takes_the_unit_reserved_for_another_instance`,
 `test_fallback_still_finds_a_unit_moved_to_an_unreserved_port`,

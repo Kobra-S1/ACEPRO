@@ -99,7 +99,7 @@ def test_known_location_claimed_by_this_instance_is_returned(reactor, isolated_p
     assert port == "/dev/ttyACM0"
 
 
-# ks1-cm4 boot, 2026-11-22: both ACE1 units reboot every ~3.5 s until opened.
+# Seen at boot on a CM4 host: both ACE1 units reboot every ~3.5 s until opened.
 # Instance 0 looked while its unit (1-1.1.1.3) was in a reset gap; the only
 # port visible was instance 1's unit, not yet opened, so no claim protected it.
 OWN_UNIT = "1-1.1.1.3"

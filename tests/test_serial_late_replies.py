@@ -1,6 +1,6 @@
 """Polls that do not stack, and late replies that are not UNSOLICITED.
 
-Replays a field failure (klippy.log of 2026-07-17 on a dual-ACE printer):
+Replays a field failure (klippy.log from a dual-ACE printer):
 while an ACE preloads newly inserted filament it answers nothing for 6-7 s,
 then answers every queued request at once. With a 1 s heartbeat and a 5 s
 timeout that produced three timed-out polls per stall, three replies with
