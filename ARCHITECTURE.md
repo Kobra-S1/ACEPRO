@@ -504,6 +504,9 @@ get_match_mode()                    # Get match mode ("exact", "material", "next
 
 find_exact_match(current_tool)      # Search for a match across all slots (mode-aware search)
 
+predict_next_tool(current_tool)     # The same search without logging, for status polls:
+                                    #   ace_state endless_spool_next_tool
+
 execute_swap(from_tool, to_tool)    # Execute automatic tool swap with fallback
                                                       # Called while already paused (RunoutMonitor
                                                       #   paused). Per attempt:
@@ -2129,6 +2132,14 @@ Proof: `test_lane_entries_are_indexed_by_ace_tool_even_with_sync_disabled`,
 `test_lane_change_is_announced_with_moonraker_sync_disabled`,
 `test_status_carries_the_lane_entries`,
 `test_status_tells_whether_this_driver_writes_the_lanes`.
+
+`ace_state` status `endless_spool_next_tool`: the tool a runout of the
+loaded tool would swap to now (`EndlessSpool.predict_next_tool`, the runout
+search without its per-slot log lines, as it runs on every 0.25 s status
+poll), -1 when endless spool is off, no tool is loaded, nothing matches or a
+toolchange is in progress (slots then read `searching`/`empty`). A
+prediction: inventory may change before the runout. Proof:
+`TestPredictNextTool`, `TestEndlessSpoolNextTool`.
 
 ### Toolhead transfer strategies (`toolhead_strategy`)
 

@@ -3,11 +3,12 @@ EndlessSpool: Handles endless spool filament matching logic.
 
 Responsibilities:
 - Find exact material/color matches across all slots
+- Predict that match for status polls (AceManager.get_status)
 - No pause/resume logic (manager owns that)
 - No jam detection (removed)
 
 Integration:
-- Called from: AceManager._handle_runout_detected()
+- Called from: RunoutMonitor (runout), AceManager.get_status (prediction)
 """
 
 import logging
@@ -18,6 +19,42 @@ from .config import (
     get_local_slot,
     get_tool_offset,
 )
+
+
+# Why a slot cannot take over a runout (EndlessSpool._mismatch). Keys, not
+# messages: the status poll asks too and must not build log text.
+_MISMATCH_NOT_READY = "not_ready"
+_MISMATCH_UNKNOWN_MATERIAL = "unknown_material"
+_MISMATCH_MATERIAL = "material"
+_MISMATCH_COLOR = "color"
+
+
+def _material(inv):
+    return inv.get("material", "").lower().strip()
+
+
+def _rgb(color):
+    return f"RGB({color[0]},{color[1]},{color[2]})"
+
+
+def _describe_mismatch(mismatch, wanted, candidate):
+    """Log text for a _MISMATCH_* key."""
+    if mismatch == _MISMATCH_NOT_READY:
+        return f"status={candidate.get('status')} (need 'ready')"
+    if mismatch == _MISMATCH_UNKNOWN_MATERIAL:
+        return (
+            f"cannot match unknown materials "
+            f"(current='{_material(wanted)}', candidate='{_material(candidate)}')"
+        )
+    if mismatch == _MISMATCH_MATERIAL:
+        return (
+            f"material mismatch "
+            f"(want '{_material(wanted)}', got '{_material(candidate)}')"
+        )
+    return (
+        f"color mismatch (want {_rgb(wanted.get('color', [0, 0, 0]))}, "
+        f"got {_rgb(candidate.get('color', [0, 0, 0]))})"
+    )
 
 
 class EndlessSpool:
@@ -53,6 +90,22 @@ class EndlessSpool:
 
         return mode
 
+    def predict_next_tool(self, current_tool):
+        """
+        The tool a runout of current_tool would swap to now, or -1.
+
+        Same search as find_exact_match but silent, as it runs on every
+        status poll. A prediction: inventory may change before the runout.
+        """
+        wanted = self._slot_inventory(current_tool)
+        if wanted is None:
+            return -1
+        match_mode = self.get_match_mode()
+        for candidate_tool, candidate in self._candidates_after(current_tool):
+            if self._mismatch(wanted, candidate, match_mode) is None:
+                return candidate_tool
+        return -1
+
     def find_exact_match(self, current_tool):
         """
         Find next spool with matching material and optionally color.
@@ -60,9 +113,10 @@ class EndlessSpool:
         Match mode (configurable via ace_endless_spool_match_mode):
         - "exact": Match both material AND color (default)
         - "material": Match material only, ignore color
+        - "next": First ready spool, regardless of material/color
 
         Searches all slots in all instances, starting from the next tool
-        and wrapping around.
+        and wrapping around, and logs why each skipped slot did not match.
 
         Args:
             current_tool: Tool index with runout (0-based)
@@ -70,18 +124,11 @@ class EndlessSpool:
         Returns:
             int: Tool index of match, or -1 if none found
         """
-        inst_num = get_instance_from_tool(current_tool)
-        local_slot = get_local_slot(current_tool, inst_num)
-
-        if inst_num < 0 or local_slot < 0:
+        current_inv = self._slot_inventory(current_tool)
+        if current_inv is None:
             return -1
 
-        ace_inst = ACE_INSTANCES.get(inst_num)
-        if not ace_inst:
-            return -1
-
-        current_inv = ace_inst.inventory[local_slot]
-        current_material = current_inv.get("material", "").lower().strip()
+        current_material = _material(current_inv)
         current_color = current_inv.get("color", [0, 0, 0])
 
         match_mode = self.get_match_mode()
@@ -98,67 +145,21 @@ class EndlessSpool:
                 f"{current_material} RGB({current_color[0]},{current_color[1]},{current_color[2]})"
             )
 
-        first_tool = get_tool_offset(0)
-        total_tools = len(ACE_INSTANCES) * SLOTS_PER_ACE
-
-        for offset in range(1, total_tools):
-            candidate_tool = first_tool + (
-                current_tool - first_tool + offset) % total_tools
-
-            candidate_inst_num = get_instance_from_tool(candidate_tool)
-            candidate_local_slot = get_local_slot(candidate_tool, candidate_inst_num)
-
-            if candidate_inst_num < 0 or candidate_local_slot < 0:
-                continue
-
-            cand_ace = ACE_INSTANCES.get(candidate_inst_num)
-            if not cand_ace:
-                continue
-
-            cand_inv = cand_ace.inventory[candidate_local_slot]
-
-            cand_status = cand_inv.get("status")
-            if cand_status != "ready":
+        for candidate_tool, cand_inv in self._candidates_after(current_tool):
+            mismatch = self._mismatch(current_inv, cand_inv, match_mode)
+            if mismatch is not None:
                 logging.info(
-                    f"ACE: T{candidate_tool} skipped - status={cand_status} (need 'ready')"
+                    f"ACE: T{candidate_tool} skipped - "
+                    f"{_describe_mismatch(mismatch, current_inv, cand_inv)}"
                 )
                 continue
 
-            # In "next" mode we ignore material/color and take the first ready slot
             if match_mode == "next":
                 logging.info(f"ACE: Match found (next ready): T{candidate_tool}")
-                return candidate_tool
-
-            cand_material = cand_inv.get("material", "").lower().strip()
-
-            # SAFETY: Never match "unknown" materials - we don't know if they're compatible!
-            if current_material == "unknown" or cand_material == "unknown":
+            else:
                 logging.info(
-                    f"ACE: T{candidate_tool} skipped - cannot match unknown materials "
-                    f"(current='{current_material}', candidate='{cand_material}')"
+                    f"ACE: Match found: T{current_tool} → T{candidate_tool}"
                 )
-                continue
-
-            if cand_material != current_material:
-                logging.info(
-                    f"ACE: T{candidate_tool} skipped - material mismatch "
-                    f"(want '{current_material}', got '{cand_material}')"
-                )
-                continue
-
-            if match_mode == "exact":
-                cand_color = cand_inv.get("color", [0, 0, 0])
-                if cand_color != current_color:
-                    logging.info(
-                        f"ACE: T{candidate_tool} skipped - color mismatch "
-                        f"(want RGB({current_color[0]},{current_color[1]},{current_color[2]}), "
-                        f"got RGB({cand_color[0]},{cand_color[1]},{cand_color[2]}))"
-                    )
-                    continue
-
-            logging.info(
-                f"ACE: Match found: T{current_tool} → T{candidate_tool}"
-            )
             return candidate_tool
 
         if match_mode == "material":
@@ -175,6 +176,50 @@ class EndlessSpool:
                 f"({current_material}, RGB({current_color[0]},{current_color[1]},{current_color[2]}))"
             )
         return -1
+
+    @staticmethod
+    def _slot_inventory(tool):
+        """Inventory dict of a tool's slot, or None for a tool no ACE has."""
+        inst_num = get_instance_from_tool(tool)
+        local_slot = get_local_slot(tool, inst_num)
+        if inst_num < 0 or local_slot < 0:
+            return None
+        ace_inst = ACE_INSTANCES.get(inst_num)
+        if not ace_inst:
+            return None
+        return ace_inst.inventory[local_slot]
+
+    def _candidates_after(self, current_tool):
+        """(tool, inventory) of every other slot, from the next tool on,
+        wrapping across all instances."""
+        first_tool = get_tool_offset(0)
+        total_tools = len(ACE_INSTANCES) * SLOTS_PER_ACE
+        for offset in range(1, total_tools):
+            candidate_tool = first_tool + (
+                current_tool - first_tool + offset) % total_tools
+            candidate = self._slot_inventory(candidate_tool)
+            if candidate is not None:
+                yield candidate_tool, candidate
+
+    @staticmethod
+    def _mismatch(wanted, candidate, match_mode):
+        """Why candidate cannot replace wanted (a _MISMATCH_* key), or None."""
+        if candidate.get("status") != "ready":
+            return _MISMATCH_NOT_READY
+        # In "next" mode we ignore material/color and take the first ready slot
+        if match_mode == "next":
+            return None
+        wanted_material = _material(wanted)
+        cand_material = _material(candidate)
+        # SAFETY: Never match "unknown" materials - we don't know if they're compatible!
+        if wanted_material == "unknown" or cand_material == "unknown":
+            return _MISMATCH_UNKNOWN_MATERIAL
+        if cand_material != wanted_material:
+            return _MISMATCH_MATERIAL
+        if match_mode == "exact" and (
+                candidate.get("color", [0, 0, 0]) != wanted.get("color", [0, 0, 0])):
+            return _MISMATCH_COLOR
+        return None
 
     def execute_swap(self, from_tool, to_tool):
         """

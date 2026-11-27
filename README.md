@@ -1668,6 +1668,14 @@ ACE_SET_ENDLESS_SPOOL_MODE MODE=next       # Take the next ready slot (ignores m
 ACE_GET_ENDLESS_SPOOL_MODE
 ```
 
+Panels and Moonraker clients can read the spool a runout would switch to
+from the `ace_state` printer object: `endless_spool_next_tool` (-1 when
+endless spool is off, nothing matches or a toolchange is running).
+
+```bash
+curl 'http://<printer>:7125/printer/objects/query?ace_state=endless_spool_next_tool'
+```
+
 ### Match Mode Examples
 
 **Exact Mode** (Match Material AND RGB Color):
