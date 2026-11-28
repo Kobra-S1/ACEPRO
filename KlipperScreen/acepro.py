@@ -21,6 +21,22 @@ WIDE_UTILITIES_MIN_WIDTH = 544
 RESP_FORCE_UNLOAD = 100
 
 
+def empty_slot_widgets():
+    """Fresh per-slot widget lists of one ACE instance's instance_data.
+
+    _create_slot_button appends one entry per slot to each list; the slot
+    view resets them with this before rebuilding its cards.
+    """
+    return {
+        'slot_buttons': [],
+        'slot_labels': [],
+        'slot_color_boxes': [],
+        'slot_tool_labels': [],
+        'endless_badges': [],
+        'slot_gear_buttons': [],
+    }
+
+
 def slot_label_text(slot, portrait):
     """Material/temperature text of one slot card.
 
@@ -89,11 +105,7 @@ class Panel(ScreenPanel):
                     "rfid": False
                 } for _ in range(4)],
                 'tool_offset': instance_id * 4,
-                'slot_buttons': [],
-                'slot_labels': [],
-                'slot_color_boxes': [],
-                'slot_tool_labels': [],
-                'endless_badges': []
+                **empty_slot_widgets(),
             }
 
         # Global state
@@ -1234,12 +1246,7 @@ class Panel(ScreenPanel):
         slots_box.set_homogeneous(True)
 
         instance = self.instance_data[instance_id]
-        instance['slot_buttons'] = []
-        instance['slot_labels'] = []
-        instance['slot_color_boxes'] = []
-        instance['slot_tool_labels'] = []
-        instance['endless_badges'] = []
-        instance['slot_gear_buttons'] = []
+        instance.update(empty_slot_widgets())
 
         for local_slot in range(4):
             global_tool = instance['tool_offset'] + local_slot
@@ -1382,8 +1389,6 @@ class Panel(ScreenPanel):
         self.instance_data[instance_id]['slot_color_boxes'].append(color_box)
         self.instance_data[instance_id]['slot_tool_labels'].append(tool_label)
         self.instance_data[instance_id]['endless_badges'].append(endless_badge)
-        if 'slot_gear_buttons' not in self.instance_data[instance_id]:
-            self.instance_data[instance_id]['slot_gear_buttons'] = []
         self.instance_data[instance_id]['slot_gear_buttons'].append(gear_btn)
 
         # Dim empty slots so they appear less prominent and disable load/unload on empties
