@@ -843,7 +843,6 @@ class Panel(ScreenPanel):
             self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
         else:
             self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
-        endless_spool_control.pack_start(self.endless_spool_status, False, False, 0)
         self.endless_spool_control = endless_spool_control
 
         # Right side: Match Mode selector
