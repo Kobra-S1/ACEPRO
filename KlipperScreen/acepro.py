@@ -305,8 +305,12 @@ class Panel(ScreenPanel):
             logging.info(f"ACE: Detected instances: {instances}")
         return sorted(instances)
 
-    def _send_gcode(self, gcode_command):
-        """Safely send gcode command with connection validation"""
+    def _send_gcode(self, gcode_command, on_done=None):
+        """Safely send gcode command with connection validation.
+
+        on_done(), if given, runs on the GTK main loop once Moonraker
+        answers the script request, i.e. after the command has executed.
+        """
         try:
             if not hasattr(self, '_screen'):
                 logging.error("ACE: _screen not available for gcode")
@@ -319,12 +323,18 @@ class Panel(ScreenPanel):
 
             ws = self._screen._ws
             api = getattr(ws, 'api', None)
+            callback = None
+            if on_done is not None:
+                # Runs via GLib.idle_add: must return False or it repeats.
+                def callback(*_):
+                    on_done()
+                    return False
             if callable(getattr(api, 'gcode_script', None)):
                 logging.info(f"ACE: Sending gcode via api.gcode_script: {gcode_command}")
-                sent = api.gcode_script(gcode_command)
+                sent = api.gcode_script(gcode_command, callback)
             elif callable(getattr(ws, 'send_method', None)):
                 logging.info(f"ACE: Sending gcode via direct websocket: {gcode_command}")
-                sent = ws.send_method("printer.gcode.script", {"script": gcode_command})
+                sent = ws.send_method("printer.gcode.script", {"script": gcode_command}, callback)
             else:
                 logging.error("ACE: No gcode send path available")
                 return False
@@ -505,7 +515,10 @@ class Panel(ScreenPanel):
             if isinstance(ace_state, dict):
                 state_changed = False
                 endless_enabled = ace_state.get("endless_spool_enabled")
-                if isinstance(endless_enabled, bool) and endless_enabled != self.endless_spool_enabled:
+                if (isinstance(endless_enabled, bool)
+                        and endless_enabled != self.endless_spool_enabled
+                        and not self._should_ignore_toggle_update(
+                            "endless_spool_enabled", endless_enabled)):
                     self.endless_spool_enabled = endless_enabled
                     state_changed = True
                 next_tool = ace_state.get("endless_spool_next_tool")
@@ -1116,24 +1129,28 @@ class Panel(ScreenPanel):
         self.endless_spool_enabled = switch.get_active()
         self._mark_pending_toggle_state("endless_spool_enabled", self.endless_spool_enabled)
 
+        command = ("ACE_ENABLE_ENDLESS_SPOOL" if self.endless_spool_enabled
+                   else "ACE_DISABLE_ENDLESS_SPOOL")
         # Update status label
         if self.endless_spool_enabled:
             self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
-            # Send gcode to enable endless spool for all instances
-            for instance_id in self.ace_instances:
-                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-                self._send_gcode(f"ACE_ENABLE_ENDLESS_SPOOL{instance_param}")
-            self._screen.show_popup_message("Endless Spool Enabled", 1)
-            logging.info("ACE: Endless Spool enabled for all instances")
         else:
             self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
-            # Send gcode to disable endless spool for all instances
-            for instance_id in self.ace_instances:
-                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-                self._send_gcode(f"ACE_DISABLE_ENDLESS_SPOOL{instance_param}")
-            self._screen.show_popup_message("Endless Spool Disabled", 1)
-            logging.info("ACE: Endless Spool disabled for all instances")
+        # The backend predicts the candidate only while enabled, so re-query
+        # once the last command has run instead of waiting for the 3 s poll.
+        instance_ids = list(self.ace_instances)
+        for instance_id in instance_ids:
+            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+            on_done = (self._poll_connection_status
+                       if instance_id == instance_ids[-1] else None)
+            self._send_gcode(f"{command}{instance_param}", on_done)
+        state_word = "Enabled" if self.endless_spool_enabled else "Disabled"
+        self._screen.show_popup_message(f"Endless Spool {state_word}", 1)
+        logging.info("ACE: Endless Spool %s for all instances", state_word.lower())
 
+        # Disabling hides the candidate cue at once; enabling shows it when
+        # the re-query above delivers the backend's prediction.
+        self.update_slot_loaded_states()
         self._update_match_mode_sensitivity()
 
     def cycle_instance(self, widget):
