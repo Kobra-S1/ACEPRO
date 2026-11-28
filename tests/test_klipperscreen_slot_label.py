@@ -61,8 +61,7 @@ def make_panel(acepro, slot, portrait):
     panel.instance_data = {0: {
         "inventory": [dict(slot) for _ in range(4)],
         "tool_offset": 0,
-        "slot_buttons": [], "slot_labels": [], "slot_color_boxes": [],
-        "slot_tool_labels": [], "slot_gear_buttons": [],
+        **acepro.empty_slot_widgets(),
     }}
     return panel
 

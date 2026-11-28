@@ -21,6 +21,22 @@ WIDE_UTILITIES_MIN_WIDTH = 544
 RESP_FORCE_UNLOAD = 100
 
 
+def empty_slot_widgets():
+    """Fresh per-slot widget lists of one ACE instance's instance_data.
+
+    _create_slot_button appends one entry per slot to each list; the slot
+    view resets them with this before rebuilding its cards.
+    """
+    return {
+        'slot_buttons': [],
+        'slot_labels': [],
+        'slot_color_boxes': [],
+        'slot_tool_labels': [],
+        'endless_badges': [],
+        'slot_gear_buttons': [],
+    }
+
+
 def slot_label_text(slot, portrait):
     """Material/temperature text of one slot card.
 
@@ -89,10 +105,7 @@ class Panel(ScreenPanel):
                     "rfid": False
                 } for _ in range(4)],
                 'tool_offset': instance_id * 4,
-                'slot_buttons': [],
-                'slot_labels': [],
-                'slot_color_boxes': [],
-                'slot_tool_labels': []
+                **empty_slot_widgets(),
             }
 
         # Global state
@@ -105,6 +118,7 @@ class Panel(ScreenPanel):
         self.printer_tools_known = False
         self.target_tool_index = -1  # -1 = no toolchange in flight/unconfirmed
         self.endless_spool_enabled = False
+        self.endless_spool_next_tool = -1
         self.dryer_enabled = False
         self.ace_pro_enabled = True   # assume enabled until first RPC update
         self.toolhead_sensor = None   # True/False when known, None = sensor not configured
@@ -216,7 +230,7 @@ class Panel(ScreenPanel):
                 "cont_assist_time",
                 "connection_state",
             ]
-            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
+            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_next_tool", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
             for instance_id in self.ace_instances:
                 objects[f"ace_instance_{instance_id}"] = ace_fields
 
@@ -303,8 +317,12 @@ class Panel(ScreenPanel):
             logging.info(f"ACE: Detected instances: {instances}")
         return sorted(instances)
 
-    def _send_gcode(self, gcode_command):
-        """Safely send gcode command with connection validation"""
+    def _send_gcode(self, gcode_command, on_done=None):
+        """Safely send gcode command with connection validation.
+
+        on_done(), if given, runs on the GTK main loop once Moonraker
+        answers the script request, i.e. after the command has executed.
+        """
         try:
             if not hasattr(self, '_screen'):
                 logging.error("ACE: _screen not available for gcode")
@@ -317,12 +335,18 @@ class Panel(ScreenPanel):
 
             ws = self._screen._ws
             api = getattr(ws, 'api', None)
+            callback = None
+            if on_done is not None:
+                # Runs via GLib.idle_add: must return False or it repeats.
+                def callback(*_):
+                    on_done()
+                    return False
             if callable(getattr(api, 'gcode_script', None)):
                 logging.info(f"ACE: Sending gcode via api.gcode_script: {gcode_command}")
-                sent = api.gcode_script(gcode_command)
+                sent = api.gcode_script(gcode_command, callback)
             elif callable(getattr(ws, 'send_method', None)):
                 logging.info(f"ACE: Sending gcode via direct websocket: {gcode_command}")
-                sent = ws.send_method("printer.gcode.script", {"script": gcode_command})
+                sent = ws.send_method("printer.gcode.script", {"script": gcode_command}, callback)
             else:
                 logging.error("ACE: No gcode send path available")
                 return False
@@ -377,7 +401,7 @@ class Panel(ScreenPanel):
                         "feed_assist_count",
                         "cont_assist_time",
                     ]
-                    objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
+                    objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_next_tool", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
                     for instance_id in self.ace_instances:
                         key = f"ace_instance_{instance_id}"
                         objects[key] = ace_fields
@@ -445,7 +469,7 @@ class Panel(ScreenPanel):
                 "feed_assist_count",
                 "cont_assist_time",
             ]
-            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
+            objects = {"ace_state": ["ace_instances", "current_index", "target_index", "endless_spool_enabled", "endless_spool_next_tool", "endless_spool_match_mode", "ace_pro_enabled", "toolhead_sensor", "rdm_sensor", "tool_base"]}
             for instance_id in self.ace_instances:
                 key = f"ace_instance_{instance_id}"
                 objects[key] = ace_fields
@@ -498,6 +522,22 @@ class Panel(ScreenPanel):
                     self.printer_tool_offset = offset
                     for instance_id, data in self.instance_data.items():
                         data['tool_offset'] = offset + instance_id * 4
+                    self.update_slot_loaded_states()
+
+            if isinstance(ace_state, dict):
+                state_changed = False
+                endless_enabled = ace_state.get("endless_spool_enabled")
+                if (isinstance(endless_enabled, bool)
+                        and endless_enabled != self.endless_spool_enabled
+                        and not self._should_ignore_toggle_update(
+                            "endless_spool_enabled", endless_enabled)):
+                    self.endless_spool_enabled = endless_enabled
+                    state_changed = True
+                next_tool = ace_state.get("endless_spool_next_tool")
+                if isinstance(next_tool, int) and next_tool != self.endless_spool_next_tool:
+                    self.endless_spool_next_tool = next_tool
+                    state_changed = True
+                if state_changed:
                     self.update_slot_loaded_states()
 
             if isinstance(ace_state, dict) and "current_index" in ace_state:
@@ -683,6 +723,14 @@ class Panel(ScreenPanel):
         .ace_slot_target {
             box-shadow: inset 0 0 0 2px #B0B0B0;
             border-radius: 6px;
+        }
+        .ace_slot_endless_next {
+            background-color: rgba(255, 183, 77, 0.12);
+            border-radius: 6px;
+        }
+        .ace_endless_badge {
+            color: #FFB74D;
+            font-weight: bold;
         }
         scrollbar.ace_wide_scrollbar {
             min-width: 28px;
@@ -1093,24 +1141,28 @@ class Panel(ScreenPanel):
         self.endless_spool_enabled = switch.get_active()
         self._mark_pending_toggle_state("endless_spool_enabled", self.endless_spool_enabled)
 
+        command = ("ACE_ENABLE_ENDLESS_SPOOL" if self.endless_spool_enabled
+                   else "ACE_DISABLE_ENDLESS_SPOOL")
         # Update status label
         if self.endless_spool_enabled:
             self.endless_spool_status.set_markup('<span foreground="green"><b>On</b></span>')
-            # Send gcode to enable endless spool for all instances
-            for instance_id in self.ace_instances:
-                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-                self._send_gcode(f"ACE_ENABLE_ENDLESS_SPOOL{instance_param}")
-            self._screen.show_popup_message("Endless Spool Enabled", 1)
-            logging.info("ACE: Endless Spool enabled for all instances")
         else:
             self.endless_spool_status.set_markup('<span foreground="gray">Off</span>')
-            # Send gcode to disable endless spool for all instances
-            for instance_id in self.ace_instances:
-                instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
-                self._send_gcode(f"ACE_DISABLE_ENDLESS_SPOOL{instance_param}")
-            self._screen.show_popup_message("Endless Spool Disabled", 1)
-            logging.info("ACE: Endless Spool disabled for all instances")
+        # The backend predicts the candidate only while enabled, so re-query
+        # once the last command has run instead of waiting for the 3 s poll.
+        instance_ids = list(self.ace_instances)
+        for instance_id in instance_ids:
+            instance_param = f" INSTANCE={instance_id}" if instance_id > 0 else ""
+            on_done = (self._poll_connection_status
+                       if instance_id == instance_ids[-1] else None)
+            self._send_gcode(f"{command}{instance_param}", on_done)
+        state_word = "Enabled" if self.endless_spool_enabled else "Disabled"
+        self._screen.show_popup_message(f"Endless Spool {state_word}", 1)
+        logging.info("ACE: Endless Spool %s for all instances", state_word.lower())
 
+        # Disabling hides the candidate cue at once; enabling shows it when
+        # the re-query above delivers the backend's prediction.
+        self.update_slot_loaded_states()
         self._update_match_mode_sensitivity()
 
     def cycle_instance(self, widget):
@@ -1194,11 +1246,7 @@ class Panel(ScreenPanel):
         slots_box.set_homogeneous(True)
 
         instance = self.instance_data[instance_id]
-        instance['slot_buttons'] = []
-        instance['slot_labels'] = []
-        instance['slot_color_boxes'] = []
-        instance['slot_tool_labels'] = []
-        instance['slot_gear_buttons'] = []
+        instance.update(empty_slot_widgets())
 
         for local_slot in range(4):
             global_tool = instance['tool_offset'] + local_slot
@@ -1252,6 +1300,14 @@ class Panel(ScreenPanel):
             tool_label.set_line_wrap(False)
             info_box.pack_start(tool_label, False, False, 0)
 
+            endless_badge = Gtk.Label(label="∞")
+            endless_badge.get_style_context().add_class("ace_endless_badge")
+            endless_badge.set_tooltip_text("Next endless spool candidate")
+            endless_badge.set_halign(Gtk.Align.START)
+            endless_badge.set_no_show_all(True)
+            endless_badge.hide()
+            info_box.pack_start(endless_badge, False, False, 0)
+
             slot_label = Gtk.Label()
             slot_label.set_halign(Gtk.Align.START)
             slot_label.set_text(slot_label_text(slot_data, portrait=True))
@@ -1285,6 +1341,13 @@ class Panel(ScreenPanel):
             tool_label.set_halign(Gtk.Align.START)
             tool_label.set_line_wrap(False)
             header_row.pack_start(tool_label, True, True, 0)
+
+            endless_badge = Gtk.Label(label="∞")
+            endless_badge.get_style_context().add_class("ace_endless_badge")
+            endless_badge.set_tooltip_text("Next endless spool candidate")
+            endless_badge.set_no_show_all(True)
+            endless_badge.hide()
+            header_row.pack_start(endless_badge, False, False, 0)
 
             # Use bundled filament icon to indicate load/unload action
             gear_btn = self._gtk.Button("filament", None, "color2")
@@ -1325,8 +1388,7 @@ class Panel(ScreenPanel):
         self.instance_data[instance_id]['slot_labels'].append(slot_label)
         self.instance_data[instance_id]['slot_color_boxes'].append(color_box)
         self.instance_data[instance_id]['slot_tool_labels'].append(tool_label)
-        if 'slot_gear_buttons' not in self.instance_data[instance_id]:
-            self.instance_data[instance_id]['slot_gear_buttons'] = []
+        self.instance_data[instance_id]['endless_badges'].append(endless_badge)
         self.instance_data[instance_id]['slot_gear_buttons'].append(gear_btn)
 
         # Dim empty slots so they appear less prominent and disable load/unload on empties
@@ -1421,6 +1483,17 @@ class Panel(ScreenPanel):
                 slot_btn.get_style_context().remove_class("ace_slot_loaded")
                 slot_btn.get_style_context().remove_class("ace_slot_empty")
                 slot_btn.get_style_context().remove_class("ace_slot_target")
+                slot_btn.get_style_context().remove_class("ace_slot_endless_next")
+
+                # Mark the backend's current runout prediction independently
+                # of loaded/target status so both cues remain visible.
+                is_endless_next = (self.endless_spool_enabled and
+                                   self.endless_spool_next_tool == global_tool)
+                if is_endless_next:
+                    slot_btn.get_style_context().add_class("ace_slot_endless_next")
+                badges = instance.get('endless_badges', [])
+                if local_slot < len(badges):
+                    badges[local_slot].set_visible(is_endless_next)
 
                 # Add appropriate class
                 if is_loaded:

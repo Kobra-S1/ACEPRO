@@ -3664,6 +3664,7 @@ class AceManager:
                 "endless_spool_match_mode": self.state.get(
                     "ace_endless_spool_match_mode", "exact"
                 ),
+                "endless_spool_next_tool": self._endless_spool_next_tool(),
                 "ace_pro_enabled": bool(self._ace_pro_enabled),
                 "toolhead_sensor": toolhead_sensor,
                 "rdm_sensor": rdm_sensor,
@@ -3680,6 +3681,7 @@ class AceManager:
                 "target_index": -1,
                 "endless_spool_enabled": False,
                 "endless_spool_match_mode": "exact",
+                "endless_spool_next_tool": -1,
                 "ace_pro_enabled": False,
                 "toolhead_sensor": None,
                 "rdm_sensor": None,
@@ -3690,6 +3692,17 @@ class AceManager:
                 "box_tag_tools": [],
                 **tool_numbering,
             }
+
+    def _endless_spool_next_tool(self):
+        """Tool a runout of the loaded tool would swap to now, or -1 when
+        endless spool would not swap. Mid-toolchange the slots read
+        'searching' or 'empty', so no guess is published then."""
+        if self.toolchange_in_progress:
+            return -1
+        if not self.state.get("ace_endless_spool_enabled", False):
+            return -1
+        return self.endless_spool.predict_next_tool(
+            self.state.get("ace_current_index", -1))
 
     def _box_tag_tools(self):
         """Tools whose loaded spool the box identified by its own tag: a

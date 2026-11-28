@@ -3,6 +3,8 @@ Tests for EndlessSpool logic - pure decision logic, minimal mocking.
 
 Focus: find_exact_match algorithm (material + color matching).
 """
+import logging
+
 import pytest
 from unittest.mock import Mock, MagicMock
 from ace.endless_spool import EndlessSpool
@@ -968,6 +970,82 @@ class TestToolBase:
         self._ready(3)
         assert self.endless_spool.find_exact_match(
             current_tool=direct_tool) == -1
+
+
+class TestPredictNextTool:
+    """predict_next_tool: the swap target a runout would pick, for status polls."""
+
+    def setup_method(self):
+        printer = Mock()
+        printer.get_reactor = Mock(return_value=Mock())
+        self.manager = Mock()
+        self.manager.state.get = Mock(
+            side_effect=lambda key, default=None: self.state.get(key, default))
+        self.state = {"ace_endless_spool_match_mode": "exact"}
+        self.endless_spool = EndlessSpool(printer, Mock(), self.manager)
+
+        ACE_INSTANCES.clear()
+        for i in range(2):
+            instance = Mock()
+            instance.instance_num = i
+            instance.tool_offset = i * SLOTS_PER_ACE
+            instance.inventory = [
+                {'material': '', 'color': [0, 0, 0], 'status': 'empty'}
+                for _ in range(SLOTS_PER_ACE)
+            ]
+            ACE_INSTANCES[i] = instance
+
+    def teardown_method(self):
+        ACE_INSTANCES.clear()
+
+    def _slot(self, tool, material, color, status='ready'):
+        ACE_INSTANCES[tool // SLOTS_PER_ACE].inventory[tool % SLOTS_PER_ACE] = {
+            'material': material, 'color': color, 'status': status}
+
+    def test_predicts_the_matching_spool(self):
+        self._slot(0, 'PLA', [255, 0, 0])
+        self._slot(1, 'PLA', [0, 0, 255])
+        self._slot(2, 'PLA', [255, 0, 0])
+
+        assert self.endless_spool.predict_next_tool(0) == 2
+
+    def test_agrees_with_the_runout_search(self):
+        self._slot(5, 'PETG', [1, 2, 3])
+        self._slot(6, 'PETG', [9, 9, 9])
+        self._slot(1, 'PETG', [1, 2, 3])
+
+        assert self.endless_spool.predict_next_tool(5) == 1
+        assert self.endless_spool.find_exact_match(5) == 1
+
+    def test_follows_the_configured_match_mode(self):
+        self.state["ace_endless_spool_match_mode"] = "next"
+        self._slot(0, 'PLA', [255, 0, 0])
+        self._slot(1, 'ABS', [1, 1, 1], status='loading')
+        self._slot(3, 'TPU', [2, 2, 2])
+
+        assert self.endless_spool.predict_next_tool(0) == 3
+
+    def test_no_match_returns_minus_one(self):
+        self._slot(0, 'PLA', [255, 0, 0])
+        self._slot(1, 'PETG', [255, 0, 0])
+        self._slot(2, 'unknown', [255, 0, 0])
+
+        assert self.endless_spool.predict_next_tool(0) == -1
+
+    def test_no_tool_loaded_returns_minus_one(self):
+        self._slot(1, 'PLA', [0, 0, 0])
+
+        assert self.endless_spool.predict_next_tool(-1) == -1
+
+    def test_writes_no_log_lines(self, caplog):
+        """It runs on every status poll (4 Hz), so it must not log per slot."""
+        for tool in range(2 * SLOTS_PER_ACE):
+            self._slot(tool, 'PLA', [0, 0, tool])
+
+        with caplog.at_level(logging.DEBUG):
+            assert self.endless_spool.predict_next_tool(0) == -1
+
+        assert caplog.records == []
 
 
 if __name__ == '__main__':
